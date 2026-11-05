@@ -1,5 +1,5 @@
 "use client"
-import React, { useCallback,useState, useEffect } from 'react';
+import React, { useCallback } from 'react';
 import {
   Download,
   Save,
@@ -10,65 +10,79 @@ import {
   ExternalLink,
   Info,
 } from 'lucide-react';
-import { ItemMaster, MachineShiftRow, ShiftType } from '../types';
-import { calculateEfficiency, calculateTotalBreakdown } from '../../services/storageService';
-
-
-const DRAFT_STORAGE_KEY = "shopfloor_unsaved_draft";
-
-interface ShiftDraftPayload {
-  date: string;
-  shift: string;
-  line: string;
-  rows: MachineShiftRow[];
-  updatedAt: string;
-}
+import { ItemMaster, MachineShiftRow, MasterDataState, ShiftType } from '@/types';
+import { calculateEfficiency, calculateTotalBreakdown } from '../services/storageService';
 
 
 interface DailyShiftSheetProps {
   rows: MachineShiftRow[];
-  onUpdateRow: (index: number, updatedFields: Partial<MachineShiftRow>) => void;
-  operators: string[];
-  items: ItemMaster[];
-  onSave: () => void;
-  onExportExcel: () => void;
-  hasUnsavedChanges: boolean;
-  onOpenMachineInKiosk: (machineId: string) => void;
+  masterData: MasterDataState;
+  onRowsChange: (updatedRows: MachineShiftRow[]) => void;
+  onSave: (rowsToSave: MachineShiftRow[]) => void | Promise<void>;
+  isSaving: boolean;
   selectedDate: string;
   selectedShift: ShiftType;
   selectedLine: string;
-  productionLines?: string[];
-  onSelectLine?: (line: string) => void;
+  hasUnsavedDraft: boolean;
+  onDiscardDraft?: () => void;
+  onExportExcel?: () => void;
+  onOpenMachineInKiosk?: (machineId: string) => void;
 }
 
 export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   rows,
-  onUpdateRow,
-  operators,
-  items,
+  masterData,
+  onRowsChange,
   onSave,
-  onExportExcel,
-  hasUnsavedChanges,
-  onOpenMachineInKiosk,
+  isSaving,
   selectedDate,
   selectedShift,
   selectedLine,
-  productionLines,
-  onSelectLine,
+  hasUnsavedDraft,
+  onDiscardDraft,
+  onExportExcel,
+  onOpenMachineInKiosk,
 }) => {
+  // NOTE: adjust these two lines to match your MasterDataState shape
+  const operators: string[] = ((masterData as any).operators ?? []).map((o: any) =>
+    typeof o === 'string' ? o : o.name
+  );
+  const items: ItemMaster[] = (masterData as any).items ?? [];
+  const hasUnsavedChanges = hasUnsavedDraft;
+
+  // Apply a patch to one row (single onRowsChange call -> single draft write)
+  const updateRow = useCallback(
+    (index: number, updatedFields: Partial<MachineShiftRow>) => {
+      onRowsChange(rows.map((r, i) => (i === index ? { ...r, ...updatedFields } : r)));
+    },
+    [rows, onRowsChange]
+  );
+
+  // Apply patches to many rows at once (avoids stale-closure overwrites from looping updateRow)
+  const patchRows = (
+    fn: (row: MachineShiftRow, idx: number) => Partial<MachineShiftRow> | null
+  ) => {
+    onRowsChange(
+      rows.map((row, idx) => {
+        const patch = fn(row, idx);
+        return patch ? { ...row, ...patch } : row;
+      })
+    );
+  };
+
   // Handle Item Selection which auto-populates Operation and Std Output
   const handleItemChange = useCallback(
     (index: number, itemId: string) => {
       const selected = items.find((item) => item.id === itemId);
       if (selected) {
-        onUpdateRow(index, {
+        updateRow(index, {
           itemId: selected.id,
           itemName: selected.itemName,
           operation: selected.operation,
           stdOutput: selected.stdOutput,
         });
       } else {
-        onUpdateRow(index, {
+        updateRow(index, {
           itemId: '',
           itemName: '',
           operation: '',
@@ -76,7 +90,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         });
       }
     },
-    [items, onUpdateRow]
+    [items, updateRow]
   );
 
   // Handle Breakdown Sub-column update
@@ -84,53 +98,51 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     (index: number, field: 'noDisc' | 'change' | 'power' | 'operator', val: number) => {
       const current = rows[index].breakdown || { noDisc: 0, change: 0, power: 0, operator: 0 };
       const safeVal = isNaN(val) ? 0 : Math.max(0, val);
-      onUpdateRow(index, {
+      updateRow(index, {
         breakdown: {
           ...current,
           [field]: safeVal,
         },
       });
     },
-    [rows, onUpdateRow]
+    [rows, updateRow]
   );
 
   // Quick fill remaining unassigned machines with sensible defaults
   const handleQuickFillEmpty = () => {
-    rows.forEach((row, idx) => {
-      if (!row.operatorName || !row.itemId) {
-        const op = operators[idx % operators.length];
-        const it = items[idx % items.length];
-        onUpdateRow(idx, {
-          operatorName: op,
-          itemId: it.id,
-          itemName: it.itemName,
-          operation: it.operation,
-          stdOutput: it.stdOutput,
-          actualOutput: it.stdOutput - 4,
-          rework: 1,
-          breakdown: { noDisc: 0, change: 10, power: 0, operator: 0 },
-          remarks: 'Standard production cycle logged',
-        });
-      }
+    if (!operators.length || !items.length) return;
+    patchRows((row, idx) => {
+      if (row.operatorName && row.itemId) return null;
+      const op = operators[idx % operators.length];
+      const it = items[idx % items.length];
+      return {
+        operatorName: op,
+        itemId: it.id,
+        itemName: it.itemName,
+        operation: it.operation,
+        stdOutput: it.stdOutput,
+        actualOutput: it.stdOutput - 4,
+        rework: 1,
+        breakdown: { noDisc: 0, change: 10, power: 0, operator: 0 },
+        remarks: 'Standard production cycle logged',
+      };
     });
   };
 
   // Reset current shift sheet to blank rows
   const handleClearSheet = () => {
     if (window.confirm('Clear all inputs on this shift sheet?')) {
-      rows.forEach((_, idx) => {
-        onUpdateRow(idx, {
-          operatorName: '',
-          itemId: '',
-          itemName: '',
-          operation: '',
-          stdOutput: 0,
-          actualOutput: 0,
-          rework: 0,
-          breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
-          remarks: '',
-        });
-      });
+      patchRows(() => ({
+        operatorName: '',
+        itemId: '',
+        itemName: '',
+        operation: '',
+        stdOutput: 0,
+        actualOutput: 0,
+        rework: 0,
+        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+        remarks: '',
+      }));
     }
   };
 
@@ -185,23 +197,43 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             <span className="hidden sm:inline">Clear Sheet</span>
           </button>
 
-          <button
-            onClick={onExportExcel}
-            className="px-3 py-1.5 text-xs font-semibold text-slate-800 hover:text-slate-950 bg-emerald-100 hover:bg-emerald-200/80 border border-emerald-300 rounded flex items-center gap-1.5 transition-colors shadow-2xs"
-          >
-            <Download className="w-3.5 h-3.5 text-emerald-700" />
-            <span>Export to Excel (.xlsx)</span>
-          </button>
+          {onExportExcel && (
+            <button
+              onClick={onExportExcel}
+              className="px-3 py-1.5 text-xs font-semibold text-slate-800 hover:text-slate-950 bg-emerald-100 hover:bg-emerald-200/80 border border-emerald-300 rounded flex items-center gap-1.5 transition-colors shadow-2xs"
+            >
+              <Download className="w-3.5 h-3.5 text-emerald-700" />
+              <span>Export to Excel (.xlsx)</span>
+            </button>
+          )}
+
+          {hasUnsavedDraft && onDiscardDraft && (
+            <div className="flex items-center gap-2 bg-amber-100 text-amber-900 border border-amber-300 px-3 py-1 rounded text-xs font-medium">
+              <span>Unsaved local draft</span>
+              <button
+                type="button"
+                onClick={onDiscardDraft}
+                disabled={isSaving}
+                className="underline hover:text-amber-950 ml-1 disabled:opacity-50"
+              >
+                Discard
+              </button>
+            </div>
+          )}
 
           <button
-            onClick={onSave}
-            className={`px-4 py-1.5 text-xs font-bold rounded flex items-center gap-1.5 transition-colors shadow-xs ${
+            type="button"
+            onClick={() => onSave(rows)}
+            disabled={isSaving}
+            className={`px-4 py-1.5 text-xs font-bold rounded flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-60 disabled:cursor-not-allowed ${
               hasUnsavedChanges
                 ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 ring-2 ring-amber-300 ring-offset-1'
                 : 'bg-slate-900 hover:bg-slate-800 text-white'
             }`}
           >
-            {hasUnsavedChanges ? (
+            {isSaving ? (
+              <span>Saving to Cloud...</span>
+            ) : hasUnsavedChanges ? (
               <>
                 <AlertTriangle className="w-3.5 h-3.5" />
                 <span>Save Shift Log *</span>
@@ -219,23 +251,23 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       {/* Interactive Paper Log Sheet (Grouped Table) */}
       <div className="bg-white rounded-lg border border-slate-300 shadow-xs overflow-hidden">
         <div className="overflow-x-auto max-w-full">
-          <table className="w-full text-xs text-left border-collapse select-none min-w-[1240px]">
+          <table className="w-full text-xs text-left border-collapse select-none min-w-310">
             {/* Exact Grouped Table Header */}
             <thead>
               <tr className="bg-slate-900 text-slate-100 border-b border-slate-800 text-[11px] uppercase tracking-wider font-semibold">
                 <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 text-center w-12">
                   SR. NO
                 </th>
-                <th rowSpan={2} className="px-3 py-2.5 border-r border-slate-800 min-w-[140px]">
+                <th rowSpan={2} className="px-3 py-2.5 border-r border-slate-800 min-w-35">
                   MACHINE
                 </th>
-                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-[150px]">
+                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-37.5">
                   NAME OF OPERATOR
                 </th>
-                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-[170px]">
+                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-42.5">
                   ITEM
                 </th>
-                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-[170px]">
+                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-42.5">
                   OPERATION
                 </th>
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20">
@@ -256,7 +288,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-18 bg-slate-800 text-amber-200">
                   TOTAL BD
                 </th>
-                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-[170px]">
+                <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-42.5">
                   REMARKS
                 </th>
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-24">
@@ -317,7 +349,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                     <td className="px-1.5 py-1 border-r border-slate-200">
                       <select
                         value={row.operatorName}
-                        onChange={(e) => onUpdateRow(index, { operatorName: e.target.value })}
+                        onChange={(e) => updateRow(index, { operatorName: e.target.value })}
                         className="w-full bg-transparent px-1.5 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white text-xs font-medium text-slate-900 focus:outline-none"
                       >
                         <option value="">— Select Operator —</option>
@@ -350,7 +382,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       <input
                         type="text"
                         value={row.operation}
-                        onChange={(e) => onUpdateRow(index, { operation: e.target.value })}
+                        onChange={(e) => updateRow(index, { operation: e.target.value })}
                         placeholder="e.g. OP-10 Turning"
                         className="w-full bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white text-xs text-slate-800 focus:outline-none"
                       />
@@ -363,7 +395,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         min="0"
                         value={row.stdOutput || ''}
                         onFocus={(e) => e.target.select()}
-                        onChange={(e) => onUpdateRow(index, { stdOutput: Number(e.target.value) || 0 })}
+                        onChange={(e) => updateRow(index, { stdOutput: Number(e.target.value) || 0 })}
                         className="w-16 mx-auto text-center font-mono font-semibold text-slate-700 bg-transparent px-1 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white focus:outline-none"
                       />
                     </td>
@@ -375,7 +407,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         min="0"
                         value={row.actualOutput || (row.actualOutput === 0 && hasTarget ? 0 : '')}
                         onFocus={(e) => e.target.select()}
-                        onChange={(e) => onUpdateRow(index, { actualOutput: Number(e.target.value) || 0 })}
+                        onChange={(e) => updateRow(index, { actualOutput: Number(e.target.value) || 0 })}
                         className={`w-16 mx-auto text-center font-mono font-bold px-1 py-1 rounded border ${
                           isUnderperforming
                             ? 'bg-amber-50 text-amber-900 border-amber-300'
@@ -393,7 +425,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         min="0"
                         value={row.rework || (row.rework === 0 ? 0 : '')}
                         onFocus={(e) => e.target.select()}
-                        onChange={(e) => onUpdateRow(index, { rework: Number(e.target.value) || 0 })}
+                        onChange={(e) => updateRow(index, { rework: Number(e.target.value) || 0 })}
                         className={`w-14 mx-auto text-center font-mono px-1 py-1 rounded border ${
                           row.rework > 0 ? 'bg-rose-50 text-rose-800 border-rose-200 font-bold' : 'text-slate-600 border-transparent hover:border-slate-300'
                         } focus:border-slate-800 focus:bg-white focus:outline-none`}
@@ -477,7 +509,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       <input
                         type="text"
                         value={row.remarks}
-                        onChange={(e) => onUpdateRow(index, { remarks: e.target.value })}
+                        onChange={(e) => updateRow(index, { remarks: e.target.value })}
                         placeholder="Notes / tool issues..."
                         className="w-full bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white text-xs text-slate-800 focus:outline-none"
                       />
@@ -505,7 +537,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                     {/* ACTION / KIOSK LINK */}
                     <td className="px-2 py-2 text-center">
                       <button
-                        onClick={() => onOpenMachineInKiosk(row.machineId)}
+                        onClick={() => onOpenMachineInKiosk?.(row.machineId)}
                         title={`Open ${row.machineName} in Operator Kiosk`}
                         className="p-1 text-slate-400 hover:text-slate-900 hover:bg-slate-200 rounded transition-colors"
                       >

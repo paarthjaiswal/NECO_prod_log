@@ -15,42 +15,58 @@ import {
   Sparkles,
   Info,
 } from 'lucide-react';
-import { ItemMaster, MachineMaster, MachineShiftRow, ShiftType } from '../types';
-import { calculateEfficiency, calculateTotalBreakdown } from '../../services/storageService';
+import {
+  ItemMaster,
+  MachineMaster,
+  MachineShiftRow,
+  MasterDataState,
+  ShiftType,
+} from '../types';
+import { calculateEfficiency, calculateTotalBreakdown } from '../services/storageService';
 
 interface OperatorKioskProps {
-  machines: MachineMaster[];
-  operators: string[];
-  items: ItemMaster[];
+  masterData: MasterDataState;
   rows: MachineShiftRow[];
-  selectedMachineId: string | null;
-  onSelectMachineId: (id: string | null) => void;
-  onSubmitMachineRow: (updatedRow: MachineShiftRow) => void;
   selectedDate: string;
   selectedShift: ShiftType;
   selectedLine: string;
-  productionLines?: string[];
-  onSelectLine?: (line: string) => void;
+  onSaveMachine: (updatedRow: MachineShiftRow) => void;
+  isSaving?: boolean;
+  selectedMachineId?: string | null;
+  onSelectMachineId?: (machineId: string | null) => void;
 }
 
-export const OperatorKiosk: React.FC<OperatorKioskProps> = ({
-  machines,
-  operators,
-  items,
+export function OperatorKiosk({
+  masterData,
   rows,
-  selectedMachineId,
-  onSelectMachineId,
-  onSubmitMachineRow,
   selectedDate,
   selectedShift,
   selectedLine,
-  productionLines,
-  onSelectLine,
-}) => {
-  // Current working machine row draft
+  onSaveMachine,
+  isSaving = false,
+  selectedMachineId: externalMachineId,
+  onSelectMachineId: externalOnSelectMachineId,
+}: OperatorKioskProps) {
+  const { machines, operators, items } = masterData;
+
+  // Internal state fallback if DashboardClient doesn't pass selectedMachineId
+  const [internalMachineId, setInternalMachineId] = useState<string | null>(null);
+
+  const selectedMachineId =
+    externalMachineId !== undefined ? externalMachineId : internalMachineId;
+
+  const onSelectMachineId = (machineId: string | null) => {
+    if (externalOnSelectMachineId) {
+      externalOnSelectMachineId(machineId);
+    } else {
+      setInternalMachineId(machineId);
+    }
+  };
+
   const [draft, setDraft] = useState<MachineShiftRow | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState(false);
+ 
 
   // Filter machines for current production line
   const lineMachines = machines.filter((m) => (m.line || 'Line 1') === selectedLine);
@@ -175,7 +191,7 @@ export const OperatorKiosk: React.FC<OperatorKioskProps> = ({
     }
 
     setValidationError(null);
-    onSubmitMachineRow(draft);
+    onSaveMachine(draft);
     setSaveSuccessMsg(true);
     setTimeout(() => setSaveSuccessMsg(false), 2500);
   };
@@ -276,7 +292,7 @@ export const OperatorKiosk: React.FC<OperatorKioskProps> = ({
                         <strong className="text-slate-900">{row.actualOutput} / {row.stdOutput}</strong>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-500 mt-0.5">
-                        <span className="truncate max-w-[90px]">{row.operatorName || '—'}</span>
+                        <span className="truncate max-w-22.5">{row.operatorName || '—'}</span>
                         {totalBd > 0 && (
                           <span className="text-amber-700 font-medium">BD: {totalBd}m</span>
                         )}

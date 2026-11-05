@@ -1,5 +1,5 @@
-"use client"
-import React, { useState, useMemo } from 'react';
+"use client";
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   BarChart3,
   TrendingUp,
@@ -13,23 +13,62 @@ import {
   ChevronRight,
   Search,
 } from 'lucide-react';
-import { MachineMaster, MachineShiftRow } from '../types';
-import { calculateEfficiency, calculateTotalBreakdown } from '../../services/storageService';
-import { exportHistoricalToCSV, exportShiftToExcel } from '../../services/excelExport';
+import { MachineMaster, MachineShiftRow, MasterDataState, ShiftType } from '../types';
+import { INITIAL_MACHINES } from '../data/initialData';
+import { calculateEfficiency, calculateTotalBreakdown } from '../services/storageService';
+import { exportHistoricalToCSV, exportShiftToExcel } from '../services/excelExport';
+import { getAnalyticsLogs } from '@/actions/shiftActions';
 
 interface AnalyticsPreviewProps {
-  allLogs: MachineShiftRow[];
-  machines: MachineMaster[];
+  rows: MachineShiftRow[];
+  selectedDate: string;
+  selectedShift: ShiftType;
+  selectedLine: string;
+  masterData?: MasterDataState;
 }
 
-export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({ allLogs, machines }) => {
+export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
+  rows,
+  selectedDate,
+  selectedShift,
+  selectedLine,
+  masterData,
+}) => {
+  // Use live machines from masterData if passed, otherwise fallback to INITIAL_MACHINES
+  const machines: MachineMaster[] = masterData?.machines ?? INITIAL_MACHINES;
+
+  // Start with current shift rows, then merge 30-day history from Supabase on mount
+  const [historicalLogs, setHistoricalLogs] = useState<MachineShiftRow[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+    getAnalyticsLogs(30)
+      .then((data) => {
+        if (isMounted && data) {
+          setHistoricalLogs(data);
+        }
+      })
+      .catch((err) => console.error('Failed to load analytics history:', err));
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Merge current shift rows with historical logs (deduplicated by row.id)
+  const allLogs = useMemo(() => {
+    const logMap = new Map<string, MachineShiftRow>();
+    historicalLogs.forEach((log) => logMap.set(log.id, log));
+    rows.forEach((row) => logMap.set(row.id, row)); // Latest current shift rows win
+    return Array.from(logMap.values());
+  }, [historicalLogs, rows]);
+
   // Filters
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week'>('all');
   const [shiftFilter, setShiftFilter] = useState<string>('all');
   const [lineFilter, setLineFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [hoveredMachineId, setHoveredMachineId] = useState<string | null>(null);
-
   // Compute filtered logs
   const filteredLogs = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -390,7 +429,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({ allLogs, mac
 
           {/* SVG & HTML Interactive Bar Chart */}
           <div className="pt-2">
-            <div className="space-y-2 max-h-[460px] overflow-y-auto pr-2">
+            <div className="space-y-2 max-h-115 overflow-y-auto pr-2">
               {machineMetrics.map((m, idx) => {
                 const maxScale = Math.max(220, ...machineMetrics.map((item) => Math.max(item.std, item.act)));
                 const actWidth = Math.min(100, (m.act / maxScale) * 100);
@@ -711,3 +750,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({ allLogs, mac
     </div>
   );
 };
+
+
+export default AnalyticsPreview;

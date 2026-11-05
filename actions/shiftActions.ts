@@ -8,7 +8,7 @@ import {
   ItemMaster,
   MasterDataState,
   ShiftType,
-} from "@/app/types/index";
+} from "@/types/index";
 
 // ============================================================================
 // DATABASE ROW INTERFACES (Matches your Supabase SQL Schema)

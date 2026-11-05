@@ -1,4 +1,4 @@
-import { BreakdownMinutes, MachineShiftRow } from "@/app/types";
+import { BreakdownMinutes, MachineShiftRow } from "@/types";
 
 /**
  * Sums the 4 downtime categories (NO/DISC, CHANGE, POWER, OPERATOR).

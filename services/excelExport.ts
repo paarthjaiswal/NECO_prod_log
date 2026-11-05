@@ -1,4 +1,4 @@
-import { MachineShiftRow } from "@/app/types";
+import { MachineShiftRow } from "@/types";
 
 /**
  * Triggers a server-generated .xlsx download for the active shift

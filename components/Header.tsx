@@ -16,6 +16,7 @@ import {
 import { ActiveTab, ShiftType } from '../types';
 import { SHIFTS } from '../data/initialData';
 
+// Inside components/Header.tsx
 interface HeaderProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
@@ -25,11 +26,11 @@ interface HeaderProps {
   setSelectedShift: (shift: ShiftType) => void;
   selectedLine: string;
   setSelectedLine: (line: string) => void;
-  productionLines: string[];
-  onResetDemo: () => void;
-  onExportExcel: () => void;
-  hasUnsavedChanges: boolean;
-  onSaveShiftLog: () => void;
+  productionLines: string[];          // Required for Line 1 / 2 / 3 dropdown
+  hasUnsavedChanges: boolean;         // Required for Save button indicator
+  onSaveShiftLog: () => void;         // Required to trigger saveShiftSheetRows
+  onExportExcel: () => void;          // Required to trigger Excel export
+  onResetDemo?: () => void;           // <-- Add '?' to make this optional!
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -50,7 +51,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-40 shadow-sm">
       {/* Primary Top Bar */}
-      <div className={`transition-all ${activeTab === 'sheet' ? 'w-full px-[5px] sm:px-[10px]' : 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8'}`}>
+      <div className={`transition-all ${activeTab === 'sheet' ? 'w-full px-1.25 sm:px-2.5' : 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8'}`}>
         <div className="flex items-center justify-between h-16 gap-4">
           {/* Zone 1: Wordmark */}
           <div className="flex items-center gap-3 shrink-0">
@@ -159,7 +160,7 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Secondary Context Control Bar (Shown on Sheet & Kiosk views) */}
       {(activeTab === 'sheet' || activeTab === 'kiosk') && (
-        <div className={`bg-slate-950 border-t border-slate-800/80 py-2 ${activeTab === 'sheet' ? 'w-full px-[5px] sm:px-[10px]' : 'px-4 sm:px-6 lg:px-8'}`}>
+        <div className={`bg-slate-950 border-t border-slate-800/80 py-2 ${activeTab === 'sheet' ? 'w-full px-1.25 sm:px-2.5' : 'px-4 sm:px-6 lg:px-8'}`}>
           <div className={`${activeTab === 'sheet' ? 'w-full' : 'max-w-7xl mx-auto'} flex flex-wrap items-center justify-between gap-3 text-xs`}>
             <div className="flex items-center gap-4 flex-wrap">
               {/* Date Selector */}
@@ -235,3 +236,5 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+
+export default Header;

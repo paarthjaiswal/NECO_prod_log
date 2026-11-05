@@ -563,3 +563,5 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
     </div>
   );
 };
+
+export default MasterDataSettings;
