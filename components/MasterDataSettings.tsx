@@ -1,39 +1,40 @@
-"use client"
+"use client";
 import React, { useState } from 'react';
 import {
   Sliders,
   Plus,
   Trash2,
-  Edit2,
-  Save,
   RotateCcw,
   CheckCircle2,
   User,
   Factory,
   Package,
-  Layers,
 } from 'lucide-react';
-import { ItemMaster, MachineMaster } from '../types';
+import { ItemMaster, MachineMaster, MasterDataState } from '@/types';
+import {
+  upsertMachineMaster,
+  disableMachineMaster,
+  upsertItemMaster,
+  deleteItemMaster,
+  addOperatorMaster,
+  removeOperatorMaster,
+} from '@/actions/shiftActions';
 
 interface MasterDataSettingsProps {
-  machines: MachineMaster[];
-  onUpdateMachines: (machines: MachineMaster[]) => void;
-  operators: string[];
-  onUpdateOperators: (operators: string[]) => void;
-  items: ItemMaster[];
-  onUpdateItems: (items: ItemMaster[]) => void;
-  onResetAllDemoData: () => void;
+  masterData: MasterDataState;
+  onRefreshMasterData: () => Promise<void> | void;
+  onResetAllDemoData?: () => void;
 }
 
 export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
-  machines,
-  onUpdateMachines,
-  operators,
-  onUpdateOperators,
-  items,
-  onUpdateItems,
+  masterData,
+  onRefreshMasterData,
   onResetAllDemoData,
 }) => {
+  // Unpack masterData so all existing JSX tables below work untouched
+  const machines = masterData.machines.filter((m) => m.status !== 'idle');
+  const { operators, items } = masterData;
+
   const [subTab, setSubTab] = useState<'machines' | 'operators' | 'items'>('machines');
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
@@ -53,73 +54,95 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   const [newOperation, setNewOperation] = useState('');
   const [newStdOutput, setNewStdOutput] = useState<number>(100);
 
-  // Editing state
-  const [editingItemId, setEditingItemId] = useState<string | null>(null);
-
   const triggerNotice = (msg: string) => {
     setSavedNotice(msg);
     setTimeout(() => setSavedNotice(null), 3000);
   };
 
-  // --- Machine Handlers ---
-  const handleAddMachine = (e: React.FormEvent) => {
+  // --- Machine Handlers (Backed by Supabase) ---
+  const handleAddMachine = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMachineName.trim()) return;
 
+    const nextNumber = masterData.machines.length + 1;
     const newMachine: MachineMaster = {
-      id: `m_${Date.now()}`,
+      id: `m${Date.now()}`,
       name: newMachineName.trim().toUpperCase(),
-      code: newMachineCode.trim().toUpperCase() || `MC-${machines.length + 1}`,
+      code: newMachineCode.trim().toUpperCase() || `MC-${nextNumber}`,
       line: newMachineLine,
       type: newMachineType.trim(),
       status: 'active',
     };
 
-    onUpdateMachines([...machines, newMachine]);
-    setNewMachineName('');
-    setNewMachineCode('');
-    triggerNotice(`Added machine "${newMachine.name}" to plant directory.`);
+    try {
+      await upsertMachineMaster(newMachine, nextNumber);
+      await onRefreshMasterData();
+      setNewMachineName('');
+      setNewMachineCode('');
+      triggerNotice(`Added machine "${newMachine.name}" to plant directory.`);
+    } catch (err) {
+      console.error('Failed to add machine:', err);
+      alert('Failed to save machine to database.');
+    }
   };
 
-  const handleDeleteMachine = (id: string, name: string) => {
+  const handleDeleteMachine = async (id: string, name: string) => {
     if (machines.length <= 1) {
       alert('At least one machine must remain in the factory matrix.');
       return;
     }
     if (window.confirm(`Delete machine "${name}" from master data?`)) {
-      onUpdateMachines(machines.filter((m) => m.id !== id));
-      triggerNotice(`Machine "${name}" removed.`);
+      try {
+        await disableMachineMaster(id);
+        await onRefreshMasterData();
+        triggerNotice(`Machine "${name}" removed.`);
+      } catch (err) {
+        console.error('Failed to disable machine:', err);
+        alert('Failed to remove machine.');
+      }
     }
   };
 
-  // --- Operator Handlers ---
-  const handleAddOperator = (e: React.FormEvent) => {
+  // --- Operator Handlers (Backed by Supabase) ---
+  const handleAddOperator = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newOperatorName.trim()) return;
-    if (operators.includes(newOperatorName.trim())) {
+    const cleanName = newOperatorName.trim();
+    if (!cleanName) return;
+    if (operators.includes(cleanName)) {
       alert('This operator name already exists.');
       return;
     }
 
-    const updated = [...operators, newOperatorName.trim()];
-    onUpdateOperators(updated);
-    setNewOperatorName('');
-    triggerNotice(`Operator "${newOperatorName.trim()}" registered.`);
+    try {
+      await addOperatorMaster(cleanName);
+      await onRefreshMasterData();
+      setNewOperatorName('');
+      triggerNotice(`Operator "${cleanName}" registered.`);
+    } catch (err) {
+      console.error('Failed to add operator:', err);
+      alert('Failed to save operator to database.');
+    }
   };
 
-  const handleDeleteOperator = (opName: string) => {
+  const handleDeleteOperator = async (opName: string) => {
     if (operators.length <= 1) {
       alert('At least one operator must remain in master records.');
       return;
     }
     if (window.confirm(`Remove operator "${opName}"?`)) {
-      onUpdateOperators(operators.filter((o) => o !== opName));
-      triggerNotice(`Operator "${opName}" deleted.`);
+      try {
+        await removeOperatorMaster(opName);
+        await onRefreshMasterData();
+        triggerNotice(`Operator "${opName}" deleted.`);
+      } catch (err) {
+        console.error('Failed to remove operator:', err);
+        alert('Failed to remove operator.');
+      }
     }
   };
 
-  // --- Item & Operation Handlers ---
-  const handleAddItem = (e: React.FormEvent) => {
+  // --- Item & Operation Handlers (Backed by Supabase) ---
+  const handleAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newItemName.trim() || !newOperation.trim()) return;
 
@@ -131,28 +154,48 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       stdOutput: Number(newStdOutput) || 50,
     };
 
-    onUpdateItems([...items, newItem]);
-    setNewItemName('');
-    setNewItemCode('');
-    setNewOperation('');
-    setNewStdOutput(100);
-    triggerNotice(`Component "${newItem.itemName}" registered.`);
+    try {
+      await upsertItemMaster(newItem);
+      await onRefreshMasterData();
+      setNewItemName('');
+      setNewItemCode('');
+      setNewOperation('');
+      setNewStdOutput(100);
+      triggerNotice(`Component "${newItem.itemName}" registered.`);
+    } catch (err) {
+      console.error('Failed to add item:', err);
+      alert('Failed to save component to database.');
+    }
   };
 
-  const handleUpdateItemStd = (id: string, stdOutput: number) => {
-    const updated = items.map((it) => (it.id === id ? { ...it, stdOutput } : it));
-    onUpdateItems(updated);
-    triggerNotice('Standard output quota updated.');
+  const handleUpdateItemStd = async (id: string, stdOutput: number) => {
+    const existingItem = items.find((it) => it.id === id);
+    if (!existingItem || existingItem.stdOutput === stdOutput) return;
+
+    try {
+      await upsertItemMaster({ ...existingItem, stdOutput });
+      await onRefreshMasterData();
+      triggerNotice('Standard output quota updated.');
+    } catch (err) {
+      console.error('Failed to update item quota:', err);
+      alert('Failed to update standard output.');
+    }
   };
 
-  const handleDeleteItem = (id: string, name: string) => {
+  const handleDeleteItem = async (id: string, name: string) => {
     if (items.length <= 1) {
       alert('At least one item must remain in master directory.');
       return;
     }
     if (window.confirm(`Delete part item "${name}"?`)) {
-      onUpdateItems(items.filter((it) => it.id !== id));
-      triggerNotice(`Item "${name}" removed.`);
+      try {
+        await deleteItemMaster(id);
+        await onRefreshMasterData();
+        triggerNotice(`Item "${name}" removed.`);
+      } catch (err) {
+        console.error('Failed to delete item:', err);
+        alert('Failed to delete item.');
+      }
     }
   };
 
@@ -170,14 +213,15 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
           </p>
         </div>
 
-        {/* Global Reset Demo Data Button */}
-        <button
-          onClick={onResetAllDemoData}
-          className="px-3 py-1.5 text-xs text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded font-semibold flex items-center gap-1.5 transition-colors"
-        >
-          <RotateCcw className="w-3.5 h-3.5" />
-          <span>Reset All Demo Data to Defaults</span>
-        </button>
+        {onResetAllDemoData && (
+          <button
+            onClick={onResetAllDemoData}
+            className="px-3 py-1.5 text-xs text-rose-700 hover:text-rose-900 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded font-semibold flex items-center gap-1.5 transition-colors"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Reset All Demo Data to Defaults</span>
+          </button>
+        )}
       </div>
 
       {/* Save Notification */}
