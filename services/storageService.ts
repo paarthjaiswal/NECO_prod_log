@@ -1,4 +1,9 @@
-import { BreakdownMinutes, MachineShiftRow } from "@/types";
+import {
+  ItemMaster,
+  BreakdownMinutes,
+  MachineShiftRow,
+  MachineItemCycleTime,
+} from "@/types";
 
 /**
  * Sums the 4 downtime categories (NO/DISC, CHANGE, POWER, OPERATOR).
@@ -39,4 +44,47 @@ export function calculateEfficiency(
 
   if (std <= 0) return 0;
   return Math.round((actual / std) * 100);
+}
+
+/**
+ * Looks up (machineId + itemId) in machine_item_cycle_times first.
+ * Falls back to ItemMaster if no machine-specific override exists yet.
+ */
+export function resolveMachineItemTarget(
+  machineId: string,
+  itemId: string,
+  items: ItemMaster[],
+  cycleTimes: MachineItemCycleTime[] = []
+) {
+  const baseItem = items.find((it) => it.id === itemId);
+  if (!baseItem) {
+    return { itemName: "", operation: "", cycleTime: 0, stdOutput: 0 };
+  }
+
+  // Check if this specific Machine + Item has a custom cycle time configured
+  const specificMatch = cycleTimes.find(
+    (ct) => ct.machineId === machineId && ct.itemId === itemId
+  );
+
+  return {
+    itemName: baseItem.itemName,
+    operation: specificMatch?.operation || baseItem.operation,
+    cycleTime: specificMatch ? Number(specificMatch.cycleTime) : 0,
+    stdOutput:
+      specificMatch && specificMatch.stdOutput > 0
+        ? Number(specificMatch.stdOutput)
+        : Number(baseItem.stdOutput),
+  };
+}
+
+/**
+ * Calculates live Downtime % against the row's totalWorkingMinutes (default 1350)
+ * so the UI matches PostgreSQL's GENERATED ALWAYS columns in real time.
+ */
+export function calculateDowntimePct(
+  minutes: number,
+  totalWorkingMinutes: number = 1350
+): number {
+  const denom = totalWorkingMinutes > 0 ? totalWorkingMinutes : 1350;
+  return Number(((Number(minutes || 0) / denom) * 100).toFixed(2));
 }

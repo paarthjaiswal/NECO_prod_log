@@ -1,4 +1,40 @@
-export type ShiftType = 'Shift A (6AM-2PM)' | 'Shift B (2PM-10PM)' | 'Shift C (10PM-6AM)';
+// Allow dynamic shift names from public.shifts while keeping autocomplete for defaults
+export type ShiftType =
+  | 'Shift A (6AM-2PM)'
+  | 'Shift B (2PM-10PM)'
+  | 'Shift C (10PM-6AM)'
+  | (string & {});
+
+export interface ProductionLineMaster {
+  id: string;                  // e.g. 'line_1'
+  name: string;                // e.g. 'Line 1'
+  description?: string;
+  dailyWorkingMinutes: number; // Default 1350
+  isActive: boolean;
+  sortOrder: number;
+}
+
+export interface ShiftMaster {
+  id: string;                     // e.g. 'shift_a'
+  shiftCode: string;              // e.g. 'Shift A'
+  displayName: ShiftType;         // e.g. 'Shift A (6AM-2PM)'
+  startTime: string;              // e.g. '06:00:00'
+  endTime: string;                // e.g. '14:00:00'
+  shiftWorkingMinutes: number;    // Default 450
+  totalWorkingMinutesRef: number; // Default 1350
+  isActive: boolean;
+  sortOrder: number;
+}
+
+export interface MachineItemCycleTime {
+  id?: number;
+  machineId: string;
+  itemId: string;
+  operation: string;
+  cycleTime: number; // Time to produce 1 unit
+  stdOutput: number; // Specific target output for this Machine + Item + Operation
+  isActive?: boolean;
+}
 
 export interface ItemMaster {
   id: string;
@@ -9,28 +45,40 @@ export interface ItemMaster {
 }
 
 export interface BreakdownMinutes {
-  noDisc: number;   // NO/DISC: Material / Disc shortage
-  change: number;   // CHANGE: Tool change / setup
-  power: number;    // POWER: Power cut / electrical
-  operator: number; // OPERATOR: Absenteeism / operator delay
+  noDisc: number;
+  change: number;
+  power: number;
+  operator: number;
+}
+
+export interface BreakdownPercentages {
+  noDiscPct: number;
+  changePct: number;
+  powerPct: number;
+  operatorPct: number;
+  totalBdMinutes: number;
+  totalBdPct: number;
 }
 
 export interface MachineShiftRow {
-  id: string; // unique row id (e.g., date_shift_line_machineId)
-  date: string; // YYYY-MM-DD
+  id: string;
+  date: string;
   shift: ShiftType;
-  line: string; // e.g. 'Line 1', 'Line 2', 'Line 3'
-  srNo: number; // 1 to 16
+  line: string;
+  srNo: number;
   machineId: string;
   machineName: string;
   operatorName: string;
   itemId: string;
   itemName: string;
   operation: string;
+  cycleTime: number;           // NEW: Snapshotted cycle time
+  totalWorkingMinutes: number; // NEW: Snapshotted working time (default 1350)
   stdOutput: number;
   actualOutput: number;
   rework: number;
   breakdown: BreakdownMinutes;
+  breakdownPct?: BreakdownPercentages; // NEW: Read-only generated % from Postgres
   remarks: string;
   updatedAt?: string;
 }
@@ -48,6 +96,9 @@ export interface MasterDataState {
   machines: MachineMaster[];
   operators: string[];
   items: ItemMaster[];
+  lines?: ProductionLineMaster[];           // NEW: Dynamic lines from DB
+  shifts?: ShiftMaster[];                   // NEW: Dynamic shifts from DB
+  cycleTimes?: MachineItemCycleTime[];      // NEW: M:N cycle time lookup array
 }
 
 export type ActiveTab = 'sheet' | 'kiosk' | 'analytics' | 'settings';

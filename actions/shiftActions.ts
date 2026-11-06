@@ -8,10 +8,13 @@ import {
   ItemMaster,
   MasterDataState,
   ShiftType,
-} from "@/types/index";
+  ProductionLineMaster,
+  ShiftMaster,
+  MachineItemCycleTime,
+} from "@/types";
 
 // ============================================================================
-// DATABASE ROW INTERFACES (Matches your Supabase SQL Schema)
+// DATABASE ROW INTERFACES (Matches your upgraded Supabase SQL Schema)
 // ============================================================================
 
 export interface DbShiftLogRow {
@@ -26,6 +29,8 @@ export interface DbShiftLogRow {
   item_id: string | null;
   item_name: string | null;
   operation: string | null;
+  cycle_time: number | null;
+  total_working_minutes: number | null;
   std_output: number | null;
   actual_output: number | null;
   rework: number | null;
@@ -33,6 +38,13 @@ export interface DbShiftLogRow {
   bd_change: number | null;
   bd_power: number | null;
   bd_operator: number | null;
+  // Read-only PostgreSQL GENERATED ALWAYS columns (present on SELECT, excluded on UPSERT)
+  total_bd_minutes?: number | null;
+  bd_no_disc_pct?: number | null;
+  bd_change_pct?: number | null;
+  bd_power_pct?: number | null;
+  bd_operator_pct?: number | null;
+  total_bd_pct?: number | null;
   remarks: string | null;
   updated_at?: string | null;
 }
@@ -60,13 +72,54 @@ export interface DbItemRow {
 export interface DbOperatorRow {
   id?: string;
   name: string;
+  is_active?: boolean;
+}
+
+export interface DbProductionLineRow {
+  id: string;
+  name: string;
+  description: string | null;
+  daily_working_minutes: number;
+  is_active: boolean;
+  sort_order: number;
+}
+
+export interface DbShiftRow {
+  id: string;
+  shift_code: string;
+  display_name: string;
+  start_time: string;
+  end_time: string;
+  shift_working_minutes: number;
+  total_working_minutes_ref: number;
+  is_active: boolean;
+  sort_order: number;
+}
+
+export interface DbCycleTimeRow {
+  id: number;
+  machine_id: string;
+  item_id: string;
+  operation: string;
+  cycle_time: number;
+  std_output: number;
+  is_active: boolean;
 }
 
 // ============================================================================
-// STEP 2: INTERNAL DATA TRANSLATORS (SQL <-> UI MAPPERS)
+// STEP 2A & 2B: INTERNAL DATA TRANSLATORS (SQL <-> UI MAPPERS)
 // ============================================================================
 
 function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
+  const totalWorking = Number(dbRow.total_working_minutes ?? 1350);
+  const noDisc = Number(dbRow.bd_no_disc ?? 0);
+  const change = Number(dbRow.bd_change ?? 0);
+  const power = Number(dbRow.bd_power ?? 0);
+  const operator = Number(dbRow.bd_operator ?? 0);
+  const totalBd = Number(
+    dbRow.total_bd_minutes ?? noDisc + change + power + operator
+  );
+
   return {
     id: dbRow.id,
     date: dbRow.log_date,
@@ -79,21 +132,35 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
     itemId: dbRow.item_id ?? "",
     itemName: dbRow.item_name ?? "",
     operation: dbRow.operation ?? "",
+    cycleTime: Number(dbRow.cycle_time ?? 0),
+    totalWorkingMinutes: totalWorking,
     stdOutput: Number(dbRow.std_output ?? 0),
     actualOutput: Number(dbRow.actual_output ?? 0),
     rework: Number(dbRow.rework ?? 0),
     breakdown: {
-      noDisc: Number(dbRow.bd_no_disc ?? 0),
-      change: Number(dbRow.bd_change ?? 0),
-      power: Number(dbRow.bd_power ?? 0),
-      operator: Number(dbRow.bd_operator ?? 0),
+      noDisc,
+      change,
+      power,
+      operator,
+    },
+    breakdownPct: {
+      noDiscPct: Number(dbRow.bd_no_disc_pct ?? 0),
+      changePct: Number(dbRow.bd_change_pct ?? 0),
+      powerPct: Number(dbRow.bd_power_pct ?? 0),
+      operatorPct: Number(dbRow.bd_operator_pct ?? 0),
+      totalBdMinutes: totalBd,
+      totalBdPct: Number(dbRow.total_bd_pct ?? 0),
     },
     remarks: dbRow.remarks ?? "",
     updatedAt: dbRow.updated_at ?? undefined,
   };
 }
 
-function mapUiRowToDbRow(uiRow: MachineShiftRow): DbShiftLogRow {
+/**
+ * CRITICAL: Never include total_bd_minutes or bd_*_pct in the write payload
+ * because they are GENERATED ALWAYS AS ... STORED columns in PostgreSQL.
+ */
+function mapUiRowToDbRow(uiRow: MachineShiftRow) {
   return {
     id:
       uiRow.id ||
@@ -108,6 +175,8 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow): DbShiftLogRow {
     item_id: uiRow.itemId?.trim() ?? "",
     item_name: uiRow.itemName?.trim() ?? "",
     operation: uiRow.operation?.trim() ?? "",
+    cycle_time: Number(uiRow.cycleTime) || 0,
+    total_working_minutes: Number(uiRow.totalWorkingMinutes) || 1350,
     std_output: Number(uiRow.stdOutput) || 0,
     actual_output: Number(uiRow.actualOutput) || 0,
     rework: Number(uiRow.rework) || 0,
@@ -141,12 +210,50 @@ function mapDbItemToUi(dbItem: DbItemRow): ItemMaster {
   };
 }
 
+function mapDbLineToUi(dbLine: DbProductionLineRow): ProductionLineMaster {
+  return {
+    id: dbLine.id,
+    name: dbLine.name,
+    description: dbLine.description ?? "",
+    dailyWorkingMinutes: Number(dbLine.daily_working_minutes ?? 1350),
+    isActive: Boolean(dbLine.is_active),
+    sortOrder: Number(dbLine.sort_order ?? 0),
+  };
+}
+
+function mapDbShiftToUi(dbShift: DbShiftRow): ShiftMaster {
+  return {
+    id: dbShift.id,
+    shiftCode: dbShift.shift_code,
+    displayName: dbShift.display_name as ShiftType,
+    startTime: dbShift.start_time,
+    endTime: dbShift.end_time,
+    shiftWorkingMinutes: Number(dbShift.shift_working_minutes ?? 450),
+    totalWorkingMinutesRef: Number(dbShift.total_working_minutes_ref ?? 1350),
+    isActive: Boolean(dbShift.is_active),
+    sortOrder: Number(dbShift.sort_order ?? 0),
+  };
+}
+
+function mapDbCycleTimeToUi(dbCt: DbCycleTimeRow): MachineItemCycleTime {
+  return {
+    id: dbCt.id,
+    machineId: dbCt.machine_id,
+    itemId: dbCt.item_id,
+    operation: dbCt.operation,
+    cycleTime: Number(dbCt.cycle_time ?? 0),
+    stdOutput: Number(dbCt.std_output ?? 0),
+    isActive: Boolean(dbCt.is_active),
+  };
+}
+
 function hydrateShiftSheetRows(
   sortedLineMachines: DbMachineRow[],
   savedDbLogs: DbShiftLogRow[],
   date: string,
   shift: ShiftType,
-  line: string
+  line: string,
+  lineWorkingMinutes: number = 1350
 ): MachineShiftRow[] {
   const savedLogMap = new Map<string, DbShiftLogRow>(
     savedDbLogs
@@ -159,7 +266,7 @@ function hydrateShiftSheetRows(
     if (existingLog) {
       return {
         ...mapDbRowToUiRow(existingLog),
-        srNo: index + 1
+        srNo: index + 1,
       };
     }
 
@@ -175,6 +282,8 @@ function hydrateShiftSheetRows(
       itemId: "",
       itemName: "",
       operation: "",
+      cycleTime: 0,
+      totalWorkingMinutes: lineWorkingMinutes,
       stdOutput: 0,
       actualOutput: 0,
       rework: 0,
@@ -184,23 +293,38 @@ function hydrateShiftSheetRows(
         power: 0,
         operator: 0,
       },
+      breakdownPct: {
+        noDiscPct: 0,
+        changePct: 0,
+        powerPct: 0,
+        operatorPct: 0,
+        totalBdMinutes: 0,
+        totalBdPct: 0,
+      },
       remarks: "",
     };
   });
 }
 
 // ============================================================================
-// STEP 3: THE 5 CORE SERVER ACTIONS (Replaces storageService.ts)
+// STEP 2B: CORE SERVER ACTIONS (Updated for Lines, Shifts & Cycle Times)
 // ============================================================================
 
 /**
- * ACTION 1: Fetch Master Data in Parallel
- * Fetches machines (ordered by sort_order), operators, and items simultaneously.
+ * ACTION 1: Fetch All Master Data in Parallel
+ * Fetches machines, operators, items, production_lines, shifts, and cycle_times.
  */
 export async function getMasterData(): Promise<MasterDataState> {
   const supabase = createAdminClient();
 
- const [machinesRes, operatorsRes, itemsRes] = await Promise.all([
+  const [
+    machinesRes,
+    operatorsRes,
+    itemsRes,
+    linesRes,
+    shiftsRes,
+    cycleTimesRes,
+  ] = await Promise.all([
     supabase
       .from("machines")
       .select("*")
@@ -208,9 +332,23 @@ export async function getMasterData(): Promise<MasterDataState> {
     supabase
       .from("operators")
       .select("*")
-      .eq("is_active", true) // <-- Add this so removed operators stay hidden
+      .eq("is_active", true)
       .order("name", { ascending: true }),
     supabase.from("items").select("*").order("item_code", { ascending: true }),
+    supabase
+      .from("production_lines")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true }),
+    supabase
+      .from("shifts")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true }),
+    supabase
+      .from("machine_item_cycle_times")
+      .select("*")
+      .eq("is_active", true),
   ]);
 
   if (machinesRes.error) throw new Error(machinesRes.error.message);
@@ -221,12 +359,20 @@ export async function getMasterData(): Promise<MasterDataState> {
     machines: (machinesRes.data as DbMachineRow[]).map(mapDbMachineToUi),
     operators: (operatorsRes.data as DbOperatorRow[]).map((op) => op.name),
     items: (itemsRes.data as DbItemRow[]).map(mapDbItemToUi),
+    lines: linesRes.data
+      ? (linesRes.data as DbProductionLineRow[]).map(mapDbLineToUi)
+      : [],
+    shifts: shiftsRes.data
+      ? (shiftsRes.data as DbShiftRow[]).map(mapDbShiftToUi)
+      : [],
+    cycleTimes: cycleTimesRes.data
+      ? (cycleTimesRes.data as DbCycleTimeRow[]).map(mapDbCycleTimeToUi)
+      : [],
   };
 }
 
 /**
- * ACTION 2: Fetch Active Shift Rows (with Empty Shift Auto-Hydration)
- * Queries only the selected Date + Shift + Line and merges with active line machines.
+ * ACTION 2: Fetch Active Shift Rows (with Line Working Minutes & Auto-Hydration)
  */
 export async function getShiftSheetRows(
   date: string,
@@ -235,7 +381,7 @@ export async function getShiftSheetRows(
 ): Promise<MachineShiftRow[]> {
   const supabase = createAdminClient();
 
-  const [machinesRes, logsRes] = await Promise.all([
+  const [machinesRes, logsRes, lineConfigRes] = await Promise.all([
     supabase
       .from("machines")
       .select("*")
@@ -249,34 +395,35 @@ export async function getShiftSheetRows(
       .eq("shift", shift)
       .eq("line", line)
       .order("sr_no", { ascending: true }),
+    supabase
+      .from("production_lines")
+      .select("daily_working_minutes")
+      .eq("name", line)
+      .maybeSingle(),
   ]);
 
   if (machinesRes.error) throw new Error(machinesRes.error.message);
   if (logsRes.error) throw new Error(logsRes.error.message);
+
+  const lineWorkingMinutes = Number(
+    lineConfigRes.data?.daily_working_minutes ?? 1350
+  );
 
   return hydrateShiftSheetRows(
     machinesRes.data as DbMachineRow[],
     logsRes.data as DbShiftLogRow[],
     date,
     shift,
-    line
+    line,
+    lineWorkingMinutes
   );
-}
-
-export interface SaveShiftResult {
-  success: boolean;
-  count: number;
-  rows?: MachineShiftRow[];
 }
 
 /**
  * ACTION 3: Batch Save Shift Sheet (DailyShiftSheet.tsx)
- * Runs a single bulk upsert for all machines on the active line.
  */
-export async function saveShiftSheetRows(
-  rows: MachineShiftRow[]
-): Promise<SaveShiftResult> {
-  if (!rows || rows.length === 0) return { success: true, count: 0 };
+export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
+  if (!rows || rows.length === 0) return { success: true, count: 0, rows: [] };
 
   const supabase = createAdminClient();
   const dbPayloads = rows.map(mapUiRowToDbRow);
@@ -300,7 +447,6 @@ export async function saveShiftSheetRows(
 
 /**
  * ACTION 4: Single Machine Kiosk Save (OperatorKiosk.tsx)
- * Upserts a single machine row without touching other machines on the line.
  */
 export async function updateSingleMachineLog(row: MachineShiftRow) {
   const supabase = createAdminClient();
@@ -323,17 +469,15 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
   };
 }
 
-/**
- * ACTION 5: Master Data CRUD (MasterDataSettings.tsx)
- * Uses soft-disable (status = 'idle') on machines to protect historical foreign keys.
- */
+// ============================================================================
+// STEP 2C: MASTER DATA CRUD & ANALYTICS ACTIONS
+// ============================================================================
+
 export async function upsertMachineMaster(
   machine: MachineMaster,
   sortOrder?: number
 ) {
   const supabase = createAdminClient();
-
- // Extract numeric ID (e.g. 'm31' -> 31) so new machines go to the bottom, never row 0
   const fallbackSortOrder = parseInt(machine.id.replace(/\D/g, ""), 10) || 999;
 
   const payload: Partial<DbMachineRow> = {
@@ -361,7 +505,6 @@ export async function upsertMachineMaster(
 export async function disableMachineMaster(machineId: string) {
   const supabase = createAdminClient();
 
-  // Soft-delete: sets status to 'idle' instead of DELETE so shift_logs foreign keys never break
   const { error } = await supabase
     .from("machines")
     .update({ status: "idle" })
@@ -396,19 +539,27 @@ export async function upsertItemMaster(item: ItemMaster) {
   return mapDbItemToUi(data as DbItemRow);
 }
 
+export async function deleteItemMaster(itemId: string) {
+  const supabase = createAdminClient();
+  const { error } = await supabase.from("items").delete().eq("id", itemId);
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/");
+  return { success: true };
+}
+
 export async function addOperatorMaster(operatorName: string) {
   const supabase = createAdminClient();
   const cleanName = operatorName.trim();
 
   const { error } = await supabase
     .from("operators")
-    .upsert({ name: cleanName }, { onConflict: "name" });
+    .upsert({ name: cleanName, is_active: true }, { onConflict: "name" });
 
   if (error) throw new Error(error.message);
   revalidatePath("/");
   return { success: true, name: cleanName };
 }
-
 
 export async function removeOperatorMaster(operatorName: string) {
   const supabase = createAdminClient();
@@ -422,20 +573,82 @@ export async function removeOperatorMaster(operatorName: string) {
   return { success: true };
 }
 
-export async function deleteItemMaster(itemId: string) {
+export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
   const supabase = createAdminClient();
-  const { error } = await supabase.from("items").delete().eq("id", itemId);
+  const { error } = await supabase.from("machine_item_cycle_times").upsert(
+    {
+      machine_id: entry.machineId,
+      item_id: entry.itemId,
+      operation: entry.operation.trim(),
+      cycle_time: Number(entry.cycleTime) || 0,
+      std_output: Number(entry.stdOutput) || 0,
+      is_active: true,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "machine_id,item_id,operation" }
+  );
 
   if (error) throw new Error(error.message);
   revalidatePath("/");
   return { success: true };
 }
 
-/**
- * ACTION 6: On-Demand Historical Logs for AnalyticsPreview.tsx
- * Only called when the user opens the 'analytics' tab (keeps shop-floor PC RAM near zero).
- */
-export async function getAnalyticsLogs(daysBack: number = 30): Promise<MachineShiftRow[]> {
+export async function deleteMachineItemCycleTime(id: number) {
+  const supabase = createAdminClient();
+  const { error } = await supabase
+    .from("machine_item_cycle_times")
+    .delete()
+    .eq("id", id);
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/");
+  return { success: true };
+}
+
+export async function upsertProductionLine(line: ProductionLineMaster) {
+  const supabase = createAdminClient();
+  const { error } = await supabase.from("production_lines").upsert(
+    {
+      id: line.id,
+      name: line.name.trim(),
+      description: line.description ?? "",
+      daily_working_minutes: Number(line.dailyWorkingMinutes) || 1350,
+      is_active: line.isActive ?? true,
+      sort_order: line.sortOrder ?? 99,
+    },
+    { onConflict: "id" }
+  );
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/");
+  return { success: true };
+}
+
+export async function upsertShiftMaster(shift: ShiftMaster) {
+  const supabase = createAdminClient();
+  const { error } = await supabase.from("shifts").upsert(
+    {
+      id: shift.id,
+      shift_code: shift.shiftCode.trim(),
+      display_name: shift.displayName.trim(),
+      start_time: shift.startTime,
+      end_time: shift.endTime,
+      shift_working_minutes: Number(shift.shiftWorkingMinutes) || 450,
+      total_working_minutes_ref: Number(shift.totalWorkingMinutesRef) || 1350,
+      is_active: shift.isActive ?? true,
+      sort_order: shift.sortOrder ?? 99,
+    },
+    { onConflict: "id" }
+  );
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/");
+  return { success: true };
+}
+
+export async function getAnalyticsLogs(
+  daysBack: number = 30
+): Promise<MachineShiftRow[]> {
   const supabase = createAdminClient();
 
   const cutoffDate = new Date();

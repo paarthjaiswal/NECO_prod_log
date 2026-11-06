@@ -10,9 +10,19 @@ import {
   ExternalLink,
   Info,
 } from 'lucide-react';
-import { ItemMaster, MachineShiftRow, MasterDataState, ShiftType } from '@/types';
-import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
-
+import {
+  ItemMaster,
+  MachineItemCycleTime,
+  MachineShiftRow,
+  MasterDataState,
+  ShiftType,
+} from '@/types';
+import {
+  calculateEfficiency,
+  calculateTotalBreakdown,
+  resolveMachineItemTarget,
+  calculateDowntimePct,
+} from '@/services/storageService';
 
 interface DailyShiftSheetProps {
   rows: MachineShiftRow[];
@@ -43,9 +53,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   onExportExcel,
   onOpenMachineInKiosk,
 }) => {
-  const operators: string[] = masterData?.operators ?? [];
-  const items: ItemMaster[] = masterData?.items ?? [];
-  const hasUnsavedChanges = hasUnsavedDraft;
+const operators: string[] = masterData?.operators ?? [];
+const items: ItemMaster[] = masterData?.items ?? [];
+const cycleTimes: MachineItemCycleTime[] = masterData?.cycleTimes ?? [];
+const lineWorkingMinutes =
+  masterData?.lines?.find((l) => l.name === selectedLine)?.dailyWorkingMinutes ?? 1350;
+const hasUnsavedChanges = hasUnsavedDraft;
 
   // Apply a patch to one row (single onRowsChange call -> single draft write)
   const updateRow = useCallback(
@@ -67,27 +80,38 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     );
   };
 
-  // Handle Item Selection which auto-populates Operation and Std Output
+  // Handle Item Selection which auto-populates Operation, Cycle Time, and Std Output
   const handleItemChange = useCallback(
     (index: number, itemId: string) => {
-      const selected = items.find((item) => item.id === itemId);
-      if (selected) {
-        updateRow(index, {
-          itemId: selected.id,
-          itemName: selected.itemName,
-          operation: selected.operation,
-          stdOutput: selected.stdOutput,
-        });
-      } else {
+      const currentRow = rows[index];
+      if (!itemId) {
         updateRow(index, {
           itemId: '',
           itemName: '',
           operation: '',
+          cycleTime: 0,
           stdOutput: 0,
         });
+        return;
       }
+
+      const target = resolveMachineItemTarget(
+        currentRow.machineId,
+        itemId,
+        items,
+        cycleTimes
+      );
+
+      updateRow(index, {
+        itemId,
+        itemName: target.itemName,
+        operation: target.operation,
+        cycleTime: target.cycleTime,
+        stdOutput: target.stdOutput,
+        totalWorkingMinutes: currentRow.totalWorkingMinutes || lineWorkingMinutes,
+      });
     },
-    [items, updateRow]
+    [rows, items, cycleTimes, lineWorkingMinutes, updateRow]
   );
 
   // Handle Breakdown Sub-column update
@@ -112,13 +136,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       if (row.operatorName && row.itemId) return null;
       const op = operators[idx % operators.length];
       const it = items[idx % items.length];
+      const target = resolveMachineItemTarget(row.machineId, it.id, items, cycleTimes);
       return {
         operatorName: op,
         itemId: it.id,
-        itemName: it.itemName,
-        operation: it.operation,
-        stdOutput: it.stdOutput,
-        actualOutput: it.stdOutput - 4,
+        itemName: target.itemName,
+        operation: target.operation,
+        cycleTime: target.cycleTime,
+        totalWorkingMinutes: row.totalWorkingMinutes || lineWorkingMinutes,
+        stdOutput: target.stdOutput,
+        actualOutput: Math.max(0, target.stdOutput - 4),
         rework: 1,
         breakdown: { noDisc: 0, change: 10, power: 0, operator: 0 },
         remarks: 'Standard production cycle logged',
@@ -129,11 +156,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   // Reset current shift sheet to blank rows
   const handleClearSheet = () => {
     if (window.confirm('Clear all inputs on this shift sheet?')) {
-      patchRows(() => ({
+      patchRows((row) => ({
         operatorName: '',
         itemId: '',
         itemName: '',
         operation: '',
+        cycleTime: 0,
+        totalWorkingMinutes: row.totalWorkingMinutes || lineWorkingMinutes,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -154,6 +183,18 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const grandBreakdown = totalNoDisc + totalChange + totalPower + totalOperator;
   const overallEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
   const activeMachineCount = rows.filter((r) => (Number(r.stdOutput) || 0) > 0).length;
+
+  // Footer downtime %: total minutes vs. available minutes of machines that are in use
+  const footerWorkingMinutes = rows.reduce((acc, r) => {
+    const inUse = (Number(r.stdOutput) || 0) > 0 || calculateTotalBreakdown(r.breakdown) > 0;
+    return inUse ? acc + (r.totalWorkingMinutes || lineWorkingMinutes) : acc;
+  }, 0);
+  const renderFooterPct = (mins: number) =>
+    mins > 0 && footerWorkingMinutes > 0 ? (
+      <div className="text-[10px] leading-none text-slate-400 font-normal mt-0.5">
+        ({calculateDowntimePct(mins, footerWorkingMinutes)}%)
+      </div>
+    ) : null;
 
   return (
     <div className="w-full space-y-3">
@@ -268,6 +309,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   OPERATION
                 </th>
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20">
+                  CYCLE TIME
+                </th>
+                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20">
                   STD O/PUT
                 </th>
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20 bg-slate-850">
@@ -319,6 +363,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 const efficiency = hasTarget ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
                 const isUnderperforming = hasTarget && row.actualOutput < row.stdOutput;
                 const isRowConfigured = !!row.operatorName && !!row.itemName;
+                const rowWorkingMinutes = row.totalWorkingMinutes || lineWorkingMinutes;
+                const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
 
                 return (
                   <tr
@@ -385,6 +431,20 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       />
                     </td>
 
+                    {/* 5B. CYCLE TIME */}
+                    <td className="px-1 py-1 border-r border-slate-200 text-center">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={row.cycleTime || ''}
+                        placeholder="0.00"
+                        onFocus={(e) => e.target.select()}
+                        onChange={(e) => updateRow(index, { cycleTime: Number(e.target.value) || 0 })}
+                        className="w-16 mx-auto text-center font-mono text-xs text-slate-700 bg-transparent px-1 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white focus:outline-none"
+                      />
+                    </td>
+
                     {/* 6. STD O/PUT */}
                     <td className="px-1 py-1 border-r border-slate-200 text-center">
                       <input
@@ -443,6 +503,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           row.breakdown.noDisc > 0 ? 'bg-amber-50 text-amber-900 font-semibold border-amber-300' : 'text-slate-500 border-transparent hover:border-slate-300'
                         } focus:border-slate-800 focus:bg-white focus:outline-none`}
                       />
+                      {row.breakdown.noDisc > 0 && (
+                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
+                          ({pct(row.breakdown.noDisc)}%)
+                        </div>
+                      )}
                     </td>
 
                     {/* CHANGE */}
@@ -458,6 +523,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           row.breakdown.change > 0 ? 'bg-amber-50 text-amber-900 font-semibold border-amber-300' : 'text-slate-500 border-transparent hover:border-slate-300'
                         } focus:border-slate-800 focus:bg-white focus:outline-none`}
                       />
+                      {row.breakdown.change > 0 && (
+                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
+                          ({pct(row.breakdown.change)}%)
+                        </div>
+                      )}
                     </td>
 
                     {/* POWER */}
@@ -473,6 +543,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           row.breakdown.power > 0 ? 'bg-rose-50 text-rose-900 font-semibold border-rose-300' : 'text-slate-500 border-transparent hover:border-slate-300'
                         } focus:border-slate-800 focus:bg-white focus:outline-none`}
                       />
+                      {row.breakdown.power > 0 && (
+                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
+                          ({pct(row.breakdown.power)}%)
+                        </div>
+                      )}
                     </td>
 
                     {/* OPERATOR */}
@@ -488,14 +563,24 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           row.breakdown.operator > 0 ? 'bg-amber-50 text-amber-900 font-semibold border-amber-300' : 'text-slate-500 border-transparent hover:border-slate-300'
                         } focus:border-slate-800 focus:bg-white focus:outline-none`}
                       />
+                      {row.breakdown.operator > 0 && (
+                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
+                          ({pct(row.breakdown.operator)}%)
+                        </div>
+                      )}
                     </td>
 
                     {/* TOTAL BD */}
                     <td className="px-2 py-1 border-r border-slate-200 text-center bg-slate-50/60 font-mono font-bold text-slate-800">
                       {totalBd > 0 ? (
-                        <span className={totalBd > 30 ? 'text-rose-700' : 'text-amber-700'}>
-                          {totalBd}m
-                        </span>
+                        <div className="leading-tight">
+                          <span className={totalBd > 30 ? 'text-rose-700 block' : 'text-amber-700 block'}>
+                            {totalBd}m
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-normal">
+                            ({pct(totalBd)}%)
+                          </span>
+                        </div>
                       ) : (
                         <span className="text-slate-400 font-normal">0</span>
                       )}
@@ -561,6 +646,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <td className="px-2 py-3 border-r border-slate-800 text-slate-400 font-normal">
                   —
                 </td>
+                <td className="px-2 py-3 border-r border-slate-800 text-center text-slate-400 font-normal">
+                  —
+                </td>
                 <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-slate-200">
                   {totalStd}
                 </td>
@@ -572,18 +660,23 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 </td>
                 <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-amber-300">
                   {totalNoDisc}m
+                  {renderFooterPct(totalNoDisc)}
                 </td>
                 <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-amber-300">
                   {totalChange}m
+                  {renderFooterPct(totalChange)}
                 </td>
                 <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-rose-300">
                   {totalPower}m
+                  {renderFooterPct(totalPower)}
                 </td>
                 <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-amber-300">
                   {totalOperator}m
+                  {renderFooterPct(totalOperator)}
                 </td>
                 <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-amber-400 bg-slate-800">
                   {grandBreakdown}m
+                  {renderFooterPct(grandBreakdown)}
                 </td>
                 <td className="px-2 py-3 border-r border-slate-800 text-xs text-slate-300">
                   Variance: {totalAct - totalStd >= 0 ? `+${totalAct - totalStd}` : `${totalAct - totalStd}`} pcs
