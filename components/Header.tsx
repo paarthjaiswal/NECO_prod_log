@@ -13,8 +13,8 @@ import {
   CheckCircle2,
   Layers,
 } from 'lucide-react';
-import { ActiveTab, ShiftType } from '../types';
-import { SHIFTS } from '../data/initialData';
+import { ActiveTab, ShiftType } from '@/types';
+import { SHIFTS } from '@/data/initialData';
 
 // Inside components/Header.tsx
 interface HeaderProps {
@@ -138,14 +138,16 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Zone 3: Global Actions */}
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={onResetDemo}
-              title="Reset all logs and masters to sample baseline"
-              className="px-2.5 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-800 border border-slate-700/60 rounded flex items-center gap-1.5 transition-colors whitespace-nowrap"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-              <span className="hidden xl:inline">Reset Demo</span>
-            </button>
+            {onResetDemo && (
+              <button
+                onClick={onResetDemo}
+                title="Reset all logs and masters to sample baseline"
+                className="px-2.5 py-1.5 text-xs text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-800 border border-slate-700/60 rounded flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+                <span className="hidden xl:inline">Reset Demo</span>
+              </button>
+            )}
 
             <button
               onClick={onExportExcel}

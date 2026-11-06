@@ -11,7 +11,7 @@ import {
   Info,
 } from 'lucide-react';
 import { ItemMaster, MachineShiftRow, MasterDataState, ShiftType } from '@/types';
-import { calculateEfficiency, calculateTotalBreakdown } from '../services/storageService';
+import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
 
 
 interface DailyShiftSheetProps {
@@ -43,11 +43,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   onExportExcel,
   onOpenMachineInKiosk,
 }) => {
-  // NOTE: adjust these two lines to match your MasterDataState shape
-  const operators: string[] = ((masterData as any).operators ?? []).map((o: any) =>
-    typeof o === 'string' ? o : o.name
-  );
-  const items: ItemMaster[] = (masterData as any).items ?? [];
+  const operators: string[] = masterData?.operators ?? [];
+  const items: ItemMaster[] = masterData?.items ?? [];
   const hasUnsavedChanges = hasUnsavedDraft;
 
   // Apply a patch to one row (single onRowsChange call -> single draft write)

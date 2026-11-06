@@ -17,7 +17,7 @@ import {
   updateSingleMachineLog,
   getMasterData,
 } from "@/actions/shiftActions";
-import { PRODUCTION_LINES } from "@/data/initialData";
+import { PRODUCTION_LINES, generateDefaultShiftRows } from "@/data/initialData";
 import { exportShiftToExcel } from "@/services/excelExport";
 
 // Lazy-loaded: zero RAM impact on shop-floor PCs unless clicked
@@ -223,15 +223,41 @@ export default function DashboardClient({
   };
 
   const handleRefreshMasterData = async () => {
-  try {
-    const freshMaster = await getMasterData();
-    setMasterData(freshMaster);
-  } catch (err) {
-    console.error("Failed to refresh master data:", err);
-    setStatusMessage("Could not sync master data. Check your connection.");
+    try {
+      const freshMaster = await getMasterData();
+      setMasterData(freshMaster);
+    } catch (err) {
+      console.error("Failed to refresh master data:", err);
+      setStatusMessage("Could not sync master data. Check your connection.");
+      setTimeout(() => setStatusMessage(null), 4000);
+    }
+  };
+
+  const handleExportExcel = () => {
+    exportShiftToExcel(
+      currentShiftRows,
+      `${selectedDate}_${selectedLine}`
+    );
+  };
+
+  const handleResetDemo = () => {
+    if (!window.confirm("Reset current shift rows to sample demo baseline?")) return;
+    try {
+      localStorage.removeItem(draftKey);
+    } catch {
+      // ignore
+    }
+    const defaultRows = generateDefaultShiftRows(
+      selectedDate,
+      selectedShift,
+      selectedLine
+    );
+    setCurrentShiftRows(defaultRows);
+    setHasUnsavedDraft(true);
+    writeDraft(defaultRows);
+    setStatusMessage("Shift reset to demo baseline. Click 'Save Shift Log *' to sync to cloud.");
     setTimeout(() => setStatusMessage(null), 4000);
-  }
-};
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -247,12 +273,8 @@ export default function DashboardClient({
         productionLines={PRODUCTION_LINES}
         hasUnsavedChanges={hasUnsavedDraft}
         onSaveShiftLog={() => handleSaveShiftSheet(currentShiftRows)}
-        onExportExcel={() =>
-          exportShiftToExcel(
-            currentShiftRows,
-            `${selectedDate}_${selectedLine}`
-          )
-        }
+        onExportExcel={handleExportExcel}
+        onResetDemo={handleResetDemo}
       />
 
       {(isPending || hasUnsavedDraft || statusMessage) && (
@@ -281,6 +303,7 @@ export default function DashboardClient({
             selectedLine={selectedLine}
             hasUnsavedDraft={hasUnsavedDraft}
             onDiscardDraft={handleDiscardDraft}
+            onExportExcel={handleExportExcel}
             onOpenMachineInKiosk={(machineId?: string) => {
               if (machineId) setKioskMachineId(machineId);
               setActiveTab("kiosk");
@@ -316,6 +339,7 @@ export default function DashboardClient({
           <MasterDataSettings
             masterData={masterData}
             onRefreshMasterData={handleRefreshMasterData}
+            onResetAllDemoData={handleResetDemo}
           />
         )}
       </main>

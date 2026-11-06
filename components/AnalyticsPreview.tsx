@@ -13,10 +13,10 @@ import {
   ChevronRight,
   Search,
 } from 'lucide-react';
-import { MachineMaster, MachineShiftRow, MasterDataState, ShiftType } from '../types';
-import { INITIAL_MACHINES } from '../data/initialData';
-import { calculateEfficiency, calculateTotalBreakdown } from '../services/storageService';
-import { exportHistoricalToCSV, exportShiftToExcel } from '../services/excelExport';
+import { MachineMaster, MachineShiftRow, MasterDataState, ShiftType } from '@/types';
+import { INITIAL_MACHINES } from '@/data/initialData';
+import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
+import { exportHistoricalToCSV, exportShiftToExcel } from '@/services/excelExport';
 import { getAnalyticsLogs } from '@/actions/shiftActions';
 
 interface AnalyticsPreviewProps {
@@ -64,11 +64,42 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   }, [historicalLogs, rows]);
 
   // Filters
-  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week'>('all');
+  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week' | 'selected'>('all');
   const [shiftFilter, setShiftFilter] = useState<string>('all');
   const [lineFilter, setLineFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [hoveredMachineId, setHoveredMachineId] = useState<string | null>(null);
+
+  // Sync internal filters with Header props when they change
+  useEffect(() => {
+    if (selectedLine) {
+      setLineFilter(selectedLine);
+    }
+  }, [selectedLine]);
+
+  useEffect(() => {
+    if (selectedShift) {
+      const parts = selectedShift.split(' ');
+      const shiftPrefix = parts.length >= 2 ? `${parts[0]} ${parts[1]}` : parts[0];
+      setShiftFilter(shiftPrefix || 'all');
+    }
+  }, [selectedShift]);
+
+  useEffect(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterdayDate = new Date();
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterday = yesterdayDate.toISOString().slice(0, 10);
+
+    if (selectedDate === today) {
+      setDateFilter('today');
+    } else if (selectedDate === yesterday) {
+      setDateFilter('yesterday');
+    } else if (selectedDate) {
+      setDateFilter('selected');
+    }
+  }, [selectedDate]);
+
   // Compute filtered logs
   const filteredLogs = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -82,6 +113,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
     return allLogs.filter((log) => {
       // Date filter
+      if (dateFilter === 'selected' && log.date !== selectedDate) return false;
       if (dateFilter === 'today' && log.date !== today) return false;
       if (dateFilter === 'yesterday' && log.date !== yesterday) return false;
       if (dateFilter === 'week' && log.date < weekAgo) return false;
@@ -106,7 +138,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
       return true;
     });
-  }, [allLogs, dateFilter, shiftFilter, lineFilter, searchQuery]);
+  }, [allLogs, dateFilter, selectedDate, shiftFilter, lineFilter, searchQuery]);
 
   // Aggregate KPIs
   const kpis = useMemo(() => {
@@ -244,6 +276,16 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             >
               Last 7 Days
             </button>
+            {selectedDate && selectedDate !== new Date().toISOString().slice(0, 10) && (
+              <button
+                onClick={() => setDateFilter('selected')}
+                className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                  dateFilter === 'selected' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Log Date ({selectedDate})
+              </button>
+            )}
           </div>
 
           {/* Shift Filter */}

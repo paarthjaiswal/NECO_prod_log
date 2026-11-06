@@ -263,11 +263,19 @@ export async function getShiftSheetRows(
   );
 }
 
+export interface SaveShiftResult {
+  success: boolean;
+  count: number;
+  rows?: MachineShiftRow[];
+}
+
 /**
  * ACTION 3: Batch Save Shift Sheet (DailyShiftSheet.tsx)
  * Runs a single bulk upsert for all machines on the active line.
  */
-export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
+export async function saveShiftSheetRows(
+  rows: MachineShiftRow[]
+): Promise<SaveShiftResult> {
   if (!rows || rows.length === 0) return { success: true, count: 0 };
 
   const supabase = createAdminClient();
@@ -337,10 +345,6 @@ export async function upsertMachineMaster(
     status: machine.status ?? "active",
     sort_order: typeof sortOrder === "number" ? sortOrder : fallbackSortOrder,
   };
-
-  if (typeof sortOrder === "number") {
-    payload.sort_order = sortOrder;
-  }
 
   const { data, error } = await supabase
     .from("machines")

@@ -1,4 +1,4 @@
-import { ItemMaster, MachineMaster, MachineShiftRow, ShiftType } from '../types';
+import { ItemMaster, MachineMaster, MachineShiftRow, ShiftType } from '@/types';
 
 export const PRODUCTION_LINES = ['Line 1', 'Line 2', 'Line 3'];
 

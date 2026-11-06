@@ -1,5 +1,5 @@
 "use client"
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   CheckCircle2,
   AlertTriangle,
@@ -21,8 +21,8 @@ import {
   MachineShiftRow,
   MasterDataState,
   ShiftType,
-} from '../types';
-import { calculateEfficiency, calculateTotalBreakdown } from '../services/storageService';
+} from '@/types';
+import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
 
 interface OperatorKioskProps {
   masterData: MasterDataState;
@@ -69,7 +69,10 @@ export function OperatorKiosk({
  
 
   // Filter machines for current production line
-  const lineMachines = machines.filter((m) => (m.line || 'Line 1') === selectedLine);
+  const lineMachines = useMemo(
+    () => machines.filter((m) => (m.line || 'Line 1') === selectedLine),
+    [machines, selectedLine]
+  );
 
   // Sync draft when selectedMachineId changes
   useEffect(() => {
@@ -83,25 +86,48 @@ export function OperatorKiosk({
     const machine = machines.find((m) => m.id === selectedMachineId);
 
     if (existingRow) {
-      setDraft({ ...existingRow, line: selectedLine });
+      setDraft((prev) => {
+        if (
+          prev &&
+          prev.machineId === existingRow.machineId &&
+          prev.date === existingRow.date &&
+          prev.shift === existingRow.shift &&
+          prev.line === selectedLine
+        ) {
+          return prev;
+        }
+        return { ...existingRow, line: selectedLine };
+      });
     } else if (machine) {
-      setDraft({
-        id: `${selectedDate}_${selectedShift}_${selectedLine}_${machine.id}`,
-        date: selectedDate,
-        shift: selectedShift,
-        line: selectedLine,
-        srNo: lineMachines.findIndex((m) => m.id === machine.id) + 1,
-        machineId: machine.id,
-        machineName: machine.name,
-        operatorName: '',
-        itemId: '',
-        itemName: '',
-        operation: '',
-        stdOutput: 0,
-        actualOutput: 0,
-        rework: 0,
-        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
-        remarks: '',
+      setDraft((prev) => {
+        if (
+          prev &&
+          prev.machineId === machine.id &&
+          prev.date === selectedDate &&
+          prev.shift === selectedShift &&
+          prev.line === selectedLine
+        ) {
+          return prev;
+        }
+        const idx = lineMachines.findIndex((m) => m.id === machine.id);
+        return {
+          id: `${selectedDate}_${selectedShift}_${selectedLine}_${machine.id}`,
+          date: selectedDate,
+          shift: selectedShift,
+          line: selectedLine,
+          srNo: idx >= 0 ? idx + 1 : 1,
+          machineId: machine.id,
+          machineName: machine.name,
+          operatorName: '',
+          itemId: '',
+          itemName: '',
+          operation: '',
+          stdOutput: 0,
+          actualOutput: 0,
+          rework: 0,
+          breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+          remarks: '',
+        };
       });
     }
     setValidationError(null);
