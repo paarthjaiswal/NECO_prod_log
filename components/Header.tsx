@@ -26,7 +26,8 @@ interface HeaderProps {
   setSelectedShift: (shift: ShiftType) => void;
   selectedLine: string;
   setSelectedLine: (line: string) => void;
-  productionLines: string[];          // Required for Line 1 / 2 / 3 dropdown
+  productionLines: string[];          // Dynamic Line 1 / 2 / 3 dropdown
+  shifts?: ShiftType[];               // Dynamic Shift A / B / C dropdown
   hasUnsavedChanges: boolean;         // Required for Save button indicator
   onSaveShiftLog: () => void;         // Required to trigger saveShiftSheetRows
   onExportExcel: () => void;          // Required to trigger Excel export
@@ -43,11 +44,13 @@ export const Header: React.FC<HeaderProps> = ({
   selectedLine,
   setSelectedLine,
   productionLines,
+  shifts,
   onResetDemo,
   onExportExcel,
   hasUnsavedChanges,
   onSaveShiftLog,
 }) => {
+  const availableShifts = shifts && shifts.length > 0 ? shifts : (SHIFTS as ShiftType[]);
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-40 shadow-sm">
       {/* Primary Top Bar */}
@@ -181,19 +184,23 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
                 <Clock className="w-3.5 h-3.5 text-slate-400 ml-2" />
                 <span className="text-slate-400 font-medium px-1">Shift:</span>
-                {SHIFTS.map((shift) => (
-                  <button
-                    key={shift}
-                    onClick={() => setSelectedShift(shift)}
-                    className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                      selectedShift === shift
-                        ? 'bg-emerald-600 text-white font-semibold shadow-xs'
-                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                    }`}
-                  >
-                    {shift.split(' ')[0]} {shift.split(' ')[1]}
-                  </button>
-                ))}
+                {availableShifts.map((shift) => {
+                  const parts = shift.split(' ');
+                  const label = parts.length >= 2 ? `${parts[0]} ${parts[1]}` : shift;
+                  return (
+                    <button
+                      key={shift}
+                      onClick={() => setSelectedShift(shift)}
+                      className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                        selectedShift === shift
+                          ? 'bg-emerald-600 text-white font-semibold shadow-xs'
+                          : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
               </div>
 
               {/* Production Line Selector (Styled exactly like Shift selector) */}

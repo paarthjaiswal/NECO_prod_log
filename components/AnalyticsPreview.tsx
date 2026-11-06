@@ -158,6 +158,37 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     const plantEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
     const reworkRate = totalAct > 0 ? ((totalRework / totalAct) * 100).toFixed(1) : '0.0';
 
+    const totalWorkingMins =
+      activeLogs.reduce(
+        (acc, r) => acc + (Number(r.totalWorkingMinutes) || 1350),
+        0
+      ) || (activeLogs.length * 1350 || 1350);
+
+    const totalBdPctOfWorking =
+      totalWorkingMins > 0
+        ? ((totalBreakdown / totalWorkingMins) * 100).toFixed(1)
+        : '0.0';
+
+    const noDiscPctOfWorking =
+      totalWorkingMins > 0
+        ? ((totalNoDisc / totalWorkingMins) * 100).toFixed(1)
+        : '0.0';
+
+    const changePctOfWorking =
+      totalWorkingMins > 0
+        ? ((totalChange / totalWorkingMins) * 100).toFixed(1)
+        : '0.0';
+
+    const powerPctOfWorking =
+      totalWorkingMins > 0
+        ? ((totalPower / totalWorkingMins) * 100).toFixed(1)
+        : '0.0';
+
+    const operatorPctOfWorking =
+      totalWorkingMins > 0
+        ? ((totalOperator / totalWorkingMins) * 100).toFixed(1)
+        : '0.0';
+
     return {
       totalStd,
       totalAct,
@@ -166,11 +197,19 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       totalRework,
       reworkRate,
       totalBreakdown,
+      totalWorkingMins,
+      totalBdPctOfWorking,
       breakdownSplit: {
         noDisc: totalNoDisc,
         change: totalChange,
         power: totalPower,
         operator: totalOperator,
+      },
+      categoryWorkingPct: {
+        noDisc: noDiscPctOfWorking,
+        change: changePctOfWorking,
+        power: powerPctOfWorking,
+        operator: operatorPctOfWorking,
       },
       logCount: activeLogs.length,
     };
@@ -430,14 +469,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             </span>
           </div>
           <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
-            <span className="text-slate-500">Major Culprit:</span>
-            <span className="font-semibold text-slate-800">
-              {kpis.breakdownSplit.power > kpis.breakdownSplit.change &&
-              kpis.breakdownSplit.power > kpis.breakdownSplit.noDisc
-                ? 'Power Outage'
-                : kpis.breakdownSplit.change > kpis.breakdownSplit.noDisc
-                ? 'Tool Change'
-                : 'Material Shortage'}
+            <span className="text-slate-500">Working Time Loss:</span>
+            <span className="font-mono font-bold text-amber-800">
+              {kpis.totalBdPctOfWorking}% of 1350m
             </span>
           </div>
         </div>
@@ -598,7 +632,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </div>
                 <div className="text-right font-mono">
                   <span className="font-bold text-slate-900">{kpis.breakdownSplit.noDisc} mins</span>
-                  <span className="block text-[10px] text-slate-500">({noDiscPct}%)</span>
+                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                    <span className="text-slate-600 font-semibold">{noDiscPct}% share</span>
+                    <span className="text-slate-400">·</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.noDisc}% of 1350m</span>
+                  </div>
                 </div>
               </div>
 
@@ -612,7 +650,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </div>
                 <div className="text-right font-mono">
                   <span className="font-bold text-slate-900">{kpis.breakdownSplit.change} mins</span>
-                  <span className="block text-[10px] text-slate-500">({changePct}%)</span>
+                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                    <span className="text-slate-600 font-semibold">{changePct}% share</span>
+                    <span className="text-slate-400">·</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.change}% of 1350m</span>
+                  </div>
                 </div>
               </div>
 
@@ -626,7 +668,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </div>
                 <div className="text-right font-mono">
                   <span className="font-bold text-slate-900">{kpis.breakdownSplit.power} mins</span>
-                  <span className="block text-[10px] text-slate-500">({powerPct}%)</span>
+                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                    <span className="text-slate-600 font-semibold">{powerPct}% share</span>
+                    <span className="text-slate-400">·</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.power}% of 1350m</span>
+                  </div>
                 </div>
               </div>
 
@@ -640,7 +686,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </div>
                 <div className="text-right font-mono">
                   <span className="font-bold text-slate-900">{kpis.breakdownSplit.operator} mins</span>
-                  <span className="block text-[10px] text-slate-500">({operatorPct}%)</span>
+                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                    <span className="text-slate-600 font-semibold">{operatorPct}% share</span>
+                    <span className="text-slate-400">·</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.operator}% of 1350m</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -723,10 +773,12 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 <th className="px-3 py-2 border-r border-slate-800">Machine</th>
                 <th className="px-3 py-2 border-r border-slate-800">Operator</th>
                 <th className="px-3 py-2 border-r border-slate-800">Item</th>
+                <th className="px-2 py-2 border-r border-slate-800 text-center">Cycle Time</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Std</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Actual</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Rework</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">BD Mins</th>
+                <th className="px-2 py-2 border-r border-slate-800 text-center">BD %</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Eff %</th>
                 <th className="px-3 py-2">Remarks</th>
               </tr>
@@ -734,7 +786,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             <tbody className="divide-y divide-slate-200 font-mono">
               {filteredLogs.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="text-center py-8 text-slate-500 font-sans">
+                  <td colSpan={14} className="text-center py-8 text-slate-500 font-sans">
                     No records found matching current date/shift/line filters.
                   </td>
                 </tr>
@@ -742,6 +794,12 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 filteredLogs.map((row) => {
                   const bdTotal = calculateTotalBreakdown(row.breakdown);
                   const eff = row.stdOutput > 0 ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
+                  const bdPct =
+                    row.breakdownPct?.totalBdPct != null && row.breakdownPct.totalBdPct > 0
+                      ? `${row.breakdownPct.totalBdPct}%`
+                      : bdTotal > 0 && (row.totalWorkingMinutes || 1350) > 0
+                      ? `${((bdTotal / (row.totalWorkingMinutes || 1350)) * 100).toFixed(1)}%`
+                      : '0.0%';
 
                   return (
                     <tr key={row.id} className="hover:bg-slate-50">
@@ -757,10 +815,14 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       <td className="px-3 py-1.5 font-sans text-slate-700 whitespace-nowrap">
                         {row.itemName || '—'}
                       </td>
+                      <td className="px-2 py-1.5 text-center text-slate-700 whitespace-nowrap">
+                        {row.cycleTime ? `${row.cycleTime}s` : '—'}
+                      </td>
                       <td className="px-2 py-1.5 text-center text-slate-600">{row.stdOutput}</td>
                       <td className="px-2 py-1.5 text-center font-bold text-slate-900">{row.actualOutput}</td>
                       <td className="px-2 py-1.5 text-center text-rose-700">{row.rework}</td>
                       <td className="px-2 py-1.5 text-center text-amber-700">{bdTotal}m</td>
+                      <td className="px-2 py-1.5 text-center font-semibold text-amber-800">{bdPct}</td>
                       <td className="px-2 py-1.5 text-center">
                         {row.stdOutput > 0 ? (
                           <span

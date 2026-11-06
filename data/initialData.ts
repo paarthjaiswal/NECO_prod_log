@@ -120,7 +120,8 @@ export const generateDefaultShiftRows = (
   shift: ShiftType,
   line: string = 'Line 1'
 ): MachineShiftRow[] => {
-  const lineMachines = INITIAL_MACHINES.filter((m) => (m.line || 'Line 1') === line);
+  const targetLine = line || 'Line 1';
+  const lineMachines = INITIAL_MACHINES.filter((m) => (m.line || 'Line 1') === targetLine);
 
   return lineMachines.map((machine, index) => {
     const defaultItem = INITIAL_ITEMS[index % INITIAL_ITEMS.length];
@@ -136,8 +137,8 @@ export const generateDefaultShiftRows = (
       itemId: defaultItem?.id || "",
       itemName: defaultItem?.itemName || "",
       operation: defaultItem?.operation || "",
-      cycleTime: 0,                // <-- ADD THIS LINE
-      totalWorkingMinutes: 1350,   // <-- ADD THIS LINE
+      cycleTime: 0,
+      totalWorkingMinutes: 1350,
       stdOutput: defaultItem?.stdOutput || 0,
       actualOutput: 0,
       rework: 0,
@@ -188,6 +189,8 @@ export const generateSampleHistoricalLogs = (): MachineShiftRow[] => {
           itemId: item.id,
           itemName: item.itemName,
           operation: item.operation,
+          cycleTime: 0,
+          totalWorkingMinutes: 1350,
           stdOutput: item.stdOutput,
           actualOutput,
           rework,

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useTransition } from "react";
+import React, { useState, useEffect, useRef, useTransition, useMemo } from "react";
 import dynamic from "next/dynamic";
 import Header from "@/components/Header";
 import { DailyShiftSheet } from "@/components/DailyShiftSheet";
@@ -17,7 +17,11 @@ import {
   updateSingleMachineLog,
   getMasterData,
 } from "@/actions/shiftActions";
-import { PRODUCTION_LINES, generateDefaultShiftRows } from "@/data/initialData";
+import {
+  PRODUCTION_LINES,
+  SHIFTS,
+  generateDefaultShiftRows,
+} from "@/data/initialData";
 import { exportShiftToExcel } from "@/services/excelExport";
 
 // Lazy-loaded: zero RAM impact on shop-floor PCs unless clicked
@@ -75,6 +79,22 @@ export default function DashboardClient({
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
   const [isPending, startTransition] = useTransition();
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Derive active production lines from masterData (fallback to PRODUCTION_LINES)
+  const availableLines = useMemo(() => {
+    const active = masterData.lines
+      ?.filter((l) => l.isActive !== false)
+      .map((l) => l.name);
+    return active && active.length > 0 ? active : PRODUCTION_LINES;
+  }, [masterData.lines]);
+
+  // Derive active shifts from masterData (fallback to SHIFTS)
+  const availableShifts = useMemo(() => {
+    const active = masterData.shifts
+      ?.filter((s) => s.isActive !== false)
+      .map((s) => s.displayName as ShiftType);
+    return active && active.length > 0 ? active : (SHIFTS as ShiftType[]);
+  }, [masterData.shifts]);
 
   const draftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
   const isFirstLoad = useRef(true);
@@ -270,7 +290,8 @@ export default function DashboardClient({
         setSelectedShift={setSelectedShift}
         selectedLine={selectedLine}
         setSelectedLine={setSelectedLine}
-        productionLines={PRODUCTION_LINES}
+        productionLines={availableLines}
+        shifts={availableShifts}
         hasUnsavedChanges={hasUnsavedDraft}
         onSaveShiftLog={() => handleSaveShiftSheet(currentShiftRows)}
         onExportExcel={handleExportExcel}
@@ -290,7 +311,13 @@ export default function DashboardClient({
         </div>
       )}
 
-      <main className="max-w-7xl mx-auto p-4">
+      <main
+        className={
+          activeTab === "sheet"
+            ? "w-full px-[10px] py-3"
+            : "max-w-7xl mx-auto p-4"
+        }
+      >
         {activeTab === "sheet" && (
           <DailyShiftSheet
             rows={currentShiftRows}

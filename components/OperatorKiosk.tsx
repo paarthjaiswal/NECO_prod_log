@@ -110,6 +110,9 @@ export function OperatorKiosk({
           return prev;
         }
         const idx = lineMachines.findIndex((m) => m.id === machine.id);
+        const lineWorkingMinutes =
+          masterData.lines?.find((l) => l.name === selectedLine)?.dailyWorkingMinutes ?? 1350;
+
         return {
           id: `${selectedDate}_${selectedShift}_${selectedLine}_${machine.id}`,
           date: selectedDate,
@@ -122,6 +125,8 @@ export function OperatorKiosk({
           itemId: '',
           itemName: '',
           operation: '',
+          cycleTime: 0,
+          totalWorkingMinutes: lineWorkingMinutes,
           stdOutput: 0,
           actualOutput: 0,
           rework: 0,
@@ -133,19 +138,27 @@ export function OperatorKiosk({
     setValidationError(null);
   }, [selectedMachineId, rows, machines, lineMachines, selectedDate, selectedShift, selectedLine]);
 
-  // When Item changes in draft, auto-set Operation and Std Output
+  // When Item changes in draft, auto-set Operation, Cycle Time, and Std Output
   const handleItemSelect = (itemId: string) => {
     if (!draft) return;
     const item = items.find((it) => it.id === itemId);
     if (item) {
+      const ctMatch = masterData.cycleTimes?.find(
+        (ct) => ct.machineId === draft.machineId && ct.itemId === item.id
+      );
+      const targetOp = ctMatch?.operation || item.operation;
+      const targetCycleTime = ctMatch?.cycleTime ?? 0;
+      const targetStd = ctMatch?.stdOutput ?? item.stdOutput;
+
       setDraft({
         ...draft,
         itemId: item.id,
         itemName: item.itemName,
-        operation: item.operation,
-        stdOutput: item.stdOutput,
+        operation: targetOp,
+        cycleTime: targetCycleTime,
+        stdOutput: targetStd,
         // If actual is 0 and stdOutput is set, default actual to stdOutput for faster adjustment
-        actualOutput: draft.actualOutput === 0 ? item.stdOutput : draft.actualOutput,
+        actualOutput: draft.actualOutput === 0 ? targetStd : draft.actualOutput,
       });
     } else {
       setDraft({
@@ -153,6 +166,7 @@ export function OperatorKiosk({
         itemId: '',
         itemName: '',
         operation: '',
+        cycleTime: 0,
         stdOutput: 0,
       });
     }
