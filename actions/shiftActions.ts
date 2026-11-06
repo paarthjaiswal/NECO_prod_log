@@ -354,6 +354,9 @@ export async function getMasterData(): Promise<MasterDataState> {
   if (machinesRes.error) throw new Error(machinesRes.error.message);
   if (operatorsRes.error) throw new Error(operatorsRes.error.message);
   if (itemsRes.error) throw new Error(itemsRes.error.message);
+  if (linesRes.error) throw new Error(linesRes.error.message);
+  if (shiftsRes.error) throw new Error(shiftsRes.error.message);
+  if (cycleTimesRes.error) throw new Error(cycleTimesRes.error.message);
 
   return {
     machines: (machinesRes.data as DbMachineRow[]).map(mapDbMachineToUi),
@@ -573,7 +576,13 @@ export async function removeOperatorMaster(operatorName: string) {
   return { success: true };
 }
 
-export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
+// Replace lines 394-411 in actions/shiftActions.ts with:
+export async function upsertMachineItemCycleTime(
+  entry: Omit<MachineItemCycleTime, "id" | "isActive"> & {
+    id?: number;
+    isActive?: boolean;
+  }
+) {
   const supabase = createAdminClient();
   const { error } = await supabase.from("machine_item_cycle_times").upsert(
     {
@@ -582,7 +591,7 @@ export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
       operation: entry.operation.trim(),
       cycle_time: Number(entry.cycleTime) || 0,
       std_output: Number(entry.stdOutput) || 0,
-      is_active: true,
+      is_active: entry.isActive ?? true,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "machine_id,item_id,operation" }

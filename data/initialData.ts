@@ -123,239 +123,31 @@ export const generateDefaultShiftRows = (
   const lineMachines = INITIAL_MACHINES.filter((m) => (m.line || 'Line 1') === line);
 
   return lineMachines.map((machine, index) => {
-    const srNo = index + 1;
-    const rowId = `${date}_${shift}_${line}_${machine.id}`;
-
-    if (line === 'Line 1') {
-      // Pre-populate 8 of the 16 Line 1 machines with realistic operational data
-      if (srNo === 1) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Rajesh Kumar',
-          itemId: 'it1',
-          itemName: 'Shaft Gear SG-204',
-          operation: 'OP-10 Rough Turning',
-          stdOutput: 120,
-          actualOutput: 118,
-          rework: 2,
-          breakdown: { noDisc: 0, change: 15, power: 0, operator: 0 },
-          remarks: 'Tool insert wear changed at 11:30 AM',
-        };
-      }
-      if (srNo === 2) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Suresh Patel',
-          itemId: 'it2',
-          itemName: 'Flange Hub FH-108',
-          operation: 'OP-20 CNC Milling',
-          stdOutput: 85,
-          actualOutput: 82,
-          rework: 1,
-          breakdown: { noDisc: 0, change: 20, power: 0, operator: 0 },
-          remarks: 'Batch finish smooth, clean deburring',
-        };
-      }
-      if (srNo === 3) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Vikram Singh',
-          itemId: 'it3',
-          itemName: 'Steel Bush SB-44',
-          operation: 'OP-30 Drilling & Boring',
-          stdOutput: 200,
-          actualOutput: 195,
-          rework: 4,
-          breakdown: { noDisc: 10, change: 10, power: 0, operator: 0 },
-          remarks: 'Raw casting disc arrival delayed 10m',
-        };
-      }
-      if (srNo === 4) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Amit Sharma',
-          itemId: 'it5',
-          itemName: 'Valve Body VB-310',
-          operation: 'OP-40 VMC Machining',
-          stdOutput: 60,
-          actualOutput: 42,
-          rework: 5,
-          breakdown: { noDisc: 0, change: 30, power: 45, operator: 15 },
-          remarks: 'Substation feeder trip + fixture alignment delay',
-        };
-      }
-      if (srNo === 5) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Manoj Verma',
-          itemId: 'it4',
-          itemName: 'Axle Pin AP-90',
-          operation: 'OP-15 Finish Grinding',
-          stdOutput: 150,
-          actualOutput: 148,
-          rework: 0,
-          breakdown: { noDisc: 0, change: 10, power: 0, operator: 0 },
-          remarks: 'Wheel dressing completed smoothly',
-        };
-      }
-      if (srNo === 6) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Deepak Yadav',
-          itemId: 'it1',
-          itemName: 'Shaft Gear SG-204',
-          operation: 'OP-10 Rough Turning',
-          stdOutput: 120,
-          actualOutput: 122,
-          rework: 1,
-          breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
-          remarks: 'Exceeded target by 2 pcs; excellent cycle time',
-        };
-      }
-      if (srNo === 7) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Santosh Nair',
-          itemId: 'it3',
-          itemName: 'Steel Bush SB-44',
-          operation: 'OP-30 Drilling & Boring',
-          stdOutput: 200,
-          actualOutput: 160,
-          rework: 8,
-          breakdown: { noDisc: 25, change: 15, power: 0, operator: 20 },
-          remarks: 'Drill sleeve slipped, re-centered clamp',
-        };
-      }
-      if (srNo === 8) {
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: 'Ramesh Gupta',
-          itemId: 'it2',
-          itemName: 'Flange Hub FH-108',
-          operation: 'OP-20 CNC Milling',
-          stdOutput: 85,
-          actualOutput: 86,
-          rework: 0,
-          breakdown: { noDisc: 0, change: 5, power: 0, operator: 0 },
-          remarks: 'Coolant refill carried out during tea break',
-        };
-      }
-    } else if (line === 'Line 2') {
-      // Pre-seed some active rows for Line 2
-      if (srNo <= 4) {
-        const item = INITIAL_ITEMS[(index + 1) % INITIAL_ITEMS.length];
-        const operator = INITIAL_OPERATORS[(index + 2) % INITIAL_OPERATORS.length];
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: operator,
-          itemId: item.id,
-          itemName: item.itemName,
-          operation: item.operation,
-          stdOutput: item.stdOutput,
-          actualOutput: Math.max(0, item.stdOutput - 3),
-          rework: 1,
-          breakdown: { noDisc: 0, change: 10, power: 0, operator: 0 },
-          remarks: 'Line 2 high-precision milling running to schedule',
-        };
-      }
-    } else if (line === 'Line 3') {
-      // Pre-seed some active rows for Line 3
-      if (srNo <= 3) {
-        const item = INITIAL_ITEMS[(index + 2) % INITIAL_ITEMS.length];
-        const operator = INITIAL_OPERATORS[(index + 3) % INITIAL_OPERATORS.length];
-        return {
-          id: rowId,
-          date,
-          shift,
-          line,
-          srNo,
-          machineId: machine.id,
-          machineName: machine.name,
-          operatorName: operator,
-          itemId: item.id,
-          itemName: item.itemName,
-          operation: item.operation,
-          stdOutput: item.stdOutput,
-          actualOutput: item.stdOutput,
-          rework: 0,
-          breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
-          remarks: 'Line 3 heavy machine bed aligned and running',
-        };
-      }
-    }
-
-    // Default blank row ready for logging
+    const defaultItem = INITIAL_ITEMS[index % INITIAL_ITEMS.length];
     return {
-      id: rowId,
+      id: `${date}_${shift}_${targetLine}_${machine.id}`,
       date,
       shift,
-      line,
-      srNo,
+      line: targetLine,
+      srNo: index + 1,
       machineId: machine.id,
       machineName: machine.name,
-      operatorName: '',
-      itemId: '',
-      itemName: '',
-      operation: '',
-      stdOutput: 0,
+      operatorName: INITIAL_OPERATORS[index % INITIAL_OPERATORS.length] || "",
+      itemId: defaultItem?.id || "",
+      itemName: defaultItem?.itemName || "",
+      operation: defaultItem?.operation || "",
+      cycleTime: 0,                // <-- ADD THIS LINE
+      totalWorkingMinutes: 1350,   // <-- ADD THIS LINE
+      stdOutput: defaultItem?.stdOutput || 0,
       actualOutput: 0,
       rework: 0,
-      breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
-      remarks: '',
+      breakdown: {
+        noDisc: 0,
+        change: 0,
+        power: 0,
+        operator: 0,
+      },
+      remarks: "",
     };
   });
 };
