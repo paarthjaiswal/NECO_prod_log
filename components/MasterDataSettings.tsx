@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from 'react';
+import React, { useState, useMemo } from "react";
 import {
   Sliders,
   Plus,
@@ -11,7 +11,7 @@ import {
   Package,
   Timer,
   Layers,
-} from 'lucide-react';
+} from "lucide-react";
 import {
   MasterDataState,
   MachineMaster,
@@ -20,7 +20,7 @@ import {
   ShiftMaster,
   MachineItemCycleTime,
   ShiftType,
-} from '@/types';
+} from "@/types";
 import {
   upsertMachineMaster,
   disableMachineMaster,
@@ -31,8 +31,10 @@ import {
   upsertMachineItemCycleTime,
   deleteMachineItemCycleTime,
   upsertProductionLine,
+  deleteProductionLine,
   upsertShiftMaster,
-} from '@/actions/shiftActions';
+  deleteShiftMaster,
+} from "@/actions/shiftActions";
 
 interface MasterDataSettingsProps {
   masterData: MasterDataState;
@@ -45,18 +47,16 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   onRefreshMasterData,
   onResetAllDemoData,
 }) => {
-  // Unpack masterData so all existing JSX tables below work untouched
-  const machines = masterData.machines.filter((m) => m.status !== 'idle');
+  const machines = masterData.machines.filter((m) => m.status !== "idle");
   const { operators, items } = masterData;
 
-  // Production lines for dropdowns: from master data, with a fallback to the original 3
   const lineOptions: { id: string; name: string; description?: string | null }[] =
     masterData.lines && masterData.lines.length > 0
       ? masterData.lines
       : [
-          { id: 'line_1', name: 'Line 1', description: 'CNC Line' },
-          { id: 'line_2', name: 'Line 2', description: 'VMC Line' },
-          { id: 'line_3', name: 'Line 3', description: 'Heavy SPM' },
+          { id: "line_1", name: "Line 1", description: "CNC Line" },
+          { id: "line_2", name: "Line 2", description: "VMC Line" },
+          { id: "line_3", name: "Line 3", description: "Heavy SPM" },
         ];
 
   const [subTab, setSubTab] = useState<
@@ -65,10 +65,152 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
   const showFeedback = (msg: string) => {
     setFeedback(msg);
     setTimeout(() => setFeedback(null), 3500);
+  };
+
+  const triggerNotice = (msg: string) => {
+    setSavedNotice(msg);
+    setTimeout(() => setSavedNotice(null), 3000);
+  };
+
+  // ==========================================================================
+  // SUB-TAB 1, 2, 3 STATE & HANDLERS (MACHINES, OPERATORS, ITEMS)
+  // ==========================================================================
+  const [newOperatorName, setNewOperatorName] = useState("");
+
+  const [newMachineName, setNewMachineName] = useState("");
+  const [newMachineCode, setNewMachineCode] = useState("");
+  const [newMachineType, setNewMachineType] = useState("VMC / CNC");
+  const [newMachineLine, setNewMachineLine] = useState("Line 1");
+  const [machineLineFilter, setMachineLineFilter] = useState("all");
+
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemCode, setNewItemCode] = useState("");
+  const [newOperation, setNewOperation] = useState("");
+
+  const handleAddMachine = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMachineName.trim()) return;
+
+    const nextNumber = masterData.machines.length + 1;
+    const newMachine: MachineMaster = {
+      id: `m${Date.now()}`,
+      name: newMachineName.trim().toUpperCase(),
+      code: newMachineCode.trim().toUpperCase() || `MC-${nextNumber}`,
+      line: newMachineLine,
+      type: newMachineType.trim(),
+      status: "active",
+    };
+
+    try {
+      await upsertMachineMaster(newMachine, nextNumber);
+      await onRefreshMasterData();
+      setNewMachineName("");
+      setNewMachineCode("");
+      triggerNotice(`Added machine "${newMachine.name}" to plant directory.`);
+    } catch (err) {
+      console.error("Failed to add machine:", err);
+      alert("Failed to save machine to database.");
+    }
+  };
+
+  const handleDeleteMachine = async (id: string, name: string) => {
+    if (machines.length <= 1) {
+      alert("At least one machine must remain in the factory matrix.");
+      return;
+    }
+    if (window.confirm(`Delete machine "${name}" from master data?`)) {
+      try {
+        await disableMachineMaster(id);
+        await onRefreshMasterData();
+        triggerNotice(`Machine "${name}" removed.`);
+      } catch (err) {
+        console.error("Failed to disable machine:", err);
+        alert("Failed to remove machine.");
+      }
+    }
+  };
+
+  const handleAddOperator = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = newOperatorName.trim();
+    if (!cleanName) return;
+    if (operators.includes(cleanName)) {
+      alert("This operator name already exists.");
+      return;
+    }
+
+    try {
+      await addOperatorMaster(cleanName);
+      await onRefreshMasterData();
+      setNewOperatorName("");
+      triggerNotice(`Operator "${cleanName}" registered.`);
+    } catch (err) {
+      console.error("Failed to add operator:", err);
+      alert("Failed to save operator to database.");
+    }
+  };
+
+  const handleDeleteOperator = async (opName: string) => {
+    if (operators.length <= 1) {
+      alert("At least one operator must remain in master records.");
+      return;
+    }
+    if (window.confirm(`Remove operator "${opName}"?`)) {
+      try {
+        await removeOperatorMaster(opName);
+        await onRefreshMasterData();
+        triggerNotice(`Operator "${opName}" deleted.`);
+      } catch (err) {
+        console.error("Failed to remove operator:", err);
+        alert("Failed to remove operator.");
+      }
+    }
+  };
+
+  const handleAddItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newItemName.trim() || !newOperation.trim()) return;
+
+    const newItem: ItemMaster = {
+      id: `it_${Date.now()}`,
+      itemCode: newItemCode.trim().toUpperCase() || `P-${items.length + 1}`,
+      itemName: newItemName.trim(),
+      operation: newOperation.trim(),
+    };
+
+    try {
+      await upsertItemMaster(newItem);
+      await onRefreshMasterData();
+      setNewItemName("");
+      setNewItemCode("");
+      setNewOperation("");
+      triggerNotice(`Component "${newItem.itemName}" registered.`);
+    } catch (err) {
+      console.error("Failed to add item:", err);
+      alert("Failed to save component to database.");
+    }
+  };
+
+  const handleDeleteItem = async (id: string, name: string) => {
+    if (items.length <= 1) {
+      alert("At least one item must remain in master directory.");
+      return;
+    }
+    if (window.confirm(`Delete part item "${name}"?`)) {
+      try {
+        await deleteItemMaster(id);
+        await onRefreshMasterData();
+        triggerNotice(`Item "${name}" removed.`);
+      } catch (err) {
+        console.error("Failed to delete item:", err);
+        alert("Failed to delete item.");
+      }
+    }
   };
 
   // ==========================================================================
@@ -77,36 +219,91 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   const [ctMachineId, setCtMachineId] = useState<string>(machines[0]?.id ?? "");
   const [ctItemId, setCtItemId] = useState<string>("");
   const [ctOperation, setCtOperation] = useState<string>("");
-  const [ctCycleTime, setCtCycleTime] = useState<number>(0);
-  const [ctStdOutput, setCtStdOutput] = useState<number>(0);
+  // Stored as string so typing '54' never becomes '054'
+  const [ctCycleTime, setCtCycleTime] = useState<string>("");
 
-  // Auto-fills Operation, Std Output, and any existing Cycle Time when Item or Machine changes
-  const handleSelectCycleTimePair = (machineId: string, itemId: string) => {
+  // Extract all operations for the selected item (supports comma-separated or multiple rows with same itemCode/itemName)
+  const availableOperations = useMemo(() => {
+    const selectedItem = masterData.items.find((i) => i.id === ctItemId);
+    if (!selectedItem) return [];
+
+    const matchingItems = masterData.items.filter(
+      (i) =>
+        i.id === selectedItem.id ||
+        (i.itemCode && i.itemCode === selectedItem.itemCode) ||
+        i.itemName.toLowerCase() === selectedItem.itemName.toLowerCase()
+    );
+
+    const opsSet = new Set<string>();
+    matchingItems.forEach((item) => {
+      item.operation
+        .split(/[,/]/)
+        .map((op) => op.trim())
+        .filter(Boolean)
+        .forEach((op) => opsSet.add(op));
+    });
+
+    return Array.from(opsSet);
+  }, [ctItemId, masterData.items]);
+
+  // Auto-fills Operation and existing Cycle Time when Machine, Item, or Operation changes
+  const handleSelectCycleTimeTriple = (
+    machineId: string,
+    itemId: string,
+    explicitOperation?: string
+  ) => {
     setCtMachineId(machineId);
     setCtItemId(itemId);
 
     const selectedItem = masterData.items.find((i) => i.id === itemId);
-    const defaultOp = selectedItem?.operation ?? "";
-    const defaultStd = selectedItem?.stdOutput ?? 0;
+    if (!selectedItem) {
+      setCtOperation("");
+      setCtCycleTime("");
+      return;
+    }
+
+    // Determine operation list for this item
+    const matchingItems = masterData.items.filter(
+      (i) =>
+        i.id === selectedItem.id ||
+        (i.itemCode && i.itemCode === selectedItem.itemCode) ||
+        i.itemName.toLowerCase() === selectedItem.itemName.toLowerCase()
+    );
+    const opsList: string[] = [];
+    matchingItems.forEach((item) => {
+      item.operation
+        .split(/[,/]/)
+        .map((op) => op.trim())
+        .filter(Boolean)
+        .forEach((op) => {
+          if (!opsList.includes(op)) opsList.push(op);
+        });
+    });
+
+    const chosenOp = explicitOperation ?? opsList[0] ?? selectedItem.operation ?? "";
+    setCtOperation(chosenOp);
 
     const existingCt = (masterData.cycleTimes ?? []).find(
-      (ct) => ct.machineId === machineId && ct.itemId === itemId
+      (ct) =>
+        ct.machineId === machineId &&
+        ct.itemId === itemId &&
+        ct.operation.toLowerCase() === chosenOp.toLowerCase()
     );
 
-    if (existingCt) {
-      setCtOperation(existingCt.operation);
-      setCtCycleTime(existingCt.cycleTime);
-      setCtStdOutput(existingCt.stdOutput);
+    if (existingCt && existingCt.cycleTime > 0) {
+      setCtCycleTime(String(existingCt.cycleTime));
     } else {
-      setCtOperation(defaultOp);
-      setCtCycleTime(0);
-      setCtStdOutput(defaultStd);
+      setCtCycleTime("");
     }
   };
 
   const handleSaveCycleTime = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!ctMachineId || !ctItemId) return;
+    const numericCycleTime = parseFloat(ctCycleTime);
+    if (!ctMachineId || !ctItemId || !ctOperation.trim() || isNaN(numericCycleTime) || numericCycleTime <= 0) {
+      showFeedback("Error: Please enter a valid Cycle Time greater than 0.");
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -114,8 +311,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         machineId: ctMachineId,
         itemId: ctItemId,
         operation: ctOperation.trim(),
-        cycleTime: Number(ctCycleTime) || 0,
-        stdOutput: Number(ctStdOutput) || 0,
+        cycleTime: numericCycleTime,
       });
       await onRefreshMasterData();
       showFeedback("Saved Machine × Item cycle time.");
@@ -145,22 +341,27 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   };
 
   // ==========================================================================
-  // SUB-TAB 5 HANDLERS: LINES, SHIFTS & WORKING TIME (1350m)
+  // SUB-TAB 5 HANDLERS: LINES & SHIFTS
   // ==========================================================================
   const [newLineName, setNewLineName] = useState("");
   const [newLineDesc, setNewLineDesc] = useState("");
-  const [newLineMinutes, setNewLineMinutes] = useState<number>(1350);
+  const [newLineMinutes, setNewLineMinutes] = useState<string>("1350");
 
-  // Local editable drafts keyed by line.id and shift.id
-  const [lineEdits, setLineEdits] = useState<Record<string, number>>({});
+  // New Shift Form State
+  const [newShiftCode, setNewShiftCode] = useState("");
+  const [newShiftDisplay, setNewShiftDisplay] = useState("");
+  const [newShiftStart, setNewShiftStart] = useState("06:00");
+  const [newShiftEnd, setNewShiftEnd] = useState("14:00");
+  const [newShiftMins, setNewShiftMins] = useState<string>("450");
+
+  const [lineEdits, setLineEdits] = useState<Record<string, string>>({});
   const [shiftEdits, setShiftEdits] = useState<
     Record<
       string,
       {
         startTime: string;
         endTime: string;
-        shiftWorkingMinutes: number;
-        totalWorkingMinutesRef: number;
+        shiftWorkingMinutes: string;
       }
     >
   >({});
@@ -177,13 +378,13 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         id: generatedId,
         name: cleanName,
         description: newLineDesc.trim(),
-        dailyWorkingMinutes: Number(newLineMinutes) || 1350,
+        dailyWorkingMinutes: parseFloat(newLineMinutes) || 1350,
         isActive: true,
         sortOrder: (masterData.lines?.length ?? 3) + 1,
       });
       setNewLineName("");
       setNewLineDesc("");
-      setNewLineMinutes(1350);
+      setNewLineMinutes("1350");
       await onRefreshMasterData();
       showFeedback(`Added ${cleanName}.`);
     } catch (err) {
@@ -195,7 +396,8 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   };
 
   const handleUpdateLineMinutes = async (line: ProductionLineMaster) => {
-    const updatedMins = lineEdits[line.id] ?? line.dailyWorkingMinutes;
+    const rawVal = lineEdits[line.id];
+    const updatedMins = rawVal !== undefined ? parseFloat(rawVal) : line.dailyWorkingMinutes;
 
     setIsSubmitting(true);
     try {
@@ -203,15 +405,69 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         id: line.id,
         name: line.name,
         description: line.description ?? "",
-        dailyWorkingMinutes: Number(updatedMins) || 1350,
+        dailyWorkingMinutes: updatedMins || 1350,
         isActive: line.isActive,
         sortOrder: line.sortOrder,
       });
       await onRefreshMasterData();
-      showFeedback(`Updated ${line.name} working time to ${updatedMins} mins.`);
+      showFeedback(`Updated ${line.name} working time to ${updatedMins || 1350} mins.`);
     } catch (err) {
       console.error("Failed to update line:", err);
       showFeedback("Error updating line working minutes.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteLine = async (line: ProductionLineMaster) => {
+    if ((masterData.lines?.length ?? 0) <= 1) {
+      alert("At least one production line must remain active.");
+      return;
+    }
+    if (!window.confirm(`Delete production line "${line.name}"?`)) return;
+
+    setIsSubmitting(true);
+    try {
+      await deleteProductionLine(line.id);
+      await onRefreshMasterData();
+      showFeedback(`Deleted ${line.name}.`);
+    } catch (err) {
+      console.error("Failed to delete line:", err);
+      showFeedback("Error deleting production line.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleAddShift = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newShiftCode.trim()) return;
+
+    const code = newShiftCode.trim();
+    const display =
+      newShiftDisplay.trim() || `${code} (${newShiftStart}-${newShiftEnd})`;
+    const generatedId = code.toLowerCase().replace(/\s+/g, "_");
+
+    setIsSubmitting(true);
+    try {
+      await upsertShiftMaster({
+        id: generatedId,
+        shiftCode: code,
+        displayName: display as ShiftType,
+        startTime: `${newShiftStart}:00`,
+        endTime: `${newShiftEnd}:00`,
+        shiftWorkingMinutes: parseFloat(newShiftMins) || 450,
+        isActive: true,
+        sortOrder: (masterData.shifts?.length ?? 3) + 1,
+      });
+      setNewShiftCode("");
+      setNewShiftDisplay("");
+      setNewShiftMins("450");
+      await onRefreshMasterData();
+      showFeedback(`Added shift "${display}".`);
+    } catch (err) {
+      console.error("Failed to add shift:", err);
+      showFeedback("Error adding shift.");
     } finally {
       setIsSubmitting(false);
     }
@@ -221,8 +477,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
     const draft = shiftEdits[shift.id] ?? {
       startTime: shift.startTime,
       endTime: shift.endTime,
-      shiftWorkingMinutes: shift.shiftWorkingMinutes,
-      totalWorkingMinutesRef: shift.totalWorkingMinutesRef,
+      shiftWorkingMinutes: String(shift.shiftWorkingMinutes),
     };
 
     setIsSubmitting(true);
@@ -233,8 +488,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         displayName: shift.displayName as ShiftType,
         startTime: draft.startTime,
         endTime: draft.endTime,
-        shiftWorkingMinutes: Number(draft.shiftWorkingMinutes) || 450,
-        totalWorkingMinutesRef: Number(draft.totalWorkingMinutesRef) || 1350,
+        shiftWorkingMinutes: parseFloat(draft.shiftWorkingMinutes) || 450,
         isActive: shift.isActive,
         sortOrder: shift.sortOrder,
       });
@@ -248,166 +502,23 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
     }
   };
 
-  const [savedNotice, setSavedNotice] = useState<string | null>(null);
-
-  // New Operator Form State
-  const [newOperatorName, setNewOperatorName] = useState('');
-
-  // New Machine Form State
-  const [newMachineName, setNewMachineName] = useState('');
-  const [newMachineCode, setNewMachineCode] = useState('');
-  const [newMachineType, setNewMachineType] = useState('VMC / CNC');
-  const [newMachineLine, setNewMachineLine] = useState('Line 1');
-  const [machineLineFilter, setMachineLineFilter] = useState('all');
-
-  // New Item Form State
-  const [newItemName, setNewItemName] = useState('');
-  const [newItemCode, setNewItemCode] = useState('');
-  const [newOperation, setNewOperation] = useState('');
-  const [newStdOutput, setNewStdOutput] = useState<number>(100);
-
-  const triggerNotice = (msg: string) => {
-    setSavedNotice(msg);
-    setTimeout(() => setSavedNotice(null), 3000);
-  };
-
-  // --- Machine Handlers (Backed by Supabase) ---
-  const handleAddMachine = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newMachineName.trim()) return;
-
-    const nextNumber = masterData.machines.length + 1;
-    const newMachine: MachineMaster = {
-      id: `m${Date.now()}`,
-      name: newMachineName.trim().toUpperCase(),
-      code: newMachineCode.trim().toUpperCase() || `MC-${nextNumber}`,
-      line: newMachineLine,
-      type: newMachineType.trim(),
-      status: 'active',
-    };
-
-    try {
-      await upsertMachineMaster(newMachine, nextNumber);
-      await onRefreshMasterData();
-      setNewMachineName('');
-      setNewMachineCode('');
-      triggerNotice(`Added machine "${newMachine.name}" to plant directory.`);
-    } catch (err) {
-      console.error('Failed to add machine:', err);
-      alert('Failed to save machine to database.');
-    }
-  };
-
-  const handleDeleteMachine = async (id: string, name: string) => {
-    if (machines.length <= 1) {
-      alert('At least one machine must remain in the factory matrix.');
+  const handleDeleteShift = async (shift: ShiftMaster) => {
+    if ((masterData.shifts?.length ?? 0) <= 1) {
+      alert("At least one shift must remain active.");
       return;
     }
-    if (window.confirm(`Delete machine "${name}" from master data?`)) {
-      try {
-        await disableMachineMaster(id);
-        await onRefreshMasterData();
-        triggerNotice(`Machine "${name}" removed.`);
-      } catch (err) {
-        console.error('Failed to disable machine:', err);
-        alert('Failed to remove machine.');
-      }
-    }
-  };
+    if (!window.confirm(`Delete shift "${shift.displayName}"?`)) return;
 
-  // --- Operator Handlers (Backed by Supabase) ---
-  const handleAddOperator = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanName = newOperatorName.trim();
-    if (!cleanName) return;
-    if (operators.includes(cleanName)) {
-      alert('This operator name already exists.');
-      return;
-    }
-
+    setIsSubmitting(true);
     try {
-      await addOperatorMaster(cleanName);
+      await deleteShiftMaster(shift.id);
       await onRefreshMasterData();
-      setNewOperatorName('');
-      triggerNotice(`Operator "${cleanName}" registered.`);
+      showFeedback(`Deleted ${shift.displayName}.`);
     } catch (err) {
-      console.error('Failed to add operator:', err);
-      alert('Failed to save operator to database.');
-    }
-  };
-
-  const handleDeleteOperator = async (opName: string) => {
-    if (operators.length <= 1) {
-      alert('At least one operator must remain in master records.');
-      return;
-    }
-    if (window.confirm(`Remove operator "${opName}"?`)) {
-      try {
-        await removeOperatorMaster(opName);
-        await onRefreshMasterData();
-        triggerNotice(`Operator "${opName}" deleted.`);
-      } catch (err) {
-        console.error('Failed to remove operator:', err);
-        alert('Failed to remove operator.');
-      }
-    }
-  };
-
-  // --- Item & Operation Handlers (Backed by Supabase) ---
-  const handleAddItem = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newItemName.trim() || !newOperation.trim()) return;
-
-    const newItem: ItemMaster = {
-      id: `it_${Date.now()}`,
-      itemCode: newItemCode.trim().toUpperCase() || `P-${items.length + 1}`,
-      itemName: newItemName.trim(),
-      operation: newOperation.trim(),
-      stdOutput: Number(newStdOutput) || 50,
-    };
-
-    try {
-      await upsertItemMaster(newItem);
-      await onRefreshMasterData();
-      setNewItemName('');
-      setNewItemCode('');
-      setNewOperation('');
-      setNewStdOutput(100);
-      triggerNotice(`Component "${newItem.itemName}" registered.`);
-    } catch (err) {
-      console.error('Failed to add item:', err);
-      alert('Failed to save component to database.');
-    }
-  };
-
-  const handleUpdateItemStd = async (id: string, stdOutput: number) => {
-    const existingItem = items.find((it) => it.id === id);
-    if (!existingItem || existingItem.stdOutput === stdOutput) return;
-
-    try {
-      await upsertItemMaster({ ...existingItem, stdOutput });
-      await onRefreshMasterData();
-      triggerNotice('Standard output quota updated.');
-    } catch (err) {
-      console.error('Failed to update item quota:', err);
-      alert('Failed to update standard output.');
-    }
-  };
-
-  const handleDeleteItem = async (id: string, name: string) => {
-    if (items.length <= 1) {
-      alert('At least one item must remain in master directory.');
-      return;
-    }
-    if (window.confirm(`Delete part item "${name}"?`)) {
-      try {
-        await deleteItemMaster(id);
-        await onRefreshMasterData();
-        triggerNotice(`Item "${name}" removed.`);
-      } catch (err) {
-        console.error('Failed to delete item:', err);
-        alert('Failed to delete item.');
-      }
+      console.error("Failed to delete shift:", err);
+      showFeedback("Error deleting shift.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -421,7 +532,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
             <span>Master Data & Factory Parameters</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Manage client machines, machine shop operators, components, and target standard output quotas.
+            Manage client machines, operators, components, machine cycle times, and shift timings.
           </p>
         </div>
 
@@ -436,7 +547,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         )}
       </div>
 
-      {/* Save Notification */}
+      {/* Notifications */}
       {savedNotice && (
         <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs">
           <CheckCircle2 className="w-4 h-4 text-emerald-600" />
@@ -444,17 +555,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </div>
       )}
 
-      {/* Cycle Time / Lines / Shifts Notification */}
       {feedback && (
         <div
           className={`px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs border ${
-            feedback.startsWith('Error')
-              ? 'bg-rose-50 border-rose-300 text-rose-900'
-              : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+            feedback.startsWith("Error")
+              ? "bg-rose-50 border-rose-300 text-rose-900"
+              : "bg-emerald-50 border-emerald-300 text-emerald-900"
           }`}
         >
           <CheckCircle2
-            className={`w-4 h-4 ${feedback.startsWith('Error') ? 'text-rose-600' : 'text-emerald-600'}`}
+            className={`w-4 h-4 ${
+              feedback.startsWith("Error") ? "text-rose-600" : "text-emerald-600"
+            }`}
           />
           <span>{feedback}</span>
         </div>
@@ -463,11 +575,11 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       {/* Sub Tabs */}
       <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-2">
         <button
-          onClick={() => setSubTab('machines')}
+          onClick={() => setSubTab("machines")}
           className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-            subTab === 'machines'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            subTab === "machines"
+              ? "bg-slate-900 text-white"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
           }`}
         >
           <Factory className="w-3.5 h-3.5" />
@@ -475,11 +587,11 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </button>
 
         <button
-          onClick={() => setSubTab('operators')}
+          onClick={() => setSubTab("operators")}
           className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-            subTab === 'operators'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            subTab === "operators"
+              ? "bg-slate-900 text-white"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
           }`}
         >
           <User className="w-3.5 h-3.5" />
@@ -487,23 +599,23 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </button>
 
         <button
-          onClick={() => setSubTab('items')}
+          onClick={() => setSubTab("items")}
           className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-            subTab === 'items'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            subTab === "items"
+              ? "bg-slate-900 text-white"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
           }`}
         >
           <Package className="w-3.5 h-3.5" />
-          <span>Components & Standard Outputs ({items.length})</span>
+          <span>Components & Operations ({items.length})</span>
         </button>
 
         <button
-          onClick={() => setSubTab('cycle_times')}
+          onClick={() => setSubTab("cycle_times")}
           className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-            subTab === 'cycle_times'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            subTab === "cycle_times"
+              ? "bg-slate-900 text-white"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
           }`}
         >
           <Timer className="w-3.5 h-3.5" />
@@ -511,11 +623,11 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </button>
 
         <button
-          onClick={() => setSubTab('lines_shifts')}
+          onClick={() => setSubTab("lines_shifts")}
           className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-            subTab === 'lines_shifts'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            subTab === "lines_shifts"
+              ? "bg-slate-900 text-white"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
@@ -523,11 +635,13 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </button>
       </div>
 
-      {/* Sub Tab 1: Machines */}
-      {subTab === 'machines' && (
+      {/* SUB-TAB 1: MACHINES */}
+      {subTab === "machines" && (
         <div className="space-y-5">
-          {/* Add Machine Form */}
-          <form onSubmit={handleAddMachine} className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-3">
+          <form
+            onSubmit={handleAddMachine}
+            className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-3"
+          >
             <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
               <Plus className="w-3.5 h-3.5 text-emerald-600" />
               <span>Add New Shop Floor Machine</span>
@@ -559,7 +673,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 >
                   {lineOptions.map((line) => (
                     <option key={line.id} value={line.name}>
-                      {`${line.name}${line.description ? ` (${line.description})` : ''}`}
+                      {`${line.name}${line.description ? ` (${line.description})` : ""}`}
                     </option>
                   ))}
                 </select>
@@ -603,11 +717,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
             </div>
           </form>
 
-          {/* Machine List with Line Filter */}
           <div className="bg-white rounded-lg border border-slate-200 overflow-hidden shadow-2xs">
             <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3 text-xs">
               <span className="font-bold text-slate-800">
-                Machines Directory ({machines.filter((m) => machineLineFilter === 'all' || (m.line || 'Line 1') === machineLineFilter).length} shown)
+                Machines Directory (
+                {
+                  machines.filter(
+                    (m) =>
+                      machineLineFilter === "all" ||
+                      (m.line || "Line 1") === machineLineFilter
+                  ).length
+                }{" "}
+                shown)
               </span>
 
               <div className="flex items-center gap-2">
@@ -641,7 +762,11 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-200">
                 {machines
-                  .filter((m) => machineLineFilter === 'all' || (m.line || 'Line 1') === machineLineFilter)
+                  .filter(
+                    (m) =>
+                      machineLineFilter === "all" ||
+                      (m.line || "Line 1") === machineLineFilter
+                  )
                   .map((m, idx) => (
                     <tr key={m.id} className="hover:bg-slate-50">
                       <td className="px-3 py-2 text-center font-mono font-bold text-slate-500">
@@ -650,11 +775,13 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                       <td className="px-3 py-2 font-bold text-slate-900">{m.name}</td>
                       <td className="px-3 py-2">
                         <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-slate-100 text-slate-800 border border-slate-200">
-                          {m.line || 'Line 1'}
+                          {m.line || "Line 1"}
                         </span>
                       </td>
                       <td className="px-3 py-2 font-mono text-slate-600">{m.code}</td>
-                      <td className="px-3 py-2 text-slate-600">{m.type || 'CNC Machine'}</td>
+                      <td className="px-3 py-2 text-slate-600">
+                        {m.type || "CNC Machine"}
+                      </td>
                       <td className="px-3 py-2 text-center">
                         <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
                           Operational
@@ -677,11 +804,13 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </div>
       )}
 
-      {/* Sub Tab 2: Operators */}
-      {subTab === 'operators' && (
+      {/* SUB-TAB 2: OPERATORS */}
+      {subTab === "operators" && (
         <div className="space-y-5">
-          {/* Add Operator Form */}
-          <form onSubmit={handleAddOperator} className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-3">
+          <form
+            onSubmit={handleAddOperator}
+            className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-3"
+          >
             <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
               <Plus className="w-3.5 h-3.5 text-emerald-600" />
               <span>Register New Operator / Technician</span>
@@ -706,7 +835,6 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
             </div>
           </form>
 
-          {/* Operator Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
             {operators.map((op, idx) => (
               <div
@@ -719,7 +847,9 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                   </div>
                   <div>
                     <h4 className="font-bold text-xs text-slate-900">{op}</h4>
-                    <span className="text-[10px] text-slate-500 font-mono">Operator #{idx + 1}</span>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      Operator #{idx + 1}
+                    </span>
                   </div>
                 </div>
 
@@ -736,17 +866,19 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </div>
       )}
 
-      {/* Sub Tab 3: Items & Operations */}
-      {subTab === 'items' && (
+      {/* SUB-TAB 3: ITEMS & OPERATIONS (Std Output Removed) */}
+      {subTab === "items" && (
         <div className="space-y-5">
-          {/* Add Item Form */}
-          <form onSubmit={handleAddItem} className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-3">
+          <form
+            onSubmit={handleAddItem}
+            className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-3"
+          >
             <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
               <Plus className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Define New Machining Part & Standard Quota</span>
+              <span>Define New Machining Part & Operations</span>
             </h3>
 
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Item / Part Name <span className="text-rose-500">*</span>
@@ -776,28 +908,14 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Operation Name <span className="text-rose-500">*</span>
+                  Operation(s) <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. OP-10 Turning"
+                  placeholder="e.g. OP-10 Turning (or OP-10, OP-20)"
                   value={newOperation}
                   onChange={(e) => setNewOperation(e.target.value)}
                   className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Std Output Quota (Shift)
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  value={newStdOutput}
-                  onChange={(e) => setNewStdOutput(Number(e.target.value) || 1)}
-                  className="w-full px-3 py-1.5 text-xs font-mono border border-slate-300 rounded focus:border-slate-800 focus:outline-none text-center"
                   required
                 />
               </div>
@@ -809,41 +927,31 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 className="px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-bold flex items-center gap-1.5"
               >
                 <Plus className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Register Part & Target</span>
+                <span>Register Part</span>
               </button>
             </div>
           </form>
 
-          {/* Items Table */}
           <div className="bg-white rounded-lg border border-slate-200 overflow-hidden shadow-2xs">
             <table className="w-full text-xs text-left">
               <thead className="bg-slate-900 text-slate-100 uppercase text-[11px] font-semibold">
                 <tr>
                   <th className="px-3 py-2.5">Part Code</th>
                   <th className="px-3 py-2.5">Component / Item Name</th>
-                  <th className="px-3 py-2.5">Standard Operation</th>
-                  <th className="px-3 py-2.5 text-center">Std Output / Shift</th>
+                  <th className="px-3 py-2.5">Operations</th>
                   <th className="px-3 py-2.5 text-right w-20">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
                 {items.map((it) => (
                   <tr key={it.id} className="hover:bg-slate-50">
-                    <td className="px-3 py-2 font-mono font-bold text-slate-700">{it.itemCode}</td>
-                    <td className="px-3 py-2 font-bold text-slate-900">{it.itemName}</td>
-                    <td className="px-3 py-2 text-slate-600">{it.operation}</td>
-                    <td className="px-3 py-2 text-center">
-                      <div className="inline-flex items-center gap-1">
-                        <input
-                          type="number"
-                          min="1"
-                          defaultValue={it.stdOutput}
-                          onBlur={(e) => handleUpdateItemStd(it.id, Number(e.target.value) || 1)}
-                          className="w-16 px-1.5 py-0.5 text-center font-mono font-bold bg-slate-50 border border-slate-300 rounded text-xs focus:bg-white focus:border-slate-800 focus:outline-none"
-                        />
-                        <span className="text-slate-500 font-mono text-[11px]">pcs</span>
-                      </div>
+                    <td className="px-3 py-2 font-mono font-bold text-slate-700">
+                      {it.itemCode}
                     </td>
+                    <td className="px-3 py-2 font-bold text-slate-900">
+                      {it.itemName}
+                    </td>
+                    <td className="px-3 py-2 text-slate-600">{it.operation}</td>
                     <td className="px-3 py-2 text-right">
                       <button
                         onClick={() => handleDeleteItem(it.id, it.itemName)}
@@ -868,16 +976,17 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
             onSubmit={handleSaveCycleTime}
             className="bg-white p-4 rounded border border-slate-200 shadow-sm space-y-4"
           >
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <h3 className="text-sm font-bold text-slate-900">
-                Assign Machine × Item Cycle Time & Standard Output
+                Assign Machine × Item Cycle Time
               </h3>
               <span className="text-xs text-slate-500">
-                Selecting an item auto-fills its default operation and target
+                Standard output is auto-calculated from Cycle Time and operational shift minutes
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              {/* 1. Machine Dropdown */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Machine
@@ -885,7 +994,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 <select
                   value={ctMachineId}
                   onChange={(e) =>
-                    handleSelectCycleTimePair(e.target.value, ctItemId)
+                    handleSelectCycleTimeTriple(e.target.value, ctItemId)
                   }
                   className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm bg-white"
                   required
@@ -899,6 +1008,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 </select>
               </div>
 
+              {/* 2. Part / Item Dropdown */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Part / Item
@@ -906,7 +1016,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 <select
                   value={ctItemId}
                   onChange={(e) =>
-                    handleSelectCycleTimePair(ctMachineId, e.target.value)
+                    handleSelectCycleTimeTriple(ctMachineId, e.target.value)
                   }
                   className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm bg-white"
                   required
@@ -920,55 +1030,64 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 </select>
               </div>
 
+              {/* 3. Operation: Dropdown ONLY if multiple operations exist for this item */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Operation
                 </label>
-                <input
-                  type="text"
-                  value={ctOperation}
-                  onChange={(e) => setCtOperation(e.target.value)}
-                  placeholder="e.g. OP-10 Turning"
-                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm"
-                  required
-                />
+                {availableOperations.length > 1 ? (
+                  <select
+                    value={ctOperation}
+                    onChange={(e) =>
+                      handleSelectCycleTimeTriple(
+                        ctMachineId,
+                        ctItemId,
+                        e.target.value
+                      )
+                    }
+                    className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm bg-white font-medium"
+                    required
+                  >
+                    {availableOperations.map((op) => (
+                      <option key={op} value={op}>
+                        {op}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={ctOperation}
+                    onChange={(e) => setCtOperation(e.target.value)}
+                    placeholder="e.g. OP-10 Turning"
+                    className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm"
+                    required
+                  />
+                )}
               </div>
 
+              {/* 4. Cycle Time (Fixed sticky-0 bug) + Save Button */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Cycle Time
                 </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={ctCycleTime}
-                  onChange={(e) =>
-                    setCtCycleTime(parseFloat(e.target.value) || 0)
-                  }
-                  className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Target Std Output
-                </label>
                 <div className="flex gap-2">
                   <input
                     type="number"
-                    min="0"
-                    value={ctStdOutput}
-                    onChange={(e) =>
-                      setCtStdOutput(parseInt(e.target.value, 10) || 0)
-                    }
-                    className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm"
+                    step="0.01"
+                    min="0.01"
+                    placeholder="e.g. 54"
+                    value={ctCycleTime}
+                    onChange={(e) => setCtCycleTime(e.target.value)}
+                    onFocus={(e) => e.target.select()}
+                    className="w-full border border-slate-300 rounded px-2.5 py-1.5 text-sm font-mono"
                     required
                   />
                   <button
                     type="submit"
-                    disabled={isSubmitting || !ctMachineId || !ctItemId}
+                    disabled={
+                      isSubmitting || !ctMachineId || !ctItemId || !ctCycleTime
+                    }
                     className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-4 py-1.5 rounded text-xs font-semibold shrink-0"
                   >
                     {isSubmitting ? "Saving..." : "Save"}
@@ -990,9 +1109,6 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                     Cycle Time
                   </th>
                   <th className="py-2.5 px-3 font-semibold text-right">
-                    Std Output
-                  </th>
-                  <th className="py-2.5 px-3 font-semibold text-right">
                     Actions
                   </th>
                 </tr>
@@ -1000,76 +1116,70 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
               <tbody className="divide-y divide-slate-200">
                 {(masterData.cycleTimes ?? []).length === 0 ? (
                   <tr>
-                    <td
-                      colSpan={7}
-                      className="py-6 text-center text-slate-500"
-                    >
+                    <td colSpan={6} className="py-6 text-center text-slate-500">
                       No machine-specific cycle times configured yet. Use the form
                       above to add one.
                     </td>
                   </tr>
                 ) : (
-                  (masterData.cycleTimes ?? []).map(
-                    (ct: MachineItemCycleTime) => {
-                      const machineObj = masterData.machines.find(
-                        (m) => m.id === ct.machineId
-                      );
-                      const itemObj = masterData.items.find(
-                        (i) => i.id === ct.itemId
-                      );
+                  (masterData.cycleTimes ?? []).map((ct: MachineItemCycleTime) => {
+                    const machineObj = masterData.machines.find(
+                      (m) => m.id === ct.machineId
+                    );
+                    const itemObj = masterData.items.find(
+                      (i) => i.id === ct.itemId
+                    );
 
-                      return (
-                        <tr
-                          key={ct.id ?? `${ct.machineId}_${ct.itemId}_${ct.operation}`}
-                          className="hover:bg-slate-50"
-                        >
-                          <td className="py-2 px-3 font-medium text-slate-900">
-                            {machineObj?.name ?? ct.machineId}
-                          </td>
-                          <td className="py-2 px-3 text-slate-600">
-                            {machineObj?.line ?? "-"}
-                          </td>
-                          <td className="py-2 px-3 text-slate-800">
-                            {itemObj
-                              ? `${itemObj.itemCode} — ${itemObj.itemName}`
-                              : ct.itemId}
-                          </td>
-                          <td className="py-2 px-3 text-slate-600">
-                            {ct.operation}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono font-semibold text-blue-700">
-                            {ct.cycleTime.toFixed(2)}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono">
-                            {ct.stdOutput}
-                          </td>
-                          <td className="py-2 px-3 text-right space-x-3">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setCtMachineId(ct.machineId);
-                                setCtItemId(ct.itemId);
-                                setCtOperation(ct.operation);
-                                setCtCycleTime(ct.cycleTime);
-                                setCtStdOutput(ct.stdOutput);
-                              }}
-                              className="text-blue-600 hover:underline font-medium"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              disabled={isSubmitting}
-                              onClick={() => handleDeleteCycleTime(ct.id)}
-                              className="text-red-600 hover:underline font-medium disabled:opacity-50"
-                            >
-                              Delete
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    }
-                  )
+                    return (
+                      <tr
+                        key={
+                          ct.id ??
+                          `${ct.machineId}_${ct.itemId}_${ct.operation}`
+                        }
+                        className="hover:bg-slate-50"
+                      >
+                        <td className="py-2 px-3 font-medium text-slate-900">
+                          {machineObj?.name ?? ct.machineId}
+                        </td>
+                        <td className="py-2 px-3 text-slate-600">
+                          {machineObj?.line ?? "-"}
+                        </td>
+                        <td className="py-2 px-3 text-slate-800">
+                          {itemObj
+                            ? `${itemObj.itemCode} — ${itemObj.itemName}`
+                            : ct.itemId}
+                        </td>
+                        <td className="py-2 px-3 text-slate-600">
+                          {ct.operation}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-semibold text-blue-700">
+                          {Number(ct.cycleTime).toFixed(2)}
+                        </td>
+                        <td className="py-2 px-3 text-right space-x-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCtMachineId(ct.machineId);
+                              setCtItemId(ct.itemId);
+                              setCtOperation(ct.operation);
+                              setCtCycleTime(String(ct.cycleTime));
+                            }}
+                            className="text-blue-600 hover:underline font-medium"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSubmitting}
+                            onClick={() => handleDeleteCycleTime(ct.id)}
+                            className="text-red-600 hover:underline font-medium disabled:opacity-50"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -1077,9 +1187,10 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         </div>
       )}
 
-      {/* SUB-TAB 5: PRODUCTION LINES, SHIFTS & WORKING TIME (1350m) */}
+      {/* SUB-TAB 5: PRODUCTION LINES & SHIFTS */}
       {subTab === "lines_shifts" && (
         <div className="space-y-8">
+          {/* Production Lines Section */}
           <div className="bg-white p-4 rounded border border-slate-200 shadow-sm space-y-4">
             <div>
               <h3 className="text-sm font-bold text-slate-900">
@@ -1102,56 +1213,63 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                       Daily Working Minutes (Default: 1350m)
                     </th>
                     <th className="py-2 px-3 font-semibold text-right">
-                      Action
+                      Actions
                     </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
-                  {(masterData.lines ?? []).map(
-                    (line: ProductionLineMaster) => {
-                      const currentMins =
-                        lineEdits[line.id] ?? line.dailyWorkingMinutes;
+                  {(masterData.lines ?? []).map((line: ProductionLineMaster) => {
+                    const currentMinsStr =
+                      lineEdits[line.id] ?? String(line.dailyWorkingMinutes);
+                    const numericMins = parseFloat(currentMinsStr) || 0;
 
-                      return (
-                        <tr key={line.id} className="hover:bg-slate-50">
-                          <td className="py-2 px-3 font-mono text-slate-500">
-                            {line.id}
-                          </td>
-                          <td className="py-2 px-3 font-semibold text-slate-900">
-                            {line.name}
-                          </td>
-                          <td className="py-2 px-3">
-                            <input
-                              type="number"
-                              min="1"
-                              step="1"
-                              value={currentMins}
-                              onChange={(e) =>
-                                setLineEdits((prev) => ({
-                                  ...prev,
-                                  [line.id]: parseFloat(e.target.value) || 0,
-                                }))
-                              }
-                              className="w-32 border border-slate-300 rounded px-2 py-1 text-xs font-mono"
-                            />
-                            <span className="ml-2 text-slate-500">
-                              mins ({(currentMins / 60).toFixed(2)} hrs)
-                            </span>
-                          </td>
-                          <td className="py-2 px-3 text-right">
-                            <button
-                              type="button"
-                              disabled={isSubmitting}
-                              onClick={() => handleUpdateLineMinutes(line)}
-                              className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white px-3 py-1 rounded text-xs font-medium"
-                            >
-                              Update Line
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    }
-                  )}
+                    return (
+                      <tr key={line.id} className="hover:bg-slate-50">
+                        <td className="py-2 px-3 font-mono text-slate-500">
+                          {line.id}
+                        </td>
+                        <td className="py-2 px-3 font-semibold text-slate-900">
+                          {line.name}
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={currentMinsStr}
+                            onChange={(e) =>
+                              setLineEdits((prev) => ({
+                                ...prev,
+                                [line.id]: e.target.value,
+                              }))
+                            }
+                            className="w-28 border border-slate-300 rounded px-2 py-1 text-xs font-mono"
+                          />
+                          <span className="ml-2 text-slate-500">
+                            mins ({(numericMins / 60).toFixed(2)} hrs)
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 text-right space-x-2">
+                          <button
+                            type="button"
+                            disabled={isSubmitting}
+                            onClick={() => handleUpdateLineMinutes(line)}
+                            className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white px-3 py-1 rounded text-xs font-medium"
+                          >
+                            Update Line
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSubmitting}
+                            onClick={() => handleDeleteLine(line)}
+                            className="text-rose-600 hover:text-rose-800 px-2 py-1 rounded text-xs font-medium"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1192,9 +1310,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 <input
                   type="number"
                   value={newLineMinutes}
-                  onChange={(e) =>
-                    setNewLineMinutes(parseFloat(e.target.value) || 1350)
-                  }
+                  onChange={(e) => setNewLineMinutes(e.target.value)}
                   className="w-28 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
                   required
                 />
@@ -1209,14 +1325,14 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
             </form>
           </div>
 
+          {/* Shifts Section (Total Ref Mins Removed + Add/Delete Shift Added) */}
           <div className="bg-white p-4 rounded border border-slate-200 shadow-sm space-y-4">
             <div>
               <h3 className="text-sm font-bold text-slate-900">
-                Shifts & Working Time Reference
+                Shifts & Shift Working Minutes
               </h3>
               <p className="text-xs text-slate-500">
-                Configure shift start/end timings, shift minutes (450m), and
-                total factory working minutes reference (1350m).
+                Configure shift start/end timings and shift working minutes (e.g. 450m per shift).
               </p>
             </div>
 
@@ -1228,12 +1344,9 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                     <th className="py-2 px-3 font-semibold">Display Name</th>
                     <th className="py-2 px-3 font-semibold">Start Time</th>
                     <th className="py-2 px-3 font-semibold">End Time</th>
-                    <th className="py-2 px-3 font-semibold">Shift Mins</th>
-                    <th className="py-2 px-3 font-semibold">
-                      Total Ref Mins (1350m)
-                    </th>
+                    <th className="py-2 px-3 font-semibold">Shift Working Mins</th>
                     <th className="py-2 px-3 font-semibold text-right">
-                      Action
+                      Actions
                     </th>
                   </tr>
                 </thead>
@@ -1242,8 +1355,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                     const current = shiftEdits[shift.id] ?? {
                       startTime: shift.startTime,
                       endTime: shift.endTime,
-                      shiftWorkingMinutes: shift.shiftWorkingMinutes,
-                      totalWorkingMinutesRef: shift.totalWorkingMinutesRef,
+                      shiftWorkingMinutes: String(shift.shiftWorkingMinutes),
                     };
 
                     const updateDraft = (patch: Partial<typeof current>) => {
@@ -1287,27 +1399,14 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                             value={current.shiftWorkingMinutes}
                             onChange={(e) =>
                               updateDraft({
-                                shiftWorkingMinutes:
-                                  parseFloat(e.target.value) || 0,
-                              })
-                            }
-                            className="w-20 border border-slate-300 rounded px-2 py-1 text-xs font-mono"
-                          />
-                        </td>
-                        <td className="py-2 px-3">
-                          <input
-                            type="number"
-                            value={current.totalWorkingMinutesRef}
-                            onChange={(e) =>
-                              updateDraft({
-                                totalWorkingMinutesRef:
-                                  parseFloat(e.target.value) || 0,
+                                shiftWorkingMinutes: e.target.value,
                               })
                             }
                             className="w-24 border border-slate-300 rounded px-2 py-1 text-xs font-mono"
                           />
+                          <span className="ml-1.5 text-slate-500">mins</span>
                         </td>
-                        <td className="py-2 px-3 text-right">
+                        <td className="py-2 px-3 text-right space-x-2">
                           <button
                             type="button"
                             disabled={isSubmitting}
@@ -1316,6 +1415,14 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                           >
                             Save Shift
                           </button>
+                          <button
+                            type="button"
+                            disabled={isSubmitting}
+                            onClick={() => handleDeleteShift(shift)}
+                            className="text-rose-600 hover:text-rose-800 px-2 py-1 rounded text-xs font-medium"
+                          >
+                            Delete
+                          </button>
                         </td>
                       </tr>
                     );
@@ -1323,6 +1430,81 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 </tbody>
               </table>
             </div>
+
+            {/* Add New Shift Form */}
+            <form
+              onSubmit={handleAddShift}
+              className="pt-3 border-t border-slate-200 flex flex-wrap items-end gap-3"
+            >
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Shift Code
+                </label>
+                <input
+                  type="text"
+                  value={newShiftCode}
+                  onChange={(e) => setNewShiftCode(e.target.value)}
+                  placeholder="e.g. Shift D"
+                  className="w-28 border border-slate-300 rounded px-2.5 py-1.5 text-xs"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Display Name (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={newShiftDisplay}
+                  onChange={(e) => setNewShiftDisplay(e.target.value)}
+                  placeholder="e.g. Shift D (General)"
+                  className="w-44 border border-slate-300 rounded px-2.5 py-1.5 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Start Time
+                </label>
+                <input
+                  type="time"
+                  value={newShiftStart}
+                  onChange={(e) => setNewShiftStart(e.target.value)}
+                  className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  End Time
+                </label>
+                <input
+                  type="time"
+                  value={newShiftEnd}
+                  onChange={(e) => setNewShiftEnd(e.target.value)}
+                  className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Shift Working Mins
+                </label>
+                <input
+                  type="number"
+                  value={newShiftMins}
+                  onChange={(e) => setNewShiftMins(e.target.value)}
+                  className="w-24 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
+                  required
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isSubmitting || !newShiftCode.trim()}
+                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-4 py-1.5 rounded text-xs font-semibold"
+              >
+                + Add Shift
+              </button>
+            </form>
           </div>
         </div>
       )}

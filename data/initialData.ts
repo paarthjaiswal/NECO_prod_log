@@ -170,7 +170,7 @@ export const generateSampleHistoricalLogs = (): MachineShiftRow[] => {
         const operator = INITIAL_OPERATORS[(idx + (line === 'Line 2' ? 2 : 4)) % INITIAL_OPERATORS.length];
 
         const variance = idx % 3 === 0 ? -15 : idx % 2 === 0 ? 4 : -2;
-        const actualOutput = Math.max(0, item.stdOutput + variance);
+        const actualOutput = Math.max(0, (item.stdOutput ?? 100) + variance);
         const rework = idx % 4 === 0 ? 3 : 1;
         const noDisc = idx === 3 || idx === 7 ? 20 : 0;
         const change = idx % 3 === 0 ? 15 : 5;
@@ -191,7 +191,7 @@ export const generateSampleHistoricalLogs = (): MachineShiftRow[] => {
           operation: item.operation,
           cycleTime: 0,
           totalWorkingMinutes: 1350,
-          stdOutput: item.stdOutput,
+          stdOutput: item.stdOutput ?? 0,
           actualOutput,
           rework,
           breakdown: {

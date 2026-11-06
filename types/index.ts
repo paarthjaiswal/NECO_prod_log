@@ -21,7 +21,7 @@ export interface ShiftMaster {
   startTime: string;              // e.g. '06:00:00'
   endTime: string;                // e.g. '14:00:00'
   shiftWorkingMinutes: number;    // Default 450
-  totalWorkingMinutesRef: number; // Default 1350
+  totalWorkingMinutesRef?: number; // Default 1350
   isActive: boolean;
   sortOrder: number;
 }
@@ -32,7 +32,7 @@ export interface MachineItemCycleTime {
   itemId: string;
   operation: string;
   cycleTime: number; // Time to produce 1 unit
-  stdOutput: number; // Specific target output for this Machine + Item + Operation
+  stdOutput?: number; // Specific target output for this Machine + Item + Operation
   isActive?: boolean;
 }
 
@@ -41,7 +41,7 @@ export interface ItemMaster {
   itemCode: string;
   itemName: string;
   operation: string;
-  stdOutput: number;
+  stdOutput?: number;
 }
 
 export interface BreakdownMinutes {

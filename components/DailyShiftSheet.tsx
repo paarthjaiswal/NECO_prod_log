@@ -21,6 +21,8 @@ import {
   calculateEfficiency,
   calculateTotalBreakdown,
   resolveMachineItemTarget,
+  getOperationsForItem,
+  calculateDynamicStdOutput,
   calculateDowntimePct,
 } from '@/services/storageService';
 
@@ -53,12 +55,17 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   onExportExcel,
   onOpenMachineInKiosk,
 }) => {
-const operators: string[] = masterData?.operators ?? [];
-const items: ItemMaster[] = masterData?.items ?? [];
-const cycleTimes: MachineItemCycleTime[] = masterData?.cycleTimes ?? [];
-const lineWorkingMinutes =
-  masterData?.lines?.find((l) => l.name === selectedLine)?.dailyWorkingMinutes ?? 1350;
-const hasUnsavedChanges = hasUnsavedDraft;
+  const operators: string[] = masterData?.operators ?? [];
+  const items: ItemMaster[] = masterData?.items ?? [];
+  const cycleTimes: MachineItemCycleTime[] = masterData?.cycleTimes ?? [];
+
+  const lineWorkingMinutes =
+    masterData?.lines?.find((l) => l.name === selectedLine)?.dailyWorkingMinutes ?? 1350;
+
+  const shiftWorkingMinutes =
+    masterData?.shifts?.find((s) => s.displayName === selectedShift)?.shiftWorkingMinutes ?? 450;
+
+  const hasUnsavedChanges = hasUnsavedDraft;
 
   // Apply a patch to one row (single onRowsChange call -> single draft write)
   const updateRow = useCallback(
@@ -80,7 +87,7 @@ const hasUnsavedChanges = hasUnsavedDraft;
     );
   };
 
-  // Handle Item Selection which auto-populates Operation, Cycle Time, and Std Output
+  // 1. When Item changes: auto-select default operation & fetch matching Cycle Time + Std Output
   const handleItemChange = useCallback(
     (index: number, itemId: string) => {
       const currentRow = rows[index];
@@ -95,11 +102,15 @@ const hasUnsavedChanges = hasUnsavedDraft;
         return;
       }
 
+      const totalBd = calculateTotalBreakdown(currentRow.breakdown);
       const target = resolveMachineItemTarget(
         currentRow.machineId,
         itemId,
         items,
-        cycleTimes
+        cycleTimes,
+        undefined, // Let helper pick the 1st operation for this item
+        shiftWorkingMinutes,
+        totalBd
       );
 
       updateRow(index, {
@@ -111,22 +122,61 @@ const hasUnsavedChanges = hasUnsavedDraft;
         totalWorkingMinutes: currentRow.totalWorkingMinutes || lineWorkingMinutes,
       });
     },
-    [rows, items, cycleTimes, lineWorkingMinutes, updateRow]
+    [rows, items, cycleTimes, shiftWorkingMinutes, lineWorkingMinutes, updateRow]
   );
 
-  // Handle Breakdown Sub-column update
-  const handleBreakdownChange = useCallback(
-    (index: number, field: 'noDisc' | 'change' | 'power' | 'operator', val: number) => {
-      const current = rows[index].breakdown || { noDisc: 0, change: 0, power: 0, operator: 0 };
-      const safeVal = isNaN(val) ? 0 : Math.max(0, val);
+  // 2. When Operation changes: re-fetch Cycle Time for (Machine + Item + selected Operation)
+  const handleOperationChange = useCallback(
+    (index: number, operationName: string) => {
+      const currentRow = rows[index];
+      if (!currentRow.itemId) {
+        updateRow(index, { operation: operationName });
+        return;
+      }
+
+      const totalBd = calculateTotalBreakdown(currentRow.breakdown);
+      const target = resolveMachineItemTarget(
+        currentRow.machineId,
+        currentRow.itemId,
+        items,
+        cycleTimes,
+        operationName,
+        shiftWorkingMinutes,
+        totalBd
+      );
+
       updateRow(index, {
-        breakdown: {
-          ...current,
-          [field]: safeVal,
-        },
+        operation: operationName,
+        cycleTime: target.cycleTime,
+        stdOutput: target.stdOutput,
       });
     },
-    [rows, updateRow]
+    [rows, items, cycleTimes, shiftWorkingMinutes, updateRow]
+  );
+
+  // Handle Breakdown Sub-column update (recalculates stdOutput dynamically if cycleTime > 0)
+  const handleBreakdownChange = useCallback(
+    (index: number, field: 'noDisc' | 'change' | 'power' | 'operator', val: number) => {
+      const currentRow = rows[index];
+      const currentBd = currentRow.breakdown || { noDisc: 0, change: 0, power: 0, operator: 0 };
+      const safeVal = isNaN(val) ? 0 : Math.max(0, val);
+      const nextBd = {
+        ...currentBd,
+        [field]: safeVal,
+      };
+
+      const nextTotalBd = calculateTotalBreakdown(nextBd);
+      const updatedStd =
+        currentRow.cycleTime > 0
+          ? calculateDynamicStdOutput(currentRow.cycleTime, shiftWorkingMinutes, nextTotalBd)
+          : currentRow.stdOutput;
+
+      updateRow(index, {
+        breakdown: nextBd,
+        stdOutput: updatedStd,
+      });
+    },
+    [rows, shiftWorkingMinutes, updateRow]
   );
 
   // Quick fill remaining unassigned machines with sensible defaults
@@ -308,7 +358,7 @@ const hasUnsavedChanges = hasUnsavedDraft;
                 <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-42.5">
                   OPERATION
                 </th>
-                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20">
+                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-22">
                   CYCLE TIME
                 </th>
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20">
@@ -363,6 +413,9 @@ const hasUnsavedChanges = hasUnsavedDraft;
                 const efficiency = hasTarget ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
                 const isUnderperforming = hasTarget && row.actualOutput < row.stdOutput;
                 const isRowConfigured = !!row.operatorName && !!row.itemName;
+                const rowOperations = row.itemId
+                  ? getOperationsForItem(row.itemId, items, cycleTimes, row.machineId)
+                  : [];
                 const rowWorkingMinutes = row.totalWorkingMinutes || lineWorkingMinutes;
                 const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
 
@@ -420,28 +473,63 @@ const hasUnsavedChanges = hasUnsavedDraft;
                       </select>
                     </td>
 
-                    {/* 5. OPERATION */}
+                    {/* 5. OPERATION (Dropdown when multiple operations exist for selected Item) */}
                     <td className="px-1.5 py-1 border-r border-slate-200">
-                      <input
-                        type="text"
-                        value={row.operation}
-                        onChange={(e) => updateRow(index, { operation: e.target.value })}
-                        placeholder="e.g. OP-10 Turning"
-                        className="w-full bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white text-xs text-slate-800 focus:outline-none"
-                      />
+                      {!row.itemId ? (
+                        <span className="block px-2 py-1 text-xs text-slate-400 italic">
+                          — Select Item First —
+                        </span>
+                      ) : rowOperations.length > 1 ? (
+                        <select
+                          value={row.operation}
+                          onChange={(e) => handleOperationChange(index, e.target.value)}
+                          className="w-full bg-transparent px-1.5 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white text-xs text-slate-900 font-medium focus:outline-none"
+                        >
+                          {rowOperations.map((op) => (
+                            <option key={op} value={op}>
+                              {op}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={row.operation}
+                          onChange={(e) => handleOperationChange(index, e.target.value)}
+                          placeholder="e.g. OP-10 Turning"
+                          className="w-full bg-transparent px-2 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white text-xs text-slate-800 font-medium focus:outline-none"
+                        />
+                      )}
                     </td>
 
-                    {/* 5B. CYCLE TIME */}
+                    {/* 5B. CYCLE TIME (Auto-fetched from Machine x Item x Operation) */}
                     <td className="px-1 py-1 border-r border-slate-200 text-center">
                       <input
                         type="number"
                         min="0"
                         step="0.01"
-                        value={row.cycleTime || ''}
-                        placeholder="0.00"
+                        value={row.cycleTime > 0 ? row.cycleTime : ''}
+                        placeholder="—"
+                        title={
+                          row.cycleTime > 0
+                            ? `Cycle time: ${row.cycleTime}s`
+                            : 'No cycle time configured for this Machine + Item + Operation in Master Data'
+                        }
                         onFocus={(e) => e.target.select()}
-                        onChange={(e) => updateRow(index, { cycleTime: Number(e.target.value) || 0 })}
-                        className="w-16 mx-auto text-center font-mono text-xs text-slate-700 bg-transparent px-1 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white focus:outline-none"
+                        onChange={(e) => {
+                          const newCt = parseFloat(e.target.value) || 0;
+                          const totalBd = calculateTotalBreakdown(row.breakdown);
+                          const newStd =
+                            newCt > 0
+                              ? calculateDynamicStdOutput(newCt, shiftWorkingMinutes, totalBd)
+                              : row.stdOutput;
+                          updateRow(index, { cycleTime: newCt, stdOutput: newStd });
+                        }}
+                        className={`w-16 mx-auto text-center font-mono text-xs px-1 py-1 rounded border ${
+                          row.cycleTime > 0
+                            ? 'bg-blue-50/60 text-blue-900 font-bold border-blue-200'
+                            : 'bg-transparent text-slate-400 border-transparent hover:border-slate-300'
+                        } focus:border-slate-800 focus:bg-white focus:outline-none`}
                       />
                     </td>
 

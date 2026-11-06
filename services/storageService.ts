@@ -47,33 +47,142 @@ export function calculateEfficiency(
 }
 
 /**
- * Looks up (machineId + itemId) in machine_item_cycle_times first.
- * Falls back to ItemMaster if no machine-specific override exists yet.
+ * Extracts all available operations for a given Item.
+ * Supports comma/slash-separated operations (e.g., "OP-10, OP-20"),
+ * multiple rows with the same itemCode/itemName, and operations saved in cycleTimes.
+ */
+export function getOperationsForItem(
+  itemId: string,
+  items: ItemMaster[],
+  cycleTimes: MachineItemCycleTime[] = [],
+  machineId?: string
+): string[] {
+  const selectedItem = items.find((i) => i.id === itemId);
+  if (!selectedItem) return [];
+
+  const matchingItems = items.filter(
+    (i) =>
+      i.id === selectedItem.id ||
+      (i.itemCode && i.itemCode === selectedItem.itemCode) ||
+      i.itemName.toLowerCase() === selectedItem.itemName.toLowerCase()
+  );
+
+  const opsSet = new Set<string>();
+
+  // 1. Collect operations from ItemMaster definitions
+  matchingItems.forEach((item) => {
+    item.operation
+      .split(/[,/]/)
+      .map((op) => op.trim())
+      .filter(Boolean)
+      .forEach((op) => opsSet.add(op));
+  });
+
+  // 2. Also include any custom operations configured in machine_item_cycle_times
+  cycleTimes
+    .filter(
+      (ct) =>
+        ct.itemId === itemId && (!machineId || ct.machineId === machineId)
+    )
+    .forEach((ct) => {
+      if (ct.operation?.trim()) {
+        opsSet.add(ct.operation.trim());
+      }
+    });
+
+  return Array.from(opsSet);
+}
+
+/**
+ * Calculates Standard Output dynamically from Cycle Time and net shift operating minutes.
+ * Assumes Cycle Time is in seconds (e.g. 54 sec) and default shift is 450 mins (1350 / 3).
+ */
+export function calculateDynamicStdOutput(
+  cycleTimeSeconds: number,
+  shiftWorkingMinutes: number = 450,
+  totalBreakdownMinutes: number = 0
+): number {
+  const ct = Number(cycleTimeSeconds) || 0;
+  if (ct <= 0) return 0;
+
+  const netMinutes = Math.max(
+    0,
+    (Number(shiftWorkingMinutes) || 450) - (Number(totalBreakdownMinutes) || 0)
+  );
+  return Math.floor((netMinutes * 60) / ct);
+}
+
+/**
+ * Looks up (machineId + itemId + operation) in machine_item_cycle_times.
+ * Auto-populates operation, cycleTime, and calculated stdOutput.
  */
 export function resolveMachineItemTarget(
   machineId: string,
   itemId: string,
   items: ItemMaster[],
-  cycleTimes: MachineItemCycleTime[] = []
+  cycleTimes: MachineItemCycleTime[] = [],
+  explicitOperation?: string,
+  shiftWorkingMinutes: number = 450,
+  totalBreakdownMinutes: number = 0
 ) {
   const baseItem = items.find((it) => it.id === itemId);
   if (!baseItem) {
-    return { itemName: "", operation: "", cycleTime: 0, stdOutput: 0 };
+    return {
+      itemName: "",
+      operation: "",
+      availableOperations: [] as string[],
+      cycleTime: 0,
+      stdOutput: 0,
+    };
   }
 
-  // Check if this specific Machine + Item has a custom cycle time configured
-  const specificMatch = cycleTimes.find(
-    (ct) => ct.machineId === machineId && ct.itemId === itemId
+  const availableOperations = getOperationsForItem(
+    itemId,
+    items,
+    cycleTimes,
+    machineId
   );
+
+  // Pick the explicitly chosen operation, or default to the first available operation
+  const chosenOperation =
+    explicitOperation !== undefined
+      ? explicitOperation
+      : availableOperations[0] || baseItem.operation || "";
+
+  // 1. Try exact triple match: (machineId + itemId + chosenOperation)
+  let matchedCt = cycleTimes.find(
+    (ct) =>
+      ct.machineId === machineId &&
+      ct.itemId === itemId &&
+      ct.operation.trim().toLowerCase() === chosenOperation.trim().toLowerCase()
+  );
+
+  // 2. Fallback: if only one cycle time record exists for (machineId + itemId), use it
+  if (!matchedCt && !explicitOperation) {
+    matchedCt = cycleTimes.find(
+      (ct) => ct.machineId === machineId && ct.itemId === itemId
+    );
+  }
+
+  const resolvedCycleTime = matchedCt ? Number(matchedCt.cycleTime) || 0 : 0;
+  const resolvedOperation = matchedCt?.operation || chosenOperation;
+
+  // Auto-calculate stdOutput from cycleTime if cycleTime > 0
+  const calculatedStd =
+    resolvedCycleTime > 0
+      ? calculateDynamicStdOutput(
+          resolvedCycleTime,
+          shiftWorkingMinutes,
+          totalBreakdownMinutes
+        )
+      : Number(baseItem.stdOutput) || 0;
 
   return {
     itemName: baseItem.itemName,
-    operation: specificMatch?.operation || baseItem.operation,
-    cycleTime: specificMatch ? Number(specificMatch.cycleTime) : 0,
-    stdOutput:
-      specificMatch && specificMatch.stdOutput > 0
-        ? Number(specificMatch.stdOutput)
-        : Number(baseItem.stdOutput),
+    operation: resolvedOperation,
+    availableOperations,
+    cycleTime: resolvedCycleTime,
+    stdOutput: calculatedStd,
   };
 }
 

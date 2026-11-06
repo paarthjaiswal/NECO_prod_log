@@ -298,16 +298,36 @@ export default function DashboardClient({
         onResetDemo={handleResetDemo}
       />
 
-      {(isPending || hasUnsavedDraft || statusMessage) && (
-        <div className="bg-slate-800 text-white text-xs px-4 py-1.5 flex items-center justify-between">
+      {/* Lightweight status bar — only shows draft prompt on Sheet/Kiosk tabs with direct action buttons */}
+      {(isPending ||
+        statusMessage ||
+        (hasUnsavedDraft && (activeTab === "sheet" || activeTab === "kiosk"))) && (
+        <div className="bg-slate-800 text-white text-xs px-4 py-1.5 flex items-center justify-between gap-4">
           <span>
             {isPending
               ? "Syncing with Supabase..."
               : statusMessage ||
-              (hasUnsavedDraft
-                ? "Unsaved local draft active — click Save Shift to sync."
-                : "")}
+                "Unsaved shift sheet draft active — save or discard to clear."}
           </span>
+
+          {hasUnsavedDraft && !isPending && (
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleSaveShiftSheet(currentShiftRows)}
+                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-2.5 py-0.5 rounded text-[11px]"
+              >
+                Save Shift Now
+              </button>
+              <button
+                type="button"
+                onClick={handleDiscardDraft}
+                className="text-slate-300 hover:text-white underline text-[11px]"
+              >
+                Discard Draft
+              </button>
+            </div>
+          )}
         </div>
       )}
 

@@ -529,7 +529,6 @@ export async function upsertItemMaster(item: ItemMaster) {
         item_code: item.itemCode.trim(),
         item_name: item.itemName.trim(),
         operation: item.operation.trim(),
-        std_output: Number(item.stdOutput) || 0,
       },
       { onConflict: "id" }
     )
@@ -576,13 +575,7 @@ export async function removeOperatorMaster(operatorName: string) {
   return { success: true };
 }
 
-// Replace lines 394-411 in actions/shiftActions.ts with:
-export async function upsertMachineItemCycleTime(
-  entry: Omit<MachineItemCycleTime, "id" | "isActive"> & {
-    id?: number;
-    isActive?: boolean;
-  }
-) {
+export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
   const supabase = createAdminClient();
   const { error } = await supabase.from("machine_item_cycle_times").upsert(
     {
@@ -590,8 +583,7 @@ export async function upsertMachineItemCycleTime(
       item_id: entry.itemId,
       operation: entry.operation.trim(),
       cycle_time: Number(entry.cycleTime) || 0,
-      std_output: Number(entry.stdOutput) || 0,
-      is_active: entry.isActive ?? true,
+      is_active: true,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "machine_id,item_id,operation" }
@@ -643,12 +635,37 @@ export async function upsertShiftMaster(shift: ShiftMaster) {
       start_time: shift.startTime,
       end_time: shift.endTime,
       shift_working_minutes: Number(shift.shiftWorkingMinutes) || 450,
-      total_working_minutes_ref: Number(shift.totalWorkingMinutesRef) || 1350,
       is_active: shift.isActive ?? true,
       sort_order: shift.sortOrder ?? 99,
     },
     { onConflict: "id" }
   );
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/");
+  return { success: true };
+}
+
+export async function deleteProductionLine(lineId: string) {
+  const supabase = createAdminClient();
+  // Soft-delete so historical shift_logs on this line stay intact
+  const { error } = await supabase
+    .from("production_lines")
+    .update({ is_active: false })
+    .eq("id", lineId);
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/");
+  return { success: true };
+}
+
+export async function deleteShiftMaster(shiftId: string) {
+  const supabase = createAdminClient();
+  // Soft-delete so historical shift_logs on this shift stay intact
+  const { error } = await supabase
+    .from("shifts")
+    .update({ is_active: false })
+    .eq("id", shiftId);
 
   if (error) throw new Error(error.message);
   revalidatePath("/");

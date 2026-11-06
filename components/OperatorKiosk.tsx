@@ -148,7 +148,7 @@ export function OperatorKiosk({
       );
       const targetOp = ctMatch?.operation || item.operation;
       const targetCycleTime = ctMatch?.cycleTime ?? 0;
-      const targetStd = ctMatch?.stdOutput ?? item.stdOutput;
+      const targetStd = ctMatch?.stdOutput ?? item.stdOutput ?? 0;
 
       setDraft({
         ...draft,
