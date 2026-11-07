@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   Download,
   CheckCircle2,
@@ -151,6 +151,39 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     );
   };
 
+  // Auto-populate stored Cycle Time for any row that has an Item configured but cycleTime is 0
+  useEffect(() => {
+    if (!cycleTimes || cycleTimes.length === 0 || rows.length === 0) return;
+
+    let hasUpdates = false;
+    const updated = rows.map((row) => {
+      if (!row.itemId || row.cycleTime > 0) return row;
+      const target = resolveMachineItemTarget(
+        row.machineId,
+        row.itemId,
+        items,
+        cycleTimes,
+        row.operation || undefined,
+        shiftWorkingMinutes,
+        row.machineName
+      );
+      if (target.cycleTime > 0) {
+        hasUpdates = true;
+        return {
+          ...row,
+          operation: row.operation || target.operation,
+          cycleTime: target.cycleTime,
+          stdOutput: target.stdOutput || row.stdOutput,
+        };
+      }
+      return row;
+    });
+
+    if (hasUpdates) {
+      onRowsChange(updated);
+    }
+  }, [cycleTimes, items, shiftWorkingMinutes]);
+
   // 1. When Item changes: auto-select default operation & fetch matching Cycle Time + Std Output
   const handleItemChange = useCallback(
     (index: number, itemId: string) => {
@@ -171,8 +204,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         itemId,
         items,
         cycleTimes,
-        undefined, // Let helper pick the 1st operation for this item
-        shiftWorkingMinutes
+        undefined, // Let helper pick the operation & cycle time for this machine + item
+        shiftWorkingMinutes,
+        currentRow.machineName
       );
 
       updateRow(index, {
@@ -202,7 +236,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         items,
         cycleTimes,
         operationName,
-        shiftWorkingMinutes
+        shiftWorkingMinutes,
+        currentRow.machineName
       );
 
       updateRow(index, {
@@ -342,7 +377,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         items,
         cycleTimes,
         undefined,
-        shiftWorkingMinutes
+        shiftWorkingMinutes,
+        row.machineName
       );
       return {
         operatorName: op,
@@ -381,7 +417,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
   const handleSaveWithValidation = () => {
     const unbalancedRows = rows.filter((row) => {
-      if (!row.itemId || !(row.cycleTime > 0)) return false;
+      const isTouched =
+        !!row.itemId ||
+        !!row.operatorName ||
+        (row.actualOutput || 0) > 0 ||
+        calculateTotalBreakdown(row.breakdown) > 0 ||
+        (row.cycleTime || 0) > 0;
+      if (!isTouched) return false;
       const balance = calculateShiftTimeBalance(row, shiftWorkingMinutes);
       return !balance.isBalanced;
     });
@@ -389,13 +431,31 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (unbalancedRows.length > 0) {
       const firstBad = unbalancedRows[0];
       const bal = calculateShiftTimeBalance(firstBad, shiftWorkingMinutes);
+      let details = '';
+      if (bal.missingCycleTime) {
+        details =
+          `• ERROR: Actual output (${firstBad.actualOutput} pcs) was entered, but Cycle Time is 0!\n` +
+          `• Productive time cannot be verified. Please select an Item with a cycle time or enter cycle time.`;
+      } else if (bal.isProductionExceeded) {
+        details =
+          `• ERROR: Actual output (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m = ${bal.productionMinutes} mins) exceeds shift duration (${bal.shiftMinutes} mins)!\n` +
+          `• Productive time alone is greater than shift timing. Please reduce Actual Output or verify cycle time.`;
+      } else if (bal.isOver) {
+        details =
+          `• ERROR: Total productive time (${bal.productionMinutes}m) + breakdown (${bal.loggedBreakdownMinutes}m) = ${bal.totalAccountedMinutes} mins, which exceeds shift duration (${bal.shiftMinutes} mins) by ${Math.abs(bal.unaccountedMinutes)} mins!\n` +
+          `• Total productive time + total breakdown time must NOT exceed shift duration—it must be exactly equal.`;
+      } else {
+        details =
+          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
+          `• Required Breakdown / Downtime: ${bal.requiredBreakdownMinutes} mins\n` +
+          `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
+          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns (NO/DISC, CHANGE, POWER, or OPERATOR) so total time equals ${bal.shiftMinutes} mins.`;
+      }
+
       alert(
         `Shift Time Mismatch on ${firstBad.machineName} (Row #${firstBad.srNo}):\n\n` +
           `• Shift Duration (from DB): ${bal.shiftMinutes} mins\n` +
-          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
-          `• Required Breakdown / Wasted Time: ${bal.requiredBreakdownMinutes} mins\n` +
-          `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
-          `Please fill the remaining ${bal.unaccountedMinutes} mins in the Breakdown columns so total time equals ${bal.shiftMinutes} mins.`
+          details
       );
       return;
     }
@@ -419,6 +479,22 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const grandBreakdown = totalNoDisc + totalChange + totalPower + totalOperator;
   const overallEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
   const activeMachineCount = rows.filter((r) => (Number(r.stdOutput) || 0) > 0).length;
+
+  // Active rows & time balance sanity checks across all machines
+  const activeRows = rows.filter((r) => {
+    return (
+      !!r.itemId ||
+      !!r.operatorName ||
+      (r.actualOutput || 0) > 0 ||
+      calculateTotalBreakdown(r.breakdown) > 0 ||
+      (r.cycleTime || 0) > 0
+    );
+  });
+  const unbalancedRows = activeRows.filter((r) => {
+    const b = calculateShiftTimeBalance(r, shiftWorkingMinutes);
+    return !b.isBalanced;
+  });
+  const unbalancedCount = unbalancedRows.length;
 
   // Footer downtime %: total minutes vs. available minutes of machines that are in use
   const footerWorkingMinutes = rows.reduce((acc, r) => {
@@ -452,6 +528,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             <span className="text-slate-600">·</span>
             <span className="text-slate-400">SHIFT:</span>
             <span>{selectedShift}</span>
+            {shiftWorkingMinutes > 0 && (
+              <>
+                <span className="text-slate-600">·</span>
+                <span className="text-amber-300 font-mono">{shiftWorkingMinutes}m</span>
+              </>
+            )}
           </div>
           <div className="text-xs text-slate-600 hidden md:flex items-center gap-2">
             <span>Date: <strong className="text-slate-900">{selectedDate}</strong></span>
@@ -459,6 +541,24 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             <span>Active Machines: <strong className="text-emerald-700">{activeMachineCount} / {rows.length}</strong></span>
             <span>·</span>
             <span>Line Target: <strong className="text-slate-900">{totalStd} pcs</strong></span>
+            <span>·</span>
+            {unbalancedCount > 0 ? (
+              <span
+                className="px-2 py-0.5 rounded bg-rose-100 text-rose-800 font-bold border border-rose-300 flex items-center gap-1 animate-pulse"
+                title={`${unbalancedCount} machines have shift time mismatches. Total productive time + breakdown must equal ${shiftWorkingMinutes}m.`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                <span>{unbalancedCount} Time {unbalancedCount === 1 ? 'Mismatch' : 'Mismatches'}</span>
+              </span>
+            ) : activeRows.length > 0 ? (
+              <span
+                className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold border border-emerald-300 flex items-center gap-1"
+                title={`All ${activeRows.length} active machines are time-balanced (Productive + Breakdown = ${shiftWorkingMinutes}m)`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>All {activeRows.length} Balanced</span>
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -510,13 +610,20 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             onClick={handleSaveWithValidation}
             disabled={isSaving}
             className={`px-4 py-1.5 text-xs font-bold rounded flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-60 disabled:cursor-not-allowed ${
-              hasUnsavedChanges
+              unbalancedCount > 0
+                ? 'bg-rose-600 hover:bg-rose-700 text-white ring-2 ring-rose-300 ring-offset-1'
+                : hasUnsavedChanges
                 ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 ring-2 ring-amber-300 ring-offset-1'
                 : 'bg-slate-900 hover:bg-slate-800 text-white'
             }`}
           >
             {isSaving ? (
               <span>Saving to Cloud...</span>
+            ) : unbalancedCount > 0 ? (
+              <>
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>Save Shift Log ({unbalancedCount} Error{unbalancedCount > 1 ? 's' : ''})</span>
+              </>
             ) : hasUnsavedChanges ? (
               <>
                 <AlertTriangle className="w-3.5 h-3.5" />
@@ -576,6 +683,15 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 -5m
               </button>
 
+              {focusedRowBalance && (focusedRowBalance.isOver || focusedRowBalance.isProductionExceeded) && (
+                <span className="px-2.5 py-1 bg-rose-100 text-rose-800 font-mono font-bold rounded border border-rose-300 flex items-center gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
+                  <span>
+                    Exceeds Shift by {Math.abs(focusedRowBalance.unaccountedMinutes)}m ({focusedRowBalance.totalAccountedMinutes}m / {focusedRowBalance.shiftMinutes}m)
+                  </span>
+                </span>
+              )}
+
               {focusedRowBalance && focusedRowBalance.unaccountedMinutes > 0 && (
                 <button
                   type="button"
@@ -583,10 +699,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                     e.preventDefault();
                     handleFillUnaccountedBd(activeBdCell.rowIndex, activeBdCell.field);
                   }}
-                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-mono font-bold rounded shadow-2xs"
+                  className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold rounded shadow-2xs flex items-center gap-1"
                   title="Fill exact remaining unaccounted shift minutes into this cell"
                 >
-                  +Fill Balance ({focusedRowBalance.unaccountedMinutes}m)
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>+Fill Balance ({focusedRowBalance.unaccountedMinutes}m)</span>
                 </button>
               )}
 
@@ -718,21 +835,37 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 const isUnderperforming = hasTarget && row.actualOutput < row.stdOutput;
                 const isRowConfigured = !!row.operatorName && !!row.itemName;
                 const rowOperations = row.itemId
-                  ? getOperationsForItem(row.itemId, items, cycleTimes, row.machineId)
+                  ? getOperationsForItem(row.itemId, items, cycleTimes, row.machineId, row.machineName)
                   : [];
                 const rowWorkingMinutes = row.totalWorkingMinutes || shiftWorkingMinutes;
                 const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
 
                 const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
                 const timeBalance = calculateShiftTimeBalance(row, rowShiftMins);
-                const isRowActive = !!row.itemId && row.cycleTime > 0;
+                const isRowActive =
+                  !!row.itemId ||
+                  !!row.operatorName ||
+                  (row.actualOutput || 0) > 0 ||
+                  calculateTotalBreakdown(row.breakdown) > 0 ||
+                  (row.cycleTime || 0) > 0;
+                const isRowInvalid = isRowActive && !timeBalance.isBalanced;
 
                 return (
                   <tr
                     key={row.id || index}
-                    className={`transition-colors hover:bg-slate-50/80 ${
-                      index % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'
-                    } ${isUnderperforming ? 'border-l-2 border-l-amber-500' : ''}`}
+                    className={`transition-colors ${
+                      isRowInvalid
+                        ? timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
+                          ? 'bg-rose-50/70 hover:bg-rose-100/60 border-l-4 border-l-rose-600'
+                          : 'bg-amber-50/50 hover:bg-amber-100/50 border-l-4 border-l-amber-500'
+                        : isRowActive && timeBalance.isBalanced
+                        ? 'border-l-4 border-l-emerald-500 hover:bg-emerald-50/20'
+                        : isUnderperforming
+                        ? 'border-l-2 border-l-amber-400 hover:bg-slate-50/80'
+                        : index % 2 === 0
+                        ? 'bg-white hover:bg-slate-50/80'
+                        : 'bg-slate-50/40 hover:bg-slate-50/80'
+                    }`}
                   >
                     {/* 1. SR. NO */}
                     <td className="px-2 py-2 text-center font-mono font-semibold text-slate-600 border-r border-slate-200">
@@ -742,13 +875,43 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                     {/* 2. MACHINE */}
                     <td className="px-3 py-2 font-semibold text-slate-900 border-r border-slate-200 whitespace-nowrap">
                       <div className="flex items-center justify-between gap-1.5">
-                        <span>{row.machineName}</span>
-                        {isRowConfigured && (
-                          <span
-                            className="w-1.5 h-1.5 rounded-full bg-emerald-500"
-                            title="Configured"
-                          />
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          <span>{row.machineName}</span>
+                          {isRowInvalid ? (
+                            <span
+                              className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
+                                  ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                  : 'bg-amber-100 text-amber-900 border border-amber-300'
+                              }`}
+                              title={timeBalance.errorMessage}
+                            >
+                              <AlertTriangle className="w-3 h-3 shrink-0" />
+                              <span>
+                                {timeBalance.missingCycleTime
+                                  ? 'No Cycle Time'
+                                  : timeBalance.isProductionExceeded
+                                  ? 'Exceeds Shift'
+                                  : timeBalance.isOver
+                                  ? 'Over Time'
+                                  : 'Missing Time'}
+                              </span>
+                            </span>
+                          ) : isRowActive && timeBalance.isBalanced ? (
+                            <span
+                              className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300"
+                              title={`Balanced: Productive (${timeBalance.productionMinutes}m) + BD (${timeBalance.loggedBreakdownMinutes}m) = ${timeBalance.shiftMinutes}m`}
+                            >
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                              <span>OK</span>
+                            </span>
+                          ) : isRowConfigured ? (
+                            <span
+                              className="w-1.5 h-1.5 rounded-full bg-slate-400"
+                              title="Configured"
+                            />
+                          ) : null}
+                        </div>
                       </div>
                     </td>
 
@@ -796,11 +959,17 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           onChange={(e) => handleOperationChange(index, e.target.value)}
                           className="w-full bg-transparent px-1.5 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white text-xs text-slate-900 font-medium focus:outline-none"
                         >
+                          <option value="">— Select Operation —</option>
                           {rowOperations.map((op) => (
                             <option key={op} value={op}>
                               {op}
                             </option>
                           ))}
+                          {row.operation && !rowOperations.includes(row.operation) && (
+                            <option key={row.operation} value={row.operation}>
+                              {row.operation}
+                            </option>
+                          )}
                         </select>
                       ) : (
                         <input
@@ -823,7 +992,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         value={row.cycleTime > 0 ? row.cycleTime : ''}
                         placeholder="—"
                         title={
-                          row.cycleTime > 0
+                          timeBalance.missingCycleTime
+                            ? `ERROR: Actual Output is ${row.actualOutput} pcs, but Cycle Time is 0. Enter cycle time or select configured item.`
+                            : row.cycleTime > 0
                             ? `Cycle time: ${row.cycleTime}s`
                             : 'No cycle time configured for this Machine + Item + Operation in Master Data'
                         }
@@ -838,7 +1009,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           updateRow(index, { cycleTime: newCt, stdOutput: newStd });
                         }}
                         className={`w-16 mx-auto text-center font-mono text-xs px-1 py-1 rounded border ${
-                          row.cycleTime > 0
+                          timeBalance.missingCycleTime
+                            ? 'bg-rose-100 text-rose-950 font-bold border-rose-500 ring-2 ring-rose-300 animate-pulse'
+                            : row.cycleTime > 0
                             ? 'bg-blue-50/60 text-blue-900 font-bold border-blue-200'
                             : 'bg-transparent text-slate-400 border-transparent hover:border-slate-300'
                         } focus:border-slate-800 focus:bg-white focus:outline-none`}
@@ -873,8 +1046,19 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         onChange={(e) =>
                           updateRow(index, { actualOutput: Number(e.target.value) || 0 })
                         }
+                        title={
+                          timeBalance.missingCycleTime
+                            ? `ERROR: Actual output (${row.actualOutput} pcs) entered, but cycle time is 0!`
+                            : timeBalance.isProductionExceeded
+                            ? `ERROR: Actual output (${row.actualOutput} pcs × ${row.cycleTime}m = ${timeBalance.productionMinutes}m) alone exceeds shift duration (${timeBalance.shiftMinutes}m)!`
+                            : undefined
+                        }
                         className={`w-16 mx-auto text-center font-mono font-bold px-1 py-1 rounded border ${
-                          isUnderperforming
+                          timeBalance.isProductionExceeded || timeBalance.missingCycleTime
+                            ? 'bg-rose-100 text-rose-900 border-rose-500 ring-2 ring-rose-300'
+                            : timeBalance.isOver
+                            ? 'bg-rose-50 text-rose-900 border-rose-400'
+                            : isUnderperforming
                             ? 'bg-amber-50 text-amber-900 border-amber-300'
                             : efficiency >= 90 && hasTarget
                             ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
@@ -950,37 +1134,64 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                     })}
 
                     {/* TOTAL BD & SHIFT TIME BALANCE (Click badge to auto-fill remaining balance) */}
-                    <td className="px-2 py-1 border-r border-slate-200 text-center bg-slate-50/60 font-mono text-xs">
+                    <td className={`px-2 py-1 border-r border-slate-200 text-center font-mono text-xs ${
+                      !isRowActive
+                        ? 'bg-slate-50/60'
+                        : isRowInvalid
+                        ? timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
+                          ? 'bg-rose-50/80'
+                          : 'bg-amber-50/80'
+                        : 'bg-emerald-50/30'
+                    }`}>
                       {!isRowActive ? (
                         <span className="text-slate-400 font-normal">0</span>
                       ) : (
                         <div className="leading-tight space-y-0.5">
-                          <div className="font-bold text-slate-900">
-                            {timeBalance.loggedBreakdownMinutes}m / {timeBalance.requiredBreakdownMinutes}m
+                          <div className="font-bold text-slate-900 flex items-center justify-center gap-1">
+                            <span>{timeBalance.loggedBreakdownMinutes}m / {timeBalance.requiredBreakdownMinutes}m</span>
                           </div>
-                          {timeBalance.unaccountedMinutes > 0 ? (
+                          <div className="text-[10px] text-slate-500 font-normal">
+                            Total: {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+                          </div>
+                          {timeBalance.missingCycleTime ? (
+                            <span
+                              className="inline-block px-1.5 py-0.5 rounded bg-rose-200 text-rose-950 font-extrabold text-[10px] border border-rose-400 shadow-2xs"
+                              title={timeBalance.errorMessage}
+                            >
+                              ⚠️ Set Cycle Time
+                            </span>
+                          ) : timeBalance.isProductionExceeded ? (
+                            <span
+                              className="inline-block px-1.5 py-0.5 rounded bg-rose-200 text-rose-950 font-extrabold text-[10px] border border-rose-400 shadow-2xs"
+                              title={timeBalance.errorMessage}
+                            >
+                              ⚠️ Prod Time &gt; Shift ({timeBalance.productionMinutes}m &gt; {timeBalance.shiftMinutes}m)
+                            </span>
+                          ) : timeBalance.isOver ? (
+                            <span
+                              className="inline-block px-1.5 py-0.5 rounded bg-rose-100 text-rose-900 font-extrabold text-[10px] border border-rose-300 shadow-2xs"
+                              title={timeBalance.errorMessage}
+                            >
+                              ⚠️ Exceeds Shift (+{Math.abs(timeBalance.unaccountedMinutes)}m)
+                            </span>
+                          ) : timeBalance.unaccountedMinutes > 0 ? (
                             <button
                               type="button"
                               onClick={() => handleFillUnaccountedBd(index)}
-                              className="inline-block px-1.5 py-0.5 rounded bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-[10px] cursor-pointer transition-colors border border-rose-300"
-                              title={`Click to auto-fill +${timeBalance.unaccountedMinutes}m into ${
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold text-[10px] cursor-pointer transition-colors border border-amber-300 shadow-2xs"
+                              title={`Productive time (${timeBalance.productionMinutes}m) + Breakdown (${timeBalance.loggedBreakdownMinutes}m) = ${timeBalance.totalAccountedMinutes}m. Click to auto-fill +${timeBalance.unaccountedMinutes}m into ${
                                 activeBdCell?.rowIndex === index
                                   ? BD_META[activeBdCell.field].shortLabel
                                   : 'NO/DISC'
-                              }`}
+                              } so total time equals ${timeBalance.shiftMinutes}m`}
                             >
-                              +Fill {timeBalance.unaccountedMinutes}m BD
+                              <span>⚠️ Missing {timeBalance.unaccountedMinutes}m BD</span>
+                              <span className="underline font-extrabold">(+Fill)</span>
                             </button>
-                          ) : timeBalance.unaccountedMinutes < 0 ? (
-                            <span
-                              className="inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]"
-                              title={`Total time (${timeBalance.totalAccountedMinutes}m) exceeds shift duration (${timeBalance.shiftMinutes}m) by ${Math.abs(timeBalance.unaccountedMinutes)}m.`}
-                            >
-                              Over {Math.abs(timeBalance.unaccountedMinutes)}m
-                            </span>
                           ) : (
-                            <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">
-                              {timeBalance.shiftMinutes}m Matched
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px] border border-emerald-300">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              <span>{timeBalance.shiftMinutes}m Balanced</span>
                             </span>
                           )}
                         </div>
@@ -1080,8 +1291,21 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   {grandBreakdown}m
                   {renderFooterPct(grandBreakdown)}
                 </td>
-                <td className="px-2 py-3 border-r border-slate-800 text-xs text-slate-300">
-                  Variance: {totalAct - totalStd >= 0 ? `+${totalAct - totalStd}` : `${totalAct - totalStd}`} pcs
+                <td className="px-2 py-3 border-r border-slate-800 text-xs">
+                  <div className="text-slate-300 font-semibold">
+                    Variance: {totalAct - totalStd >= 0 ? `+${totalAct - totalStd}` : `${totalAct - totalStd}`} pcs
+                  </div>
+                  {unbalancedCount > 0 ? (
+                    <div className="mt-1 text-rose-300 font-bold flex items-center gap-1 text-[11px]">
+                      <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
+                      <span>{unbalancedCount} row{unbalancedCount > 1 ? 's' : ''} have time mismatches</span>
+                    </div>
+                  ) : activeRows.length > 0 ? (
+                    <div className="mt-1 text-emerald-400 font-semibold flex items-center gap-1 text-[11px]">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                      <span>All rows balanced ({shiftWorkingMinutes}m)</span>
+                    </div>
+                  ) : null}
                 </td>
                 <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-sm">
                   <span

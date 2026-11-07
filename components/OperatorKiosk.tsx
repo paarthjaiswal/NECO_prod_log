@@ -27,6 +27,7 @@ import {
   calculateTotalBreakdown,
   calculateShiftTimeBalance,
   calculateDynamicStdOutput,
+  resolveMachineItemTarget,
 } from '@/services/storageService';
 
 interface OperatorKioskProps {
@@ -158,26 +159,26 @@ export function OperatorKiosk({
     if (!draft) return;
     const item = items.find((it) => it.id === itemId);
     if (item) {
-      const ctMatch = masterData.cycleTimes?.find(
-        (ct) => ct.machineId === draft.machineId && ct.itemId === item.id
+      const target = resolveMachineItemTarget(
+        draft.machineId,
+        item.id,
+        items,
+        masterData.cycleTimes ?? [],
+        undefined,
+        shiftWorkingMinutes,
+        draft.machineName
       );
-      const targetOp = ctMatch?.operation || item.operation;
-      const targetCycleTime = ctMatch?.cycleTime ?? 0;
-      const targetStd =
-        targetCycleTime > 0
-          ? calculateDynamicStdOutput(targetCycleTime, shiftWorkingMinutes)
-          : ctMatch?.stdOutput ?? item.stdOutput ?? 0;
 
       setDraft({
         ...draft,
         itemId: item.id,
-        itemName: item.itemName,
-        operation: targetOp,
-        cycleTime: targetCycleTime,
-        stdOutput: targetStd,
+        itemName: target.itemName,
+        operation: target.operation,
+        cycleTime: target.cycleTime,
+        stdOutput: target.stdOutput,
         totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
         // If actual is 0 and stdOutput is set, default actual to stdOutput for faster adjustment
-        actualOutput: draft.actualOutput === 0 ? targetStd : draft.actualOutput,
+        actualOutput: draft.actualOutput === 0 ? target.stdOutput : draft.actualOutput,
       });
     } else {
       setDraft({
@@ -238,13 +239,14 @@ export function OperatorKiosk({
     }
 
     const balance = calculateShiftTimeBalance(draft, shiftWorkingMinutes);
-    if (draft.cycleTime > 0 && !balance.isBalanced) {
+    if (!balance.isBalanced) {
       setValidationError(
-        `Shift Time Mismatch: Shift is ${balance.shiftMinutes} mins. Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m) accounts for ${balance.productionMinutes} mins, leaving ${balance.requiredBreakdownMinutes} mins of wasted/breakdown time. You have logged ${balance.loggedBreakdownMinutes} mins (${
-          balance.unaccountedMinutes > 0
-            ? `please add ${balance.unaccountedMinutes} more mins to Breakdown`
-            : `please reduce Breakdown by ${Math.abs(balance.unaccountedMinutes)} mins`
-        }).`
+        balance.errorMessage ||
+          `Shift Time Mismatch: Shift is ${balance.shiftMinutes} mins. Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m) accounts for ${balance.productionMinutes} mins, leaving ${balance.requiredBreakdownMinutes} mins of wasted/breakdown time. You have logged ${balance.loggedBreakdownMinutes} mins (${
+            balance.unaccountedMinutes > 0
+              ? `please add ${balance.unaccountedMinutes} more mins to Breakdown`
+              : `please reduce Breakdown by ${Math.abs(balance.unaccountedMinutes)} mins`
+          }).`
       );
       return;
     }
@@ -513,7 +515,24 @@ export function OperatorKiosk({
               <input
                 type="text"
                 value={draft.operation}
-                onChange={(e) => setDraft({ ...draft, operation: e.target.value })}
+                onChange={(e) => {
+                  const newOp = e.target.value;
+                  const target = resolveMachineItemTarget(
+                    draft.machineId,
+                    draft.itemId,
+                    items,
+                    masterData.cycleTimes ?? [],
+                    newOp,
+                    shiftWorkingMinutes,
+                    draft.machineName
+                  );
+                  setDraft({
+                    ...draft,
+                    operation: newOp,
+                    cycleTime: target.cycleTime,
+                    stdOutput: target.stdOutput,
+                  });
+                }}
                 placeholder="e.g. OP-10 Rough Turning"
                 className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 focus:bg-white focus:border-slate-800 focus:outline-none"
               />

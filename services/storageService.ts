@@ -55,10 +55,28 @@ export function getOperationsForItem(
   itemId: string,
   items: ItemMaster[],
   cycleTimes: MachineItemCycleTime[] = [],
-  machineId?: string
+  machineId?: string,
+  machineName?: string
 ): string[] {
-  const selectedItem = items.find((i) => i.id === itemId);
+  const cleanItemId = (itemId || "").trim().toLowerCase();
+  const selectedItem = items.find((i) => {
+    if (!i) return false;
+    return (
+      (i.id && i.id.trim().toLowerCase() === cleanItemId) ||
+      (i.itemCode && i.itemCode.trim().toLowerCase() === cleanItemId) ||
+      (i.itemName && i.itemName.trim().toLowerCase() === cleanItemId)
+    );
+  });
   if (!selectedItem) return [];
+
+  const itemKeys = new Set<string>();
+  if (selectedItem.id) itemKeys.add(selectedItem.id.trim().toLowerCase());
+  if (selectedItem.itemCode) itemKeys.add(selectedItem.itemCode.trim().toLowerCase());
+  if (selectedItem.itemName) itemKeys.add(selectedItem.itemName.trim().toLowerCase());
+
+  const machineKeys = new Set<string>();
+  if (machineId && machineId.trim()) machineKeys.add(machineId.trim().toLowerCase());
+  if (machineName && machineName.trim()) machineKeys.add(machineName.trim().toLowerCase());
 
   const matchingItems = items.filter(
     (i) =>
@@ -71,7 +89,7 @@ export function getOperationsForItem(
 
   // 1. Collect operations from ItemMaster definitions
   matchingItems.forEach((item) => {
-    item.operation
+    (item.operation || "")
       .split(/[,/]/)
       .map((op) => op.trim())
       .filter(Boolean)
@@ -80,10 +98,15 @@ export function getOperationsForItem(
 
   // 2. Also include any custom operations configured in machine_item_cycle_times
   cycleTimes
-    .filter(
-      (ct) =>
-        ct.itemId === itemId && (!machineId || ct.machineId === machineId)
-    )
+    .filter((ct) => {
+      const ctItem = (ct.itemId || "").trim().toLowerCase();
+      if (!itemKeys.has(ctItem)) return false;
+      if (machineKeys.size > 0) {
+        const ctMach = (ct.machineId || "").trim().toLowerCase();
+        return machineKeys.has(ctMach);
+      }
+      return true;
+    })
     .forEach((ct) => {
       if (ct.operation?.trim()) {
         opsSet.add(ct.operation.trim());
@@ -108,55 +131,246 @@ export function calculateDynamicStdOutput(
   return Math.floor(shiftMins / ct);
 }
 
+export interface ShiftTimeBalance {
+  shiftMinutes: number;
+  productionMinutes: number;
+  requiredBreakdownMinutes: number;
+  loggedBreakdownMinutes: number;
+  unaccountedMinutes: number; // positive = missing breakdown mins; negative = exceeds shift
+  totalAccountedMinutes: number;
+  isBalanced: boolean;
+  isOver: boolean;
+  isUnder: boolean;
+  isProductionExceeded: boolean;
+  missingCycleTime: boolean;
+  errorMessage?: string;
+}
+
 /**
  * Computes the exact time-accounting balance for a machine row in a shift.
- * Example: Shift = 100m, Cycle Time = 10m, Actual = 5 ->
- *   Production Time = 50m, Required Breakdown = 50m.
- *   If supervisor logged 20m, unaccountedMinutes = 30m (needs 30m more in breakdown).
+ * Enforces: Total Productive Time (actualOutput * cycleTime) + Total Breakdown Time = Shift Timing.
+ * Total time must not exceed shift timing—it must be exactly equal.
  */
 export function calculateShiftTimeBalance(
-  row: Pick<MachineShiftRow, "cycleTime" | "actualOutput" | "breakdown" | "totalWorkingMinutes">,
+  row: Pick<
+    MachineShiftRow,
+    "cycleTime" | "actualOutput" | "breakdown" | "totalWorkingMinutes"
+  > & { itemId?: string; operatorName?: string },
   shiftWorkingMinutes?: number
-) {
+): ShiftTimeBalance {
   const shiftMins =
     Number(shiftWorkingMinutes) || Number(row.totalWorkingMinutes) || 0;
   const ct = Number(row.cycleTime) || 0;
   const actual = Number(row.actualOutput) || 0;
   const loggedBreakdown = calculateTotalBreakdown(row.breakdown);
 
-  if (ct <= 0 || shiftMins <= 0) {
+  // If machine row is completely idle / untouched
+  const isUntouched =
+    !row.itemId &&
+    !row.operatorName &&
+    actual === 0 &&
+    loggedBreakdown === 0 &&
+    ct === 0;
+
+  if (isUntouched || shiftMins <= 0) {
     return {
       shiftMinutes: shiftMins,
       productionMinutes: 0,
       requiredBreakdownMinutes: 0,
-      loggedBreakdownMinutes: loggedBreakdown,
+      loggedBreakdownMinutes: 0,
       unaccountedMinutes: 0,
-      totalAccountedMinutes: loggedBreakdown,
+      totalAccountedMinutes: 0,
       isBalanced: true,
+      isOver: false,
+      isUnder: false,
+      isProductionExceeded: false,
+      missingCycleTime: false,
+      errorMessage: undefined,
+    };
+  }
+
+  // If actual output is entered but cycle time is 0 / not configured
+  if (actual > 0 && ct <= 0) {
+    const diff = Number((shiftMins - loggedBreakdown).toFixed(2));
+    return {
+      shiftMinutes: shiftMins,
+      productionMinutes: 0,
+      requiredBreakdownMinutes: shiftMins,
+      loggedBreakdownMinutes: loggedBreakdown,
+      unaccountedMinutes: diff,
+      totalAccountedMinutes: loggedBreakdown,
+      isBalanced: false,
+      isOver: loggedBreakdown > shiftMins,
+      isUnder: true,
+      isProductionExceeded: false,
+      missingCycleTime: true,
+      errorMessage: `Actual output (${actual} pcs) entered, but cycle time is 0. Please select an Item with a cycle time or enter cycle time.`,
     };
   }
 
   const productionMinutes = Number((actual * ct).toFixed(2));
+  const totalAccountedMinutes = Number(
+    (productionMinutes + loggedBreakdown).toFixed(2)
+  );
+  const diff = Number((shiftMins - totalAccountedMinutes).toFixed(2));
+  const isBalanced = Math.abs(diff) < 0.01;
+  const isOver = diff < -0.01;
+  const isUnder = diff > 0.01;
+  const isProductionExceeded = productionMinutes > shiftMins + 0.01;
+
   const requiredBreakdownMinutes = Math.max(
     0,
     Number((shiftMins - productionMinutes).toFixed(2))
   );
-  const unaccountedMinutes = Number(
-    (requiredBreakdownMinutes - loggedBreakdown).toFixed(2)
-  );
-  const totalAccountedMinutes = Number(
-    (productionMinutes + loggedBreakdown).toFixed(2)
-  );
+
+  let errorMessage: string | undefined = undefined;
+  if (isProductionExceeded) {
+    errorMessage = `Actual output time (${productionMinutes}m = ${actual} pcs × ${ct}m) exceeds shift duration (${shiftMins}m). Productive time alone is greater than shift timing.`;
+  } else if (isOver) {
+    errorMessage = `Total time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdown}m BD) exceeds shift duration (${shiftMins}m) by ${Math.abs(diff)}m. Total time must not exceed shift timing.`;
+  } else if (isUnder) {
+    errorMessage = `Total time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdown}m BD) is ${diff}m short of shift duration (${shiftMins}m). Log ${diff}m in breakdown to balance.`;
+  }
 
   return {
     shiftMinutes: shiftMins,
     productionMinutes,
     requiredBreakdownMinutes,
     loggedBreakdownMinutes: loggedBreakdown,
-    unaccountedMinutes, // > 0 means supervisor still needs to log this many mins in Breakdown
+    unaccountedMinutes: diff,
     totalAccountedMinutes,
-    isBalanced: Math.abs(unaccountedMinutes) < 0.01,
+    isBalanced,
+    isOver,
+    isUnder,
+    isProductionExceeded,
+    missingCycleTime: false,
+    errorMessage,
   };
+}
+
+/**
+ * Flexibly looks up a cycle time entry matching machine, item, and operation.
+ * Supports:
+ * - Machine matching by ID or Name (trimmed, case-insensitive)
+ * - Item matching by ID, Code, or Name (trimmed, case-insensitive)
+ * - Operation matching:
+ *     1. Exact match (trimmed, case-insensitive)
+ *     2. Normalized match (e.g. "op-10" === "op 10" === "op10")
+ *     3. Substring/Prefix match (e.g. "OP-10" in "OP-10 Rough Turning" or vice versa)
+ *     4. OP code extraction (e.g. "OP-10", "OP 20")
+ *     5. Single-operation fallback: if a machine + item only has 1 cycle time configured, return it!
+ */
+export function findMatchingCycleTime(
+  cycleTimes: MachineItemCycleTime[] = [],
+  machineIdentifier: string,
+  itemIdentifier: string,
+  items: ItemMaster[] = [],
+  operationName?: string,
+  machineName?: string
+): MachineItemCycleTime | undefined {
+  if (!cycleTimes || cycleTimes.length === 0) return undefined;
+
+  const cleanItemId = (itemIdentifier || "").trim().toLowerCase();
+  const item = items.find((it) => {
+    if (!it) return false;
+    return (
+      (it.id && it.id.trim().toLowerCase() === cleanItemId) ||
+      (it.itemCode && it.itemCode.trim().toLowerCase() === cleanItemId) ||
+      (it.itemName && it.itemName.trim().toLowerCase() === cleanItemId)
+    );
+  });
+
+  // All acceptable keys for this item
+  const itemKeys = new Set<string>();
+  if (cleanItemId) itemKeys.add(cleanItemId);
+  if (item) {
+    if (item.id) itemKeys.add(item.id.trim().toLowerCase());
+    if (item.itemCode) itemKeys.add(item.itemCode.trim().toLowerCase());
+    if (item.itemName) itemKeys.add(item.itemName.trim().toLowerCase());
+  }
+
+  // All acceptable keys for this machine
+  const cleanMachId = (machineIdentifier || "").trim().toLowerCase();
+  const cleanMachName = (machineName || "").trim().toLowerCase();
+  const machineKeys = new Set<string>();
+  if (cleanMachId) machineKeys.add(cleanMachId);
+  if (cleanMachName) machineKeys.add(cleanMachName);
+
+  // 1. Filter cycleTimes for this Machine and Item
+  const machineItemCts = cycleTimes.filter((ct) => {
+    const ctMach = (ct.machineId || "").trim().toLowerCase();
+    const machMatch = machineKeys.size === 0 || machineKeys.has(ctMach);
+    if (!machMatch) return false;
+
+    const ctItem = (ct.itemId || "").trim().toLowerCase();
+    return itemKeys.has(ctItem);
+  });
+
+  if (machineItemCts.length === 0) {
+    // If not found by machine + item, check if there's an item-wide cycle time configured
+    const itemOnlyCts = cycleTimes.filter((ct) => {
+      const ctItem = (ct.itemId || "").trim().toLowerCase();
+      return itemKeys.has(ctItem);
+    });
+
+    if (itemOnlyCts.length === 1 && (!operationName || !operationName.trim())) {
+      return itemOnlyCts[0];
+    }
+    return undefined;
+  }
+
+  // If no operation specified, return the first matching cycle time for this machine+item
+  if (!operationName || !operationName.trim()) {
+    return machineItemCts[0];
+  }
+
+  const cleanOp = operationName.trim().toLowerCase();
+  const normOp = cleanOp.replace(/[^a-z0-9]/g, "");
+
+  // 1. Exact operation match (case-insensitive, trimmed)
+  let match = machineItemCts.find(
+    (ct) => (ct.operation || "").trim().toLowerCase() === cleanOp
+  );
+  if (match) return match;
+
+  // 2. Normalized match (ignoring spaces, dashes, punctuation: e.g. "op-10" === "op 10" === "op10")
+  match = machineItemCts.find(
+    (ct) =>
+      (ct.operation || "").toLowerCase().replace(/[^a-z0-9]/g, "") === normOp
+  );
+  if (match) return match;
+
+  // 3. Substring / Prefix match (e.g. "OP-10" matches "OP-10 Rough Turning" or vice versa)
+  match = machineItemCts.find((ct) => {
+    const ctOp = (ct.operation || "").trim().toLowerCase();
+    return (
+      cleanOp.startsWith(ctOp) ||
+      ctOp.startsWith(cleanOp) ||
+      cleanOp.includes(ctOp) ||
+      ctOp.includes(cleanOp)
+    );
+  });
+  if (match) return match;
+
+  // 4. Operation Code extraction (e.g. "OP-10", "OP 20")
+  const opCodeRegex = /op[-_\s]?\d+/i;
+  const targetCode = cleanOp.match(opCodeRegex)?.[0]?.replace(/[^a-z0-9]/g, "");
+  if (targetCode) {
+    match = machineItemCts.find((ct) => {
+      const ctCode = (ct.operation || "")
+        .match(opCodeRegex)?.[0]
+        ?.replace(/[^a-z0-9]/g, "");
+      return ctCode === targetCode;
+    });
+    if (match) return match;
+  }
+
+  // 5. Fallback: if only 1 cycle time is configured for this machine and item, use it
+  if (machineItemCts.length === 1) {
+    return machineItemCts[0];
+  }
+
+  return undefined;
 }
 
 /**
@@ -169,13 +383,23 @@ export function resolveMachineItemTarget(
   items: ItemMaster[],
   cycleTimes: MachineItemCycleTime[] = [],
   explicitOperation?: string,
-  shiftWorkingMinutes: number = 0
+  shiftWorkingMinutes: number = 0,
+  machineName?: string
 ) {
-  const baseItem = items.find((it) => it.id === itemId);
+  const cleanItemId = (itemId || "").trim().toLowerCase();
+  const baseItem = items.find((it) => {
+    if (!it) return false;
+    return (
+      (it.id && it.id.trim().toLowerCase() === cleanItemId) ||
+      (it.itemCode && it.itemCode.trim().toLowerCase() === cleanItemId) ||
+      (it.itemName && it.itemName.trim().toLowerCase() === cleanItemId)
+    );
+  });
+
   if (!baseItem) {
     return {
       itemName: "",
-      operation: "",
+      operation: explicitOperation || "",
       availableOperations: [] as string[],
       cycleTime: 0,
       stdOutput: 0,
@@ -183,34 +407,28 @@ export function resolveMachineItemTarget(
   }
 
   const availableOperations = getOperationsForItem(
-    itemId,
+    baseItem.id,
     items,
     cycleTimes,
-    machineId
+    machineId,
+    machineName
   );
 
-  const chosenOperation =
-    explicitOperation !== undefined
-      ? explicitOperation
-      : availableOperations[0] || baseItem.operation || "";
-
-  // 1. Exact triple match: (machineId + itemId + chosenOperation)
-  let matchedCt = cycleTimes.find(
-    (ct) =>
-      ct.machineId === machineId &&
-      ct.itemId === itemId &&
-      ct.operation.trim().toLowerCase() === chosenOperation.trim().toLowerCase()
+  // Find matching stored cycle time entry
+  const matchedCt = findMatchingCycleTime(
+    cycleTimes,
+    machineId,
+    baseItem.id,
+    items,
+    explicitOperation,
+    machineName
   );
-
-  // 2. Fallback: match by (machineId + itemId) if only one operation exists
-  if (!matchedCt && !explicitOperation) {
-    matchedCt = cycleTimes.find(
-      (ct) => ct.machineId === machineId && ct.itemId === itemId
-    );
-  }
 
   const resolvedCycleTime = matchedCt ? Number(matchedCt.cycleTime) || 0 : 0;
-  const resolvedOperation = matchedCt?.operation || chosenOperation;
+  const resolvedOperation =
+    explicitOperation !== undefined
+      ? explicitOperation
+      : matchedCt?.operation || availableOperations[0] || baseItem.operation || "";
 
   const calculatedStd = calculateDynamicStdOutput(
     resolvedCycleTime,

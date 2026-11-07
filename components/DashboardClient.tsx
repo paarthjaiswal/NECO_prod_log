@@ -24,7 +24,10 @@ import {
   generateDefaultShiftRows,
 } from "@/data/initialData";
 import { exportShiftToExcel } from "@/services/excelExport";
-import { calculateShiftTimeBalance } from "@/services/storageService";
+import {
+  calculateShiftTimeBalance,
+  calculateTotalBreakdown,
+} from "@/services/storageService";
 
 // Lazy-loaded: zero RAM impact on shop-floor PCs unless clicked
 const AnalyticsPreview = dynamic(
@@ -215,7 +218,13 @@ export default function DashboardClient({
       0;
 
     const unbalancedRows = rowsToSave.filter((row) => {
-      if (!row.itemId || !(row.cycleTime > 0)) return false;
+      const isTouched =
+        !!row.itemId ||
+        !!row.operatorName ||
+        (row.actualOutput || 0) > 0 ||
+        calculateTotalBreakdown(row.breakdown) > 0 ||
+        (row.cycleTime || 0) > 0;
+      if (!isTouched) return false;
       const balance = calculateShiftTimeBalance(row, shiftWorkingMinutes);
       return !balance.isBalanced;
     });
@@ -223,13 +232,31 @@ export default function DashboardClient({
     if (unbalancedRows.length > 0) {
       const firstBad = unbalancedRows[0];
       const bal = calculateShiftTimeBalance(firstBad, shiftWorkingMinutes);
+      let details = '';
+      if (bal.missingCycleTime) {
+        details =
+          `• ERROR: Actual output (${firstBad.actualOutput} pcs) was entered, but Cycle Time is 0!\n` +
+          `• Productive time cannot be verified. Please select an Item with a cycle time or enter cycle time.`;
+      } else if (bal.isProductionExceeded) {
+        details =
+          `• ERROR: Actual output (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m = ${bal.productionMinutes} mins) exceeds shift duration (${bal.shiftMinutes} mins)!\n` +
+          `• Productive time alone is greater than shift timing. Please reduce Actual Output or verify cycle time.`;
+      } else if (bal.isOver) {
+        details =
+          `• ERROR: Total productive time (${bal.productionMinutes}m) + breakdown (${bal.loggedBreakdownMinutes}m) = ${bal.totalAccountedMinutes} mins, which exceeds shift duration (${bal.shiftMinutes} mins) by ${Math.abs(bal.unaccountedMinutes)} mins!\n` +
+          `• Total productive time + total breakdown time must NOT exceed shift duration—it must be exactly equal.`;
+      } else {
+        details =
+          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
+          `• Required Breakdown / Downtime: ${bal.requiredBreakdownMinutes} mins\n` +
+          `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
+          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns (NO/DISC, CHANGE, POWER, or OPERATOR) so total time equals ${bal.shiftMinutes} mins.`;
+      }
+
       alert(
         `Shift Time Mismatch on ${firstBad.machineName} (Row #${firstBad.srNo}):\n\n` +
           `• Shift Duration (from DB): ${bal.shiftMinutes} mins\n` +
-          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
-          `• Required Breakdown / Wasted Time: ${bal.requiredBreakdownMinutes} mins\n` +
-          `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
-          `Please fill the remaining ${bal.unaccountedMinutes} mins in the Breakdown columns so total time equals ${bal.shiftMinutes} mins.`
+          details
       );
       return;
     }
