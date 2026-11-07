@@ -1,23 +1,17 @@
-"use client"
+"use client";
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   CheckCircle2,
   AlertTriangle,
-  Clock,
   User,
   Package,
   Wrench,
   ArrowLeft,
   ArrowRight,
-  Flame,
   Plus,
   Minus,
-  Sparkles,
-  Info,
 } from 'lucide-react';
 import {
-  ItemMaster,
-  MachineMaster,
   MachineShiftRow,
   MasterDataState,
   ShiftType,
@@ -27,6 +21,8 @@ import {
   calculateTotalBreakdown,
   calculateShiftTimeBalance,
   calculateDynamicStdOutput,
+  calculateDowntimePct,
+  getOperationsForItem,
   resolveMachineItemTarget,
 } from '@/services/storageService';
 
@@ -54,6 +50,7 @@ export function OperatorKiosk({
   onSelectMachineId: externalOnSelectMachineId,
 }: OperatorKioskProps) {
   const { machines, operators, items } = masterData;
+  const cycleTimes = useMemo(() => masterData.cycleTimes ?? [], [masterData.cycleTimes]);
 
   // Internal state fallback if DashboardClient doesn't pass selectedMachineId
   const [internalMachineId, setInternalMachineId] = useState<string | null>(null);
@@ -88,7 +85,7 @@ export function OperatorKiosk({
     [machines, selectedLine]
   );
 
-  // Sync draft when selectedMachineId changes
+  // Sync draft when selectedMachineId changes (and auto-hydrate cycleTime if missing)
   useEffect(() => {
     if (!selectedMachineId) {
       setDraft(null);
@@ -101,20 +98,41 @@ export function OperatorKiosk({
 
     if (existingRow) {
       setDraft((prev) => {
-        if (
+        const baseRow =
           prev &&
           prev.machineId === existingRow.machineId &&
           prev.date === existingRow.date &&
           prev.shift === existingRow.shift &&
           prev.line === selectedLine
-        ) {
-          return prev;
+            ? prev
+            : {
+                ...existingRow,
+                line: selectedLine,
+                totalWorkingMinutes:
+                  shiftWorkingMinutes || existingRow.totalWorkingMinutes,
+              };
+
+        // If item is already set but cycleTime is 0, auto-resolve from masterData.cycleTimes
+        if (baseRow.itemId && !(baseRow.cycleTime > 0) && cycleTimes.length > 0) {
+          const target = resolveMachineItemTarget(
+            baseRow.machineId,
+            baseRow.itemId,
+            items,
+            cycleTimes,
+            baseRow.operation || undefined,
+            shiftWorkingMinutes,
+            baseRow.machineName
+          );
+          if (target.cycleTime > 0) {
+            return {
+              ...baseRow,
+              operation: baseRow.operation || target.operation,
+              cycleTime: target.cycleTime,
+              stdOutput: target.stdOutput || baseRow.stdOutput,
+            };
+          }
         }
-        return {
-          ...existingRow,
-          line: selectedLine,
-          totalWorkingMinutes: shiftWorkingMinutes || existingRow.totalWorkingMinutes,
-        };
+        return baseRow;
       });
     } else if (machine) {
       setDraft((prev) => {
@@ -152,35 +170,25 @@ export function OperatorKiosk({
       });
     }
     setValidationError(null);
-  }, [selectedMachineId, rows, machines, lineMachines, selectedDate, selectedShift, selectedLine, shiftWorkingMinutes]);
+  }, [
+    selectedMachineId,
+    rows,
+    machines,
+    lineMachines,
+    selectedDate,
+    selectedShift,
+    selectedLine,
+    shiftWorkingMinutes,
+    items,
+    cycleTimes,
+  ]);
 
-  // When Item changes in draft, auto-set Operation, Cycle Time, and Std Output
+  // 1. When Item changes in draft: auto-set Operation, Cycle Time, and Std Output
   const handleItemSelect = (itemId: string) => {
     if (!draft) return;
-    const item = items.find((it) => it.id === itemId);
-    if (item) {
-      const target = resolveMachineItemTarget(
-        draft.machineId,
-        item.id,
-        items,
-        masterData.cycleTimes ?? [],
-        undefined,
-        shiftWorkingMinutes,
-        draft.machineName
-      );
+    setValidationError(null);
 
-      setDraft({
-        ...draft,
-        itemId: item.id,
-        itemName: target.itemName,
-        operation: target.operation,
-        cycleTime: target.cycleTime,
-        stdOutput: target.stdOutput,
-        totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
-        // If actual is 0 and stdOutput is set, default actual to stdOutput for faster adjustment
-        actualOutput: draft.actualOutput === 0 ? target.stdOutput : draft.actualOutput,
-      });
-    } else {
+    if (!itemId) {
       setDraft({
         ...draft,
         itemId: '',
@@ -189,11 +197,62 @@ export function OperatorKiosk({
         cycleTime: 0,
         stdOutput: 0,
       });
+      return;
     }
+
+    const target = resolveMachineItemTarget(
+      draft.machineId,
+      itemId,
+      items,
+      cycleTimes,
+      undefined,
+      shiftWorkingMinutes,
+      draft.machineName
+    );
+
+    setDraft({
+      ...draft,
+      itemId,
+      itemName: target.itemName,
+      operation: target.operation,
+      cycleTime: target.cycleTime,
+      stdOutput: target.stdOutput,
+      totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+    });
+  };
+
+  // 2. When Operation changes in draft: re-fetch Cycle Time & Std Output for (Machine + Item + Operation)
+  const handleOperationSelect = (operationName: string) => {
+    if (!draft) return;
+    setValidationError(null);
+
+    if (!draft.itemId) {
+      setDraft({ ...draft, operation: operationName });
+      return;
+    }
+
+    const target = resolveMachineItemTarget(
+      draft.machineId,
+      draft.itemId,
+      items,
+      cycleTimes,
+      operationName,
+      shiftWorkingMinutes,
+      draft.machineName
+    );
+
+    setDraft({
+      ...draft,
+      operation: operationName,
+      cycleTime: target.cycleTime,
+      stdOutput: target.stdOutput,
+      totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+    });
   };
 
   const handleAdjustActual = (delta: number) => {
     if (!draft) return;
+    setValidationError(null);
     const newVal = Math.max(0, (draft.actualOutput || 0) + delta);
     setDraft({ ...draft, actualOutput: newVal });
   };
@@ -204,8 +263,12 @@ export function OperatorKiosk({
     setDraft({ ...draft, rework: newVal });
   };
 
-  const handleBreakdownStep = (field: 'noDisc' | 'change' | 'power' | 'operator', delta: number) => {
+  const handleBreakdownStep = (
+    field: 'noDisc' | 'change' | 'power' | 'operator',
+    delta: number
+  ) => {
     if (!draft) return;
+    setValidationError(null);
     const currentVal = Number(draft.breakdown?.[field]) || 0;
     const nextVal = Math.max(0, currentVal + delta);
     setDraft({
@@ -217,13 +280,29 @@ export function OperatorKiosk({
     });
   };
 
+  const handleFillUnaccountedToField = (
+    field: 'noDisc' | 'change' | 'power' | 'operator',
+    unaccountedMins: number
+  ) => {
+    if (!draft || unaccountedMins <= 0) return;
+    setValidationError(null);
+    const currentVal = Number(draft.breakdown?.[field]) || 0;
+    setDraft({
+      ...draft,
+      breakdown: {
+        ...draft.breakdown,
+        [field]: Math.max(0, currentVal + unaccountedMins),
+      },
+    });
+  };
+
   const handleQuickRemark = (chip: string) => {
     if (!draft) return;
     const existing = draft.remarks ? draft.remarks + '; ' : '';
     setDraft({ ...draft, remarks: existing + chip });
   };
 
-  // Submission with validation rule
+  // Submission with strict Shift Time Balance validation (same as DailyShiftSheet)
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!draft) return;
@@ -238,35 +317,34 @@ export function OperatorKiosk({
       return;
     }
 
-    const balance = calculateShiftTimeBalance(draft, shiftWorkingMinutes);
+    const rowShiftMins = shiftWorkingMinutes || draft.totalWorkingMinutes;
+    const balance = calculateShiftTimeBalance(draft, rowShiftMins);
+
     if (!balance.isBalanced) {
-      setValidationError(
-        balance.errorMessage ||
-          `Shift Time Mismatch: Shift is ${balance.shiftMinutes} mins. Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m) accounts for ${balance.productionMinutes} mins, leaving ${balance.requiredBreakdownMinutes} mins of wasted/breakdown time. You have logged ${balance.loggedBreakdownMinutes} mins (${
-            balance.unaccountedMinutes > 0
-              ? `please add ${balance.unaccountedMinutes} more mins to Breakdown`
-              : `please reduce Breakdown by ${Math.abs(balance.unaccountedMinutes)} mins`
-          }).`
-      );
-      return;
-    }
-
-    // Validation rule: If Actual Output is less than Std Output,
-    // prompt the worker to log breakdown minutes or a remark before submitting.
-    const totalBd = calculateTotalBreakdown(draft.breakdown);
-    const isUnderperforming = draft.stdOutput > 0 && draft.actualOutput < draft.stdOutput;
-
-    if (isUnderperforming && totalBd === 0 && !draft.remarks.trim()) {
-      setValidationError(
-        `Actual output (${draft.actualOutput}) is below target (${draft.stdOutput}). Please record breakdown minutes (NO/DISC, CHANGE, POWER, or OPERATOR) or provide an explanation in remarks.`
-      );
+      if (balance.missingCycleTime) {
+        setValidationError(
+          `Cycle Time is 0! Actual output (${draft.actualOutput} pcs) was entered, but Cycle Time is missing. Please enter Cycle Time or select a configured Item.`
+        );
+      } else if (balance.isProductionExceeded) {
+        setValidationError(
+          `Wrong Entry: Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m = ${balance.productionMinutes} mins) exceeds total shift duration (${balance.shiftMinutes} mins)! Please reduce Actual Output or verify Cycle Time.`
+        );
+      } else if (balance.isOver) {
+        setValidationError(
+          `Wrong Entry: Productive time (${balance.productionMinutes}m) + Breakdown (${balance.loggedBreakdownMinutes}m) = ${balance.totalAccountedMinutes} mins, which exceeds shift duration (${balance.shiftMinutes} mins) by ${Math.abs(balance.unaccountedMinutes)} mins!`
+        );
+      } else {
+        setValidationError(
+          `Missing Breakdown Time: Shift is ${balance.shiftMinutes} mins. Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m) used ${balance.productionMinutes} mins, leaving ${balance.requiredBreakdownMinutes} mins of breakdown time. You have logged ${balance.loggedBreakdownMinutes} mins — please fill the remaining ${balance.unaccountedMinutes} mins in Breakdown.`
+        );
+      }
       return;
     }
 
     setValidationError(null);
     onSaveMachine({
       ...draft,
-      totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+      totalWorkingMinutes: rowShiftMins,
     });
     setSaveSuccessMsg(true);
     setTimeout(() => setSaveSuccessMsg(false), 2500);
@@ -286,7 +364,9 @@ export function OperatorKiosk({
     }
   };
 
-  // If no machine selected, show the visual grid for the selected line
+  // ============================================================================
+  // VIEW 1: 16-MACHINE VISUAL GRID (When no machine is selected)
+  // ============================================================================
   if (!selectedMachineId || !draft) {
     return (
       <div className="space-y-6">
@@ -299,12 +379,24 @@ export function OperatorKiosk({
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
               Select your assigned machine card below to log output, scrap, and downtime minutes for{' '}
-              <span className="text-emerald-400 font-medium">{selectedLine} · {selectedShift}</span> ({selectedDate}).
+              <span className="text-emerald-400 font-medium">
+                {selectedLine} · {selectedShift}
+              </span>{' '}
+              ({selectedDate}).
             </p>
           </div>
           <div className="flex items-center gap-4 text-xs font-mono">
+            {shiftWorkingMinutes > 0 && (
+              <span className="text-amber-300">
+                Shift Duration: <strong>{shiftWorkingMinutes}m</strong>
+              </span>
+            )}
             <span className="text-slate-400">
-              Completed: <strong className="text-emerald-400">{rows.filter((r) => r.stdOutput > 0).length}</strong> / {lineMachines.length}
+              Completed:{' '}
+              <strong className="text-emerald-400">
+                {rows.filter((r) => r.stdOutput > 0 || r.actualOutput > 0).length}
+              </strong>{' '}
+              / {lineMachines.length}
             </span>
           </div>
         </div>
@@ -313,17 +405,38 @@ export function OperatorKiosk({
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-3 sm:gap-4">
           {lineMachines.map((machine, index) => {
             const row = rows.find((r) => r.machineId === machine.id);
-            const isLogged = !!row && row.stdOutput > 0;
-            const efficiency = isLogged ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
-            const totalBd = isLogged ? calculateTotalBreakdown(row.breakdown) : 0;
-            const hasShortfall = isLogged && row.actualOutput < row.stdOutput;
+            const totalBd = row ? calculateTotalBreakdown(row.breakdown) : 0;
+            const isRowActive =
+              !!row &&
+              (!!row.itemId ||
+                !!row.operatorName ||
+                (row.actualOutput || 0) > 0 ||
+                totalBd > 0 ||
+                (row.cycleTime || 0) > 0);
+            const isLogged = !!row && (row.stdOutput > 0 || row.actualOutput > 0);
+            const efficiency =
+              row && row.stdOutput > 0
+                ? calculateEfficiency(row.actualOutput, row.stdOutput)
+                : 0;
+            const rowShiftMins =
+              shiftWorkingMinutes || row?.totalWorkingMinutes || 0;
+            const balance = row
+              ? calculateShiftTimeBalance(row, rowShiftMins)
+              : null;
+            const hasTimeMismatch = isRowActive && balance && !balance.isBalanced;
 
             return (
               <button
                 key={machine.id}
                 onClick={() => onSelectMachineId(machine.id)}
-                className={`relative text-left p-4 rounded-lg border transition-all text-slate-900 flex flex-col justify-between h-40 group ${
-                  isLogged
+                className={`relative text-left p-4 rounded-lg border transition-all text-slate-900 flex flex-col justify-between h-44 group ${
+                  hasTimeMismatch
+                    ? balance.missingCycleTime ||
+                      balance.isProductionExceeded ||
+                      balance.isOver
+                      ? 'bg-rose-50/40 border-rose-400 hover:border-rose-600 shadow-2xs'
+                      : 'bg-amber-50/40 border-amber-400 hover:border-amber-600 shadow-2xs'
+                    : isLogged
                     ? efficiency >= 90
                       ? 'bg-white border-emerald-300 hover:border-emerald-500 shadow-2xs hover:shadow-xs'
                       : 'bg-white border-amber-300 hover:border-amber-500 shadow-2xs hover:shadow-xs'
@@ -335,7 +448,26 @@ export function OperatorKiosk({
                     <span className="text-[11px] font-mono font-bold text-slate-600">
                       #{index + 1}
                     </span>
-                    {isLogged ? (
+                    {hasTimeMismatch ? (
+                      <span
+                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5 ${
+                          balance.missingCycleTime ||
+                          balance.isProductionExceeded ||
+                          balance.isOver
+                            ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                            : 'bg-amber-100 text-amber-900 border border-amber-300'
+                        }`}
+                      >
+                        <AlertTriangle className="w-3 h-3 shrink-0" />
+                        <span>
+                          {balance.missingCycleTime
+                            ? 'No CT'
+                            : balance.isProductionExceeded || balance.isOver
+                            ? 'Over Time'
+                            : `+${balance.unaccountedMinutes}m BD`}
+                        </span>
+                      </span>
+                    ) : isLogged ? (
                       <span
                         className={`text-[10px] font-bold px-2 py-0.5 rounded ${
                           efficiency >= 90
@@ -357,20 +489,32 @@ export function OperatorKiosk({
                   <h3 className="font-bold text-sm sm:text-base text-slate-900 leading-tight group-hover:text-emerald-700 transition-colors">
                     {machine.name}
                   </h3>
-                  <p className="text-xs text-slate-600 font-mono mt-0.5">{machine.code} · {machine.type}</p>
+                  <p className="text-xs text-slate-600 font-mono mt-0.5">
+                    {machine.code} · {machine.type}
+                  </p>
                 </div>
 
                 <div className="pt-2 border-t border-slate-100 text-xs">
-                  {isLogged ? (
+                  {isRowActive && row ? (
                     <div>
                       <div className="flex items-center justify-between text-slate-700 font-mono text-[11px]">
                         <span>Act / Std:</span>
-                        <strong className="text-slate-900">{row.actualOutput} / {row.stdOutput}</strong>
+                        <strong className="text-slate-900">
+                          {row.actualOutput} / {row.stdOutput}
+                        </strong>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-500 mt-0.5">
-                        <span className="truncate max-w-22.5">{row.operatorName || '—'}</span>
-                        {totalBd > 0 && (
-                          <span className="text-amber-700 font-medium">BD: {totalBd}m</span>
+                        <span className="truncate max-w-22.5">
+                          {row.operatorName || '—'}
+                        </span>
+                        {balance?.isBalanced ? (
+                          <span className="text-emerald-700 font-semibold">
+                            ✓ {balance.shiftMinutes}m OK
+                          </span>
+                        ) : (
+                          <span className="text-amber-700 font-medium">
+                            BD: {totalBd}m
+                          </span>
                         )}
                       </div>
                     </div>
@@ -389,38 +533,144 @@ export function OperatorKiosk({
     );
   }
 
-  // Selected Machine Step-by-Step Form View
+  // ============================================================================
+  // VIEW 2: SELECTED MACHINE STEP-BY-STEP FORM
+  // ============================================================================
+  const rowShiftMins = shiftWorkingMinutes || draft.totalWorkingMinutes;
   const totalBreakdown = calculateTotalBreakdown(draft.breakdown);
-  const efficiency = draft.stdOutput > 0 ? calculateEfficiency(draft.actualOutput, draft.stdOutput) : 0;
-  const isShortfall = draft.stdOutput > 0 && draft.actualOutput < draft.stdOutput;
+  const efficiency =
+    draft.stdOutput > 0
+      ? calculateEfficiency(draft.actualOutput, draft.stdOutput)
+      : 0;
+  const timeBalance = calculateShiftTimeBalance(draft, rowShiftMins);
+
+  // Operations list for the selected item (renders dropdown if > 1 operation)
+  const draftOperations = draft.itemId
+    ? getOperationsForItem(
+        draft.itemId,
+        items,
+        cycleTimes,
+        draft.machineId,
+        draft.machineName
+      )
+    : [];
+
+  // Show live time-balance status once Actual Output is entered or the row has activity
+  const hasEnteredOutputOrBd =
+    (draft.actualOutput || 0) > 0 ||
+    totalBreakdown > 0 ||
+    (!!draft.itemId && draft.cycleTime > 0);
+  const hasEntryError =
+    hasEnteredOutputOrBd && !timeBalance.isBalanced;
+
+  const pct = (mins: number) => calculateDowntimePct(mins, rowShiftMins);
+
+  const BD_CARDS: {
+    key: 'noDisc' | 'change' | 'power' | 'operator';
+    title: string;
+    subtitle: string;
+    step1: number;
+    step2: number;
+    badgeClass: string;
+  }[] = [
+    {
+      key: 'noDisc',
+      title: 'NO / DISC',
+      subtitle: 'Material / Disc shortage',
+      step1: 10,
+      step2: 20,
+      badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
+    },
+    {
+      key: 'change',
+      title: 'CHANGE',
+      subtitle: 'Tool insert / job setup',
+      step1: 10,
+      step2: 15,
+      badgeClass: 'bg-sky-50 text-sky-800 border-sky-200',
+    },
+    {
+      key: 'power',
+      title: 'POWER',
+      subtitle: 'Feeder trip / power outage',
+      step1: 15,
+      step2: 30,
+      badgeClass: 'bg-rose-50 text-rose-800 border-rose-200',
+    },
+    {
+      key: 'operator',
+      title: 'OPERATOR',
+      subtitle: 'Unattended / delay',
+      step1: 10,
+      step2: 20,
+      badgeClass: 'bg-purple-50 text-purple-800 border-purple-200',
+    },
+  ];
 
   return (
     <div className="max-w-4xl mx-auto space-y-5">
       {/* Top Machine Nav & Header */}
-      <div className="bg-slate-900 text-white rounded-lg p-4 flex items-center justify-between border border-slate-800 shadow-xs">
+      <div className="bg-slate-900 text-white rounded-lg p-4 flex flex-wrap items-center justify-between gap-3 border border-slate-800 shadow-xs">
         <div className="flex items-center gap-3">
           <button
+            type="button"
             onClick={() => onSelectMachineId(null)}
             className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-            title="Return to 16-machine grid"
+            title="Return to machine grid"
           >
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-mono font-bold text-emerald-400">
                 {selectedLine} · MACHINE #{currentIdx + 1} OF {lineMachines.length}
               </span>
               <span className="text-slate-500">·</span>
-              <span className="text-xs text-slate-300">{draft.date} ({draft.shift.split(' ')[0]})</span>
+              <span className="text-xs text-slate-300">
+                {draft.date} ({draft.shift.split(' ')[0]})
+              </span>
+              {rowShiftMins > 0 && (
+                <>
+                  <span className="text-slate-500">·</span>
+                  <span className="text-xs font-mono text-amber-300">
+                    Shift: {rowShiftMins}m
+                  </span>
+                </>
+              )}
             </div>
-            <h2 className="text-xl font-extrabold text-white tracking-tight">{draft.machineName}</h2>
+            <div className="flex items-center gap-2.5 mt-0.5">
+              <h2 className="text-xl font-extrabold text-white tracking-tight">
+                {draft.machineName}
+              </h2>
+              {hasEnteredOutputOrBd && (
+                timeBalance.isBalanced ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-xs font-mono font-bold">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>{timeBalance.shiftMinutes}m Balanced</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500/50 text-xs font-mono font-bold">
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                    <span>
+                      {timeBalance.missingCycleTime
+                        ? 'Missing Cycle Time'
+                        : timeBalance.isProductionExceeded
+                        ? 'Output Exceeds Shift'
+                        : timeBalance.isOver
+                        ? `Over by +${Math.abs(timeBalance.unaccountedMinutes)}m`
+                        : `Fill +${timeBalance.unaccountedMinutes}m BD`}
+                    </span>
+                  </span>
+                )
+              )}
+            </div>
           </div>
         </div>
 
         {/* Machine Switcher Buttons */}
         <div className="flex items-center gap-1.5">
           <button
+            type="button"
             onClick={handlePrevMachine}
             disabled={currentIdx === 0}
             className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs font-medium flex items-center gap-1 transition-colors"
@@ -429,6 +679,7 @@ export function OperatorKiosk({
             <span className="hidden sm:inline">Prev Machine</span>
           </button>
           <button
+            type="button"
             onClick={handleNextMachine}
             disabled={currentIdx === lineMachines.length - 1}
             className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs font-medium flex items-center gap-1 transition-colors"
@@ -439,12 +690,12 @@ export function OperatorKiosk({
         </div>
       </div>
 
-      {/* Validation Alert */}
+      {/* Form Submit Validation Alert */}
       {validationError && (
-        <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-3 text-xs flex items-start gap-2.5 shadow-2xs">
-          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+        <div className="bg-rose-50 border border-rose-300 text-rose-900 rounded-lg p-3 text-xs flex items-start gap-2.5 shadow-2xs">
+          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
           <div>
-            <strong className="font-bold">Attention Required:</strong> {validationError}
+            <strong className="font-bold">Entry Error:</strong> {validationError}
           </div>
         </div>
       )}
@@ -453,17 +704,22 @@ export function OperatorKiosk({
       {saveSuccessMsg && (
         <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-lg p-3 text-xs flex items-center gap-2 shadow-2xs">
           <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
-          <span className="font-bold">Shift entry for {draft.machineName} saved successfully!</span>
+          <span className="font-bold">
+            Shift entry for {draft.machineName} saved successfully!
+          </span>
         </div>
       )}
 
       {/* Main Kiosk Form */}
-      <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-slate-300 shadow-xs divide-y divide-slate-200">
-        {/* Step 1: Assignment (Operator, Item, Operation) */}
+      <form
+        onSubmit={handleSubmit}
+        className="bg-white rounded-lg border border-slate-300 shadow-xs divide-y divide-slate-200"
+      >
+        {/* Step 1: Assignment (Operator, Item, Operation, Cycle Time, Std Output) */}
         <div className="p-4 sm:p-5 space-y-4">
           <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
             <User className="w-4 h-4 text-slate-700" />
-            <span>1. Worker & Component Details</span>
+            <span>1. Worker & Component Details (Auto-Completes Cycle Time & Target)</span>
           </h3>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -474,7 +730,9 @@ export function OperatorKiosk({
               </label>
               <select
                 value={draft.operatorName}
-                onChange={(e) => setDraft({ ...draft, operatorName: e.target.value })}
+                onChange={(e) =>
+                  setDraft({ ...draft, operatorName: e.target.value })
+                }
                 className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none"
               >
                 <option value="">— Select Assigned Operator —</option>
@@ -499,55 +757,105 @@ export function OperatorKiosk({
                 <option value="">— Select Item from Master —</option>
                 {items.map((it) => (
                   <option key={it.id} value={it.id}>
-                    {it.itemName} ({it.itemCode}) — Std: {it.stdOutput} pcs
+                    {it.itemName} ({it.itemCode})
                   </option>
                 ))}
               </select>
             </div>
           </div>
 
-          {/* Operation & Std Output */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
+          {/* Operation, Cycle Time & Std Output (4-Column Grid) */}
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-1">
             <div className="sm:col-span-2">
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Operation Name
               </label>
-              <input
-                type="text"
-                value={draft.operation}
-                onChange={(e) => {
-                  const newOp = e.target.value;
-                  const target = resolveMachineItemTarget(
-                    draft.machineId,
-                    draft.itemId,
-                    items,
-                    masterData.cycleTimes ?? [],
-                    newOp,
-                    shiftWorkingMinutes,
-                    draft.machineName
-                  );
-                  setDraft({
-                    ...draft,
-                    operation: newOp,
-                    cycleTime: target.cycleTime,
-                    stdOutput: target.stdOutput,
-                  });
-                }}
-                placeholder="e.g. OP-10 Rough Turning"
-                className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 focus:bg-white focus:border-slate-800 focus:outline-none"
-              />
+              {!draft.itemId ? (
+                <div className="w-full bg-slate-100 border border-slate-200 rounded-md px-3 py-2 text-sm text-slate-400 italic">
+                  — Select Item First —
+                </div>
+              ) : draftOperations.length > 1 ? (
+                <select
+                  value={draft.operation}
+                  onChange={(e) => handleOperationSelect(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none"
+                >
+                  <option value="">— Select Operation —</option>
+                  {draftOperations.map((op) => (
+                    <option key={op} value={op}>
+                      {op}
+                    </option>
+                  ))}
+                  {draft.operation && !draftOperations.includes(draft.operation) && (
+                    <option value={draft.operation}>{draft.operation}</option>
+                  )}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={draft.operation}
+                  onChange={(e) => handleOperationSelect(e.target.value)}
+                  placeholder="e.g. OP-10 Rough Turning"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none"
+                />
+              )}
             </div>
 
+            {/* Cycle Time (Auto-filled from Machine x Item x Operation) */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Std Output Target (Shift)
+                Cycle Time
+              </label>
+              <div className="flex items-center">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={draft.cycleTime > 0 ? draft.cycleTime : ''}
+                  placeholder="0.00"
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => {
+                    const newCt = parseFloat(e.target.value) || 0;
+                    const newStd =
+                      newCt > 0
+                        ? calculateDynamicStdOutput(newCt, rowShiftMins)
+                        : draft.stdOutput;
+                    setDraft({
+                      ...draft,
+                      cycleTime: newCt,
+                      stdOutput: newStd,
+                    });
+                  }}
+                  className={`w-full border rounded-md px-3 py-2 text-sm font-mono font-bold text-center focus:bg-white focus:border-slate-800 focus:outline-none ${
+                    timeBalance.missingCycleTime
+                      ? 'bg-rose-100 text-rose-950 border-rose-500 ring-2 ring-rose-300 animate-pulse'
+                      : draft.cycleTime > 0
+                      ? 'bg-blue-50/70 text-blue-950 border-blue-300'
+                      : 'bg-slate-50 text-slate-900 border-slate-300'
+                  }`}
+                />
+                <span className="ml-2 text-xs font-medium text-slate-500">m</span>
+              </div>
+            </div>
+
+            {/* Std Output Target (Auto-calculated from Shift Mins / Cycle Time) */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Std Output (Shift)
               </label>
               <div className="flex items-center">
                 <input
                   type="number"
                   min="0"
                   value={draft.stdOutput || ''}
-                  onChange={(e) => setDraft({ ...draft, stdOutput: Number(e.target.value) || 0 })}
+                  placeholder="0"
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      stdOutput: Number(e.target.value) || 0,
+                    })
+                  }
                   className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm font-mono font-bold text-slate-900 text-center focus:bg-white focus:border-slate-800 focus:outline-none"
                 />
                 <span className="ml-2 text-xs font-medium text-slate-500">pcs</span>
@@ -558,7 +866,7 @@ export function OperatorKiosk({
 
         {/* Step 2: Production Outputs (Actual Output & Rework) */}
         <div className="p-4 sm:p-5 space-y-4 bg-slate-50/50">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
               <Package className="w-4 h-4 text-slate-700" />
               <span>2. Shift Output & Quality Inspection</span>
@@ -566,7 +874,9 @@ export function OperatorKiosk({
 
             {draft.stdOutput > 0 && (
               <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-500 font-mono">Efficiency:</span>
+                <span className="text-xs text-slate-500 font-mono">
+                  Efficiency:
+                </span>
                 <span
                   className={`text-xs font-bold font-mono px-2.5 py-1 rounded border ${
                     efficiency >= 90
@@ -584,13 +894,19 @@ export function OperatorKiosk({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             {/* Actual Output */}
-            <div className="bg-white p-4 rounded-lg border border-slate-200 space-y-3">
+            <div
+              className={`bg-white p-4 rounded-lg border space-y-3 ${
+                timeBalance.isProductionExceeded || timeBalance.missingCycleTime
+                  ? 'border-rose-400 ring-2 ring-rose-200'
+                  : 'border-slate-200'
+              }`}
+            >
               <div className="flex items-center justify-between">
                 <label className="text-xs font-bold text-slate-800 uppercase tracking-wider">
                   Actual Output (Pieces) <span className="text-rose-600">*</span>
                 </label>
                 <span className="text-xs font-mono text-slate-500">
-                  Target: {draft.stdOutput} pcs
+                  Target: <strong>{draft.stdOutput}</strong> pcs
                 </span>
               </div>
 
@@ -612,9 +928,27 @@ export function OperatorKiosk({
                 <input
                   type="number"
                   min="0"
-                  value={draft.actualOutput || (draft.actualOutput === 0 && draft.stdOutput > 0 ? 0 : '')}
-                  onChange={(e) => setDraft({ ...draft, actualOutput: Number(e.target.value) || 0 })}
-                  className="flex-1 text-center font-mono text-2xl font-black py-1.5 bg-slate-50 border border-slate-300 rounded focus:bg-white focus:border-slate-800 focus:outline-none"
+                  value={
+                    draft.actualOutput > 0
+                      ? draft.actualOutput
+                      : draft.stdOutput > 0
+                      ? 0
+                      : ''
+                  }
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => {
+                    setValidationError(null);
+                    setDraft({
+                      ...draft,
+                      actualOutput: Number(e.target.value) || 0,
+                    });
+                  }}
+                  className={`flex-1 text-center font-mono text-2xl font-black py-1.5 border rounded focus:bg-white focus:border-slate-800 focus:outline-none ${
+                    timeBalance.isProductionExceeded ||
+                    timeBalance.missingCycleTime
+                      ? 'bg-rose-100 text-rose-900 border-rose-500'
+                      : 'bg-slate-50 text-slate-900 border-slate-300'
+                  }`}
                 />
                 <button
                   type="button"
@@ -636,26 +970,74 @@ export function OperatorKiosk({
               <div className="flex items-center gap-1.5 justify-center pt-1">
                 <button
                   type="button"
-                  onClick={() => setDraft({ ...draft, actualOutput: draft.stdOutput })}
+                  onClick={() =>
+                    setDraft({ ...draft, actualOutput: draft.stdOutput })
+                  }
                   className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded"
                 >
                   Exact Target ({draft.stdOutput})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setDraft({ ...draft, actualOutput: Math.max(0, draft.stdOutput - 5) })}
+                  onClick={() =>
+                    setDraft({
+                      ...draft,
+                      actualOutput: Math.max(0, draft.stdOutput - 5),
+                    })
+                  }
                   className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 px-2 py-0.5 rounded"
                 >
                   -5 Pcs
                 </button>
                 <button
                   type="button"
-                  onClick={() => setDraft({ ...draft, actualOutput: draft.stdOutput + 5 })}
+                  onClick={() =>
+                    setDraft({ ...draft, actualOutput: draft.stdOutput + 5 })
+                  }
                   className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 px-2 py-0.5 rounded"
                 >
                   +5 Pcs
                 </button>
               </div>
+
+              {/* Live Productive Time Calculation & Immediate Warning if Wrong Actual Output */}
+              {draft.cycleTime > 0 && (
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-mono">
+                  <span className="text-slate-500">
+                    Productive Time ({draft.actualOutput} × {draft.cycleTime}m):
+                  </span>
+                  <strong
+                    className={
+                      timeBalance.isProductionExceeded
+                        ? 'text-rose-700'
+                        : 'text-slate-900'
+                    }
+                  >
+                    {timeBalance.productionMinutes}m / {timeBalance.shiftMinutes}m
+                  </strong>
+                </div>
+              )}
+
+              {timeBalance.missingCycleTime && (
+                <div className="p-2 rounded bg-rose-50 border border-rose-300 text-rose-900 text-xs flex items-start gap-1.5 font-medium">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>
+                    Cycle Time is 0! Please select an item with a configured
+                    Cycle Time or enter Cycle Time in Step 1.
+                  </span>
+                </div>
+              )}
+
+              {timeBalance.isProductionExceeded && (
+                <div className="p-2 rounded bg-rose-50 border border-rose-300 text-rose-900 text-xs flex items-start gap-1.5 font-medium">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>
+                    Wrong Entry: Productive time ({timeBalance.productionMinutes}
+                    m) exceeds total shift time ({timeBalance.shiftMinutes}m)!
+                    Reduce Actual Output.
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Re-work Pieces */}
@@ -680,8 +1062,12 @@ export function OperatorKiosk({
                 <input
                   type="number"
                   min="0"
-                  value={draft.rework || (draft.rework === 0 ? 0 : '')}
-                  onChange={(e) => setDraft({ ...draft, rework: Number(e.target.value) || 0 })}
+                  value={draft.rework > 0 ? draft.rework : ''}
+                  placeholder="0"
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) =>
+                    setDraft({ ...draft, rework: Number(e.target.value) || 0 })
+                  }
                   className="flex-1 text-center font-mono text-2xl font-black py-1.5 bg-slate-50 border border-slate-300 rounded focus:bg-white focus:border-slate-800 focus:outline-none"
                 />
                 <button
@@ -700,11 +1086,18 @@ export function OperatorKiosk({
           </div>
         </div>
 
-        {/* Step 3: Breakdown Downtime (Exact 4 sub-columns) */}
-        {/* Validation rule: If Actual < Std Output, highlight in amber and prompt worker */}
+        {/* Step 3: Breakdown Downtime (Live Time-Accounting Prompt & Mismatch Warnings) */}
         <div
           className={`p-4 sm:p-5 space-y-4 transition-colors ${
-            isShortfall ? 'bg-amber-50/70 border-y-2 border-y-amber-400' : 'bg-white'
+            hasEntryError
+              ? timeBalance.missingCycleTime ||
+                timeBalance.isProductionExceeded ||
+                timeBalance.isOver
+                ? 'bg-rose-50/70 border-y-2 border-y-rose-400'
+                : 'bg-amber-50/70 border-y-2 border-y-amber-400'
+              : hasEnteredOutputOrBd && timeBalance.isBalanced
+              ? 'bg-emerald-50/30'
+              : 'bg-white'
           }`}
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -713,181 +1106,160 @@ export function OperatorKiosk({
                 <Wrench className="w-4 h-4 text-amber-600" />
                 <span>3. Breakdown & Downtime Log (Minutes)</span>
               </h3>
-              {isShortfall && (
-                <p className="text-xs text-amber-800 font-medium mt-0.5 flex items-center gap-1">
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                  <span>
-                    Shortfall: {draft.stdOutput - draft.actualOutput} pcs under target. Please record downtime minutes or shift remark.
-                  </span>
-                </p>
+
+              {/* Live Time-Balance Status Banner */}
+              {hasEnteredOutputOrBd && draft.cycleTime > 0 && (
+                <div className="mt-1.5">
+                  {timeBalance.isProductionExceeded ? (
+                    <p className="text-xs text-rose-800 font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>
+                        Wrong Entry: Actual output ({draft.actualOutput} pcs ×{' '}
+                        {draft.cycleTime}m = {timeBalance.productionMinutes}m)
+                        exceeds the {timeBalance.shiftMinutes}m shift!
+                      </span>
+                    </p>
+                  ) : timeBalance.isOver ? (
+                    <p className="text-xs text-rose-800 font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>
+                        Wrong Entry: Productive ({timeBalance.productionMinutes}
+                        m) + Breakdown ({timeBalance.loggedBreakdownMinutes}m) ={' '}
+                        {timeBalance.totalAccountedMinutes}m, which exceeds the{' '}
+                        {timeBalance.shiftMinutes}m shift by{' '}
+                        {Math.abs(timeBalance.unaccountedMinutes)} mins!
+                      </span>
+                    </p>
+                  ) : timeBalance.unaccountedMinutes > 0 ? (
+                    <p className="text-xs text-amber-900 font-semibold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>
+                        Required Breakdown Time:{' '}
+                        <strong>{timeBalance.requiredBreakdownMinutes} mins</strong>{' '}
+                        ({timeBalance.shiftMinutes}m shift −{' '}
+                        {timeBalance.productionMinutes}m productive). Please fill{' '}
+                        <strong className="underline text-rose-700">
+                          +{timeBalance.unaccountedMinutes} mins
+                        </strong>{' '}
+                        in the breakdown boxes below.
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-xs text-emerald-800 font-semibold flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>
+                        Shift Time Matched: Productive (
+                        {timeBalance.productionMinutes}m) + Breakdown (
+                        {timeBalance.loggedBreakdownMinutes}m) ={' '}
+                        {timeBalance.shiftMinutes} mins.
+                      </span>
+                    </p>
+                  )}
+                </div>
               )}
             </div>
 
-            <div className="text-xs font-mono font-bold bg-slate-900 text-amber-300 px-3 py-1 rounded">
-              Total Downtime: {totalBreakdown} mins
+            <div className="text-xs font-mono font-bold bg-slate-900 text-amber-300 px-3 py-1.5 rounded flex items-center gap-2">
+              <span>
+                Logged BD: {totalBreakdown}m / {timeBalance.requiredBreakdownMinutes}m
+              </span>
+              {rowShiftMins > 0 && (
+                <span className="text-slate-400">
+                  ({pct(totalBreakdown)}% of {rowShiftMins}m)
+                </span>
+              )}
             </div>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {/* 1. NO/DISC */}
-            <div className="bg-white p-3 rounded border border-slate-300 shadow-2xs space-y-2">
-              <span className="block text-[11px] font-bold text-slate-800 uppercase" title="Disc / Casting shortage">
-                NO / DISC
-              </span>
-              <p className="text-[10px] text-slate-500 leading-tight">Material / Disc shortage</p>
-              <div className="flex items-center gap-1">
-                <input
-                  type="number"
-                  min="0"
-                  value={draft.breakdown.noDisc || (draft.breakdown.noDisc === 0 ? '' : 0)}
-                  placeholder="0"
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      breakdown: { ...draft.breakdown, noDisc: Number(e.target.value) || 0 },
-                    })
-                  }
-                  className="w-full text-center font-mono text-base font-bold bg-slate-50 border border-slate-300 rounded py-1"
-                />
-                <span className="text-xs text-slate-500">m</span>
-              </div>
-              <div className="flex items-center gap-1 pt-1">
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('noDisc', 10)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+            {BD_CARDS.map((card) => {
+              const val = Number(draft.breakdown?.[card.key] || 0);
+              return (
+                <div
+                  key={card.key}
+                  className="bg-white p-3 rounded border border-slate-300 shadow-2xs space-y-2 flex flex-col justify-between"
                 >
-                  +10m
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('noDisc', 20)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
-                  +20m
-                </button>
-              </div>
-            </div>
+                  <div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="block text-[11px] font-bold text-slate-800 uppercase">
+                        {card.title}
+                      </span>
+                      {val > 0 && (
+                        <span
+                          className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${card.badgeClass}`}
+                        >
+                          {pct(val)}%
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-tight mt-0.5">
+                      {card.subtitle}
+                    </p>
+                  </div>
 
-            {/* 2. CHANGE */}
-            <div className="bg-white p-3 rounded border border-slate-300 shadow-2xs space-y-2">
-              <span className="block text-[11px] font-bold text-slate-800 uppercase" title="Tool / insert change">
-                CHANGE
-              </span>
-              <p className="text-[10px] text-slate-500 leading-tight">Tool insert / job setup</p>
-              <div className="flex items-center gap-1">
-                <input
-                  type="number"
-                  min="0"
-                  value={draft.breakdown.change || (draft.breakdown.change === 0 ? '' : 0)}
-                  placeholder="0"
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      breakdown: { ...draft.breakdown, change: Number(e.target.value) || 0 },
-                    })
-                  }
-                  className="w-full text-center font-mono text-base font-bold bg-slate-50 border border-slate-300 rounded py-1"
-                />
-                <span className="text-xs text-slate-500">m</span>
-              </div>
-              <div className="flex items-center gap-1 pt-1">
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('change', 10)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
-                  +10m
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('change', 15)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
-                  +15m
-                </button>
-              </div>
-            </div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min="0"
+                        value={val > 0 ? val : ''}
+                        placeholder="0"
+                        onFocus={(e) => e.target.select()}
+                        onChange={(e) => {
+                          setValidationError(null);
+                          setDraft({
+                            ...draft,
+                            breakdown: {
+                              ...draft.breakdown,
+                              [card.key]: Math.max(
+                                0,
+                                Number(e.target.value) || 0
+                              ),
+                            },
+                          });
+                        }}
+                        className="w-full text-center font-mono text-base font-bold bg-slate-50 border border-slate-300 rounded py-1 focus:bg-white focus:border-slate-800 focus:outline-none"
+                      />
+                      <span className="text-xs text-slate-500">m</span>
+                    </div>
 
-            {/* 3. POWER */}
-            <div className="bg-white p-3 rounded border border-slate-300 shadow-2xs space-y-2">
-              <span className="block text-[11px] font-bold text-slate-800 uppercase" title="Electrical failure / trip">
-                POWER
-              </span>
-              <p className="text-[10px] text-slate-500 leading-tight">Feeder trip / power outage</p>
-              <div className="flex items-center gap-1">
-                <input
-                  type="number"
-                  min="0"
-                  value={draft.breakdown.power || (draft.breakdown.power === 0 ? '' : 0)}
-                  placeholder="0"
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      breakdown: { ...draft.breakdown, power: Number(e.target.value) || 0 },
-                    })
-                  }
-                  className="w-full text-center font-mono text-base font-bold bg-slate-50 border border-slate-300 rounded py-1"
-                />
-                <span className="text-xs text-slate-500">m</span>
-              </div>
-              <div className="flex items-center gap-1 pt-1">
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('power', 15)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
-                  +15m
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('power', 30)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
-                  +30m
-                </button>
-              </div>
-            </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleBreakdownStep(card.key, card.step1)}
+                        className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+                      >
+                        +{card.step1}m
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleBreakdownStep(card.key, card.step2)}
+                        className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+                      >
+                        +{card.step2}m
+                      </button>
+                    </div>
 
-            {/* 4. OPERATOR */}
-            <div className="bg-white p-3 rounded border border-slate-300 shadow-2xs space-y-2">
-              <span className="block text-[11px] font-bold text-slate-800 uppercase" title="Operator delay">
-                OPERATOR
-              </span>
-              <p className="text-[10px] text-slate-500 leading-tight">Unattended / delay</p>
-              <div className="flex items-center gap-1">
-                <input
-                  type="number"
-                  min="0"
-                  value={draft.breakdown.operator || (draft.breakdown.operator === 0 ? '' : 0)}
-                  placeholder="0"
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      breakdown: { ...draft.breakdown, operator: Number(e.target.value) || 0 },
-                    })
-                  }
-                  className="w-full text-center font-mono text-base font-bold bg-slate-50 border border-slate-300 rounded py-1"
-                />
-                <span className="text-xs text-slate-500">m</span>
-              </div>
-              <div className="flex items-center gap-1 pt-1">
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('operator', 10)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
-                  +10m
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleBreakdownStep('operator', 20)}
-                  className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
-                  +20m
-                </button>
-              </div>
-            </div>
+                    {/* 1-Click Auto-Fill Remaining Breakdown Time Button */}
+                    {draft.cycleTime > 0 && timeBalance.unaccountedMinutes > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleFillUnaccountedToField(
+                            card.key,
+                            timeBalance.unaccountedMinutes
+                          )
+                        }
+                        className="w-full py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-[10px] transition-colors shadow-2xs"
+                        title={`Add remaining ${timeBalance.unaccountedMinutes}m into ${card.title}`}
+                      >
+                        +Fill ({timeBalance.unaccountedMinutes}m)
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -939,14 +1311,32 @@ export function OperatorKiosk({
           <div className="flex items-center gap-3">
             <button
               type="submit"
-              className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase tracking-wider rounded-md shadow-xs flex items-center gap-2 transition-colors"
+              disabled={isSaving}
+              className={`px-6 py-2.5 text-white font-bold text-xs uppercase tracking-wider rounded-md shadow-xs flex items-center gap-2 transition-colors disabled:opacity-50 ${
+                hasEntryError
+                  ? 'bg-rose-600 hover:bg-rose-700'
+                  : 'bg-emerald-600 hover:bg-emerald-500'
+              }`}
             >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>Submit & Save Machine Entry</span>
+              {hasEntryError ? (
+                <>
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>Fix Time Mismatch to Save</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    {isSaving ? 'Saving...' : 'Submit & Save Machine Entry'}
+                  </span>
+                </>
+              )}
             </button>
           </div>
         </div>
       </form>
     </div>
   );
-};
+}
+
+export default OperatorKiosk;
