@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   Download,
   CheckCircle2,
@@ -106,9 +106,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   onExportExcel,
   onOpenMachineInKiosk,
 }) => {
-  const operators: string[] = masterData?.operators ?? [];
-  const items: ItemMaster[] = masterData?.items ?? [];
-  const cycleTimes: MachineItemCycleTime[] = masterData?.cycleTimes ?? [];
+const operators = useMemo(() => masterData?.operators ?? [], [masterData?.operators]);
+const items = useMemo(() => masterData?.items ?? [], [masterData?.items]);
+const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycleTimes]);
 
   // Fetched from public.shifts in Supabase (matches displayName or shiftCode)
   const activeShiftObj = masterData?.shifts?.find(
@@ -1346,8 +1346,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             </span>
           </div>
 
+          // Change this line at the bottom of components/DailyShiftSheet.tsx:
           <div className="text-slate-500 text-[11px]">
-            * Arrow Keys / Enter / TAB navigate cells. Click "+Fill BD" badge to auto-balance shift minutes.
+            {" Arrow Keys / Enter / TAB navigate cells. Click &apos;+Fill BD&apos; badge to auto-balance shift minutes."}
           </div>
         </div>
       </div>
