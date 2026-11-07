@@ -94,27 +94,74 @@ export function getOperationsForItem(
 }
 
 /**
- * Calculates Standard Output dynamically from Cycle Time and net shift operating minutes.
- * Assumes Cycle Time is in seconds (e.g. 54 sec) and default shift is 450 mins (1350 / 3).
+ * Calculates how many items can be made in the selected shift's working minutes:
+ * Example: Shift = 100 mins, Cycle Time = 10 -> Std Output = 100 / 10 = 10 items.
  */
 export function calculateDynamicStdOutput(
-  cycleTimeSeconds: number,
-  shiftWorkingMinutes: number = 450,
-  totalBreakdownMinutes: number = 0
+  cycleTime: number,
+  shiftWorkingMinutes: number
 ): number {
-  const ct = Number(cycleTimeSeconds) || 0;
-  if (ct <= 0) return 0;
+  const ct = Number(cycleTime) || 0;
+  const shiftMins = Number(shiftWorkingMinutes) || 0;
+  if (ct <= 0 || shiftMins <= 0) return 0;
 
-  const netMinutes = Math.max(
+  return Math.floor(shiftMins / ct);
+}
+
+/**
+ * Computes the exact time-accounting balance for a machine row in a shift.
+ * Example: Shift = 100m, Cycle Time = 10m, Actual = 5 ->
+ *   Production Time = 50m, Required Breakdown = 50m.
+ *   If supervisor logged 20m, unaccountedMinutes = 30m (needs 30m more in breakdown).
+ */
+export function calculateShiftTimeBalance(
+  row: Pick<MachineShiftRow, "cycleTime" | "actualOutput" | "breakdown" | "totalWorkingMinutes">,
+  shiftWorkingMinutes?: number
+) {
+  const shiftMins =
+    Number(shiftWorkingMinutes) || Number(row.totalWorkingMinutes) || 0;
+  const ct = Number(row.cycleTime) || 0;
+  const actual = Number(row.actualOutput) || 0;
+  const loggedBreakdown = calculateTotalBreakdown(row.breakdown);
+
+  if (ct <= 0 || shiftMins <= 0) {
+    return {
+      shiftMinutes: shiftMins,
+      productionMinutes: 0,
+      requiredBreakdownMinutes: 0,
+      loggedBreakdownMinutes: loggedBreakdown,
+      unaccountedMinutes: 0,
+      totalAccountedMinutes: loggedBreakdown,
+      isBalanced: true,
+    };
+  }
+
+  const productionMinutes = Number((actual * ct).toFixed(2));
+  const requiredBreakdownMinutes = Math.max(
     0,
-    (Number(shiftWorkingMinutes) || 450) - (Number(totalBreakdownMinutes) || 0)
+    Number((shiftMins - productionMinutes).toFixed(2))
   );
-  return Math.floor((netMinutes * 60) / ct);
+  const unaccountedMinutes = Number(
+    (requiredBreakdownMinutes - loggedBreakdown).toFixed(2)
+  );
+  const totalAccountedMinutes = Number(
+    (productionMinutes + loggedBreakdown).toFixed(2)
+  );
+
+  return {
+    shiftMinutes: shiftMins,
+    productionMinutes,
+    requiredBreakdownMinutes,
+    loggedBreakdownMinutes: loggedBreakdown,
+    unaccountedMinutes, // > 0 means supervisor still needs to log this many mins in Breakdown
+    totalAccountedMinutes,
+    isBalanced: Math.abs(unaccountedMinutes) < 0.01,
+  };
 }
 
 /**
  * Looks up (machineId + itemId + operation) in machine_item_cycle_times.
- * Auto-populates operation, cycleTime, and calculated stdOutput.
+ * Auto-populates operation, cycleTime, and single-shift stdOutput.
  */
 export function resolveMachineItemTarget(
   machineId: string,
@@ -122,8 +169,7 @@ export function resolveMachineItemTarget(
   items: ItemMaster[],
   cycleTimes: MachineItemCycleTime[] = [],
   explicitOperation?: string,
-  shiftWorkingMinutes: number = 450,
-  totalBreakdownMinutes: number = 0
+  shiftWorkingMinutes: number = 0
 ) {
   const baseItem = items.find((it) => it.id === itemId);
   if (!baseItem) {
@@ -143,13 +189,12 @@ export function resolveMachineItemTarget(
     machineId
   );
 
-  // Pick the explicitly chosen operation, or default to the first available operation
   const chosenOperation =
     explicitOperation !== undefined
       ? explicitOperation
       : availableOperations[0] || baseItem.operation || "";
 
-  // 1. Try exact triple match: (machineId + itemId + chosenOperation)
+  // 1. Exact triple match: (machineId + itemId + chosenOperation)
   let matchedCt = cycleTimes.find(
     (ct) =>
       ct.machineId === machineId &&
@@ -157,7 +202,7 @@ export function resolveMachineItemTarget(
       ct.operation.trim().toLowerCase() === chosenOperation.trim().toLowerCase()
   );
 
-  // 2. Fallback: if only one cycle time record exists for (machineId + itemId), use it
+  // 2. Fallback: match by (machineId + itemId) if only one operation exists
   if (!matchedCt && !explicitOperation) {
     matchedCt = cycleTimes.find(
       (ct) => ct.machineId === machineId && ct.itemId === itemId
@@ -167,15 +212,10 @@ export function resolveMachineItemTarget(
   const resolvedCycleTime = matchedCt ? Number(matchedCt.cycleTime) || 0 : 0;
   const resolvedOperation = matchedCt?.operation || chosenOperation;
 
-  // Auto-calculate stdOutput from cycleTime if cycleTime > 0
-  const calculatedStd =
-    resolvedCycleTime > 0
-      ? calculateDynamicStdOutput(
-          resolvedCycleTime,
-          shiftWorkingMinutes,
-          totalBreakdownMinutes
-        )
-      : Number(baseItem.stdOutput) || 0;
+  const calculatedStd = calculateDynamicStdOutput(
+    resolvedCycleTime,
+    shiftWorkingMinutes
+  );
 
   return {
     itemName: baseItem.itemName,
@@ -187,13 +227,13 @@ export function resolveMachineItemTarget(
 }
 
 /**
- * Calculates live Downtime % against the row's totalWorkingMinutes (default 1350)
- * so the UI matches PostgreSQL's GENERATED ALWAYS columns in real time.
+ * Calculates live Downtime % against the shift's working minutes from the DB.
  */
 export function calculateDowntimePct(
   minutes: number,
-  totalWorkingMinutes: number = 1350
+  shiftWorkingMinutes: number
 ): number {
-  const denom = totalWorkingMinutes > 0 ? totalWorkingMinutes : 1350;
+  const denom = Number(shiftWorkingMinutes) || 0;
+  if (denom <= 0) return 0;
   return Number(((Number(minutes || 0) / denom) * 100).toFixed(2));
 }

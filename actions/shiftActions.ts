@@ -111,7 +111,7 @@ export interface DbCycleTimeRow {
 // ============================================================================
 
 function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
-  const totalWorking = Number(dbRow.total_working_minutes ?? 1350);
+  const totalWorking = Number(dbRow.total_working_minutes ?? 0);
   const noDisc = Number(dbRow.bd_no_disc ?? 0);
   const change = Number(dbRow.bd_change ?? 0);
   const power = Number(dbRow.bd_power ?? 0);
@@ -176,7 +176,7 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     item_name: uiRow.itemName?.trim() ?? "",
     operation: uiRow.operation?.trim() ?? "",
     cycle_time: Number(uiRow.cycleTime) || 0,
-    total_working_minutes: Number(uiRow.totalWorkingMinutes) || 1350,
+    total_working_minutes: Number(uiRow.totalWorkingMinutes) || 0,
     std_output: Number(uiRow.stdOutput) || 0,
     actual_output: Number(uiRow.actualOutput) || 0,
     rework: Number(uiRow.rework) || 0,
@@ -253,7 +253,7 @@ function hydrateShiftSheetRows(
   date: string,
   shift: ShiftType,
   line: string,
-  lineWorkingMinutes: number = 1350
+  shiftWorkingMinutes: number // Fetched dynamically from public.shifts
 ): MachineShiftRow[] {
   const savedLogMap = new Map<string, DbShiftLogRow>(
     savedDbLogs
@@ -264,9 +264,12 @@ function hydrateShiftSheetRows(
   return sortedLineMachines.map((machine, index) => {
     const existingLog = savedLogMap.get(machine.id);
     if (existingLog) {
+      const uiRow = mapDbRowToUiRow(existingLog);
       return {
-        ...mapDbRowToUiRow(existingLog),
+        ...uiRow,
         srNo: index + 1,
+        // Ensure totalWorkingMinutes always reflects the single shift's DB duration
+        totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes,
       };
     }
 
@@ -283,7 +286,7 @@ function hydrateShiftSheetRows(
       itemName: "",
       operation: "",
       cycleTime: 0,
-      totalWorkingMinutes: lineWorkingMinutes,
+      totalWorkingMinutes: shiftWorkingMinutes,
       stdOutput: 0,
       actualOutput: 0,
       rework: 0,
@@ -375,7 +378,8 @@ export async function getMasterData(): Promise<MasterDataState> {
 }
 
 /**
- * ACTION 2: Fetch Active Shift Rows (with Line Working Minutes & Auto-Hydration)
+ * ACTION 2: Fetch Active Shift Rows
+ * Queries public.shifts for the selected shift's exact shift_working_minutes.
  */
 export async function getShiftSheetRows(
   date: string,
@@ -384,7 +388,7 @@ export async function getShiftSheetRows(
 ): Promise<MachineShiftRow[]> {
   const supabase = createAdminClient();
 
-  const [machinesRes, logsRes, lineConfigRes] = await Promise.all([
+  const [machinesRes, logsRes, shiftConfigRes] = await Promise.all([
     supabase
       .from("machines")
       .select("*")
@@ -399,18 +403,17 @@ export async function getShiftSheetRows(
       .eq("line", line)
       .order("sr_no", { ascending: true }),
     supabase
-      .from("production_lines")
-      .select("daily_working_minutes")
-      .eq("name", line)
+      .from("shifts")
+      .select("shift_working_minutes")
+      .or(`display_name.eq."${shift}",shift_code.eq."${shift}"`)
       .maybeSingle(),
   ]);
 
   if (machinesRes.error) throw new Error(machinesRes.error.message);
   if (logsRes.error) throw new Error(logsRes.error.message);
+  if (shiftConfigRes.error) throw new Error(shiftConfigRes.error.message);
 
-  const lineWorkingMinutes = Number(
-    lineConfigRes.data?.daily_working_minutes ?? 1350
-  );
+  const dbShiftMinutes = Number(shiftConfigRes.data?.shift_working_minutes ?? 0);
 
   return hydrateShiftSheetRows(
     machinesRes.data as DbMachineRow[],
@@ -418,7 +421,7 @@ export async function getShiftSheetRows(
     date,
     shift,
     line,
-    lineWorkingMinutes
+    dbShiftMinutes
   );
 }
 

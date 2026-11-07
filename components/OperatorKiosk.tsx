@@ -22,7 +22,12 @@ import {
   MasterDataState,
   ShiftType,
 } from '@/types';
-import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
+import {
+  calculateEfficiency,
+  calculateTotalBreakdown,
+  calculateShiftTimeBalance,
+  calculateDynamicStdOutput,
+} from '@/services/storageService';
 
 interface OperatorKioskProps {
   masterData: MasterDataState;
@@ -66,7 +71,15 @@ export function OperatorKiosk({
   const [draft, setDraft] = useState<MachineShiftRow | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState(false);
- 
+
+  // Fetched from public.shifts in Supabase (matches displayName or shiftCode)
+  const activeShiftObj = masterData.shifts?.find(
+    (s) => s.displayName === selectedShift || s.shiftCode === selectedShift
+  );
+  const shiftWorkingMinutes =
+    activeShiftObj?.shiftWorkingMinutes ??
+    rows[0]?.totalWorkingMinutes ??
+    0;
 
   // Filter machines for current production line
   const lineMachines = useMemo(
@@ -96,7 +109,11 @@ export function OperatorKiosk({
         ) {
           return prev;
         }
-        return { ...existingRow, line: selectedLine };
+        return {
+          ...existingRow,
+          line: selectedLine,
+          totalWorkingMinutes: shiftWorkingMinutes || existingRow.totalWorkingMinutes,
+        };
       });
     } else if (machine) {
       setDraft((prev) => {
@@ -110,8 +127,6 @@ export function OperatorKiosk({
           return prev;
         }
         const idx = lineMachines.findIndex((m) => m.id === machine.id);
-        const lineWorkingMinutes =
-          masterData.lines?.find((l) => l.name === selectedLine)?.dailyWorkingMinutes ?? 1350;
 
         return {
           id: `${selectedDate}_${selectedShift}_${selectedLine}_${machine.id}`,
@@ -126,7 +141,7 @@ export function OperatorKiosk({
           itemName: '',
           operation: '',
           cycleTime: 0,
-          totalWorkingMinutes: lineWorkingMinutes,
+          totalWorkingMinutes: shiftWorkingMinutes,
           stdOutput: 0,
           actualOutput: 0,
           rework: 0,
@@ -136,7 +151,7 @@ export function OperatorKiosk({
       });
     }
     setValidationError(null);
-  }, [selectedMachineId, rows, machines, lineMachines, selectedDate, selectedShift, selectedLine]);
+  }, [selectedMachineId, rows, machines, lineMachines, selectedDate, selectedShift, selectedLine, shiftWorkingMinutes]);
 
   // When Item changes in draft, auto-set Operation, Cycle Time, and Std Output
   const handleItemSelect = (itemId: string) => {
@@ -148,7 +163,10 @@ export function OperatorKiosk({
       );
       const targetOp = ctMatch?.operation || item.operation;
       const targetCycleTime = ctMatch?.cycleTime ?? 0;
-      const targetStd = ctMatch?.stdOutput ?? item.stdOutput ?? 0;
+      const targetStd =
+        targetCycleTime > 0
+          ? calculateDynamicStdOutput(targetCycleTime, shiftWorkingMinutes)
+          : ctMatch?.stdOutput ?? item.stdOutput ?? 0;
 
       setDraft({
         ...draft,
@@ -157,6 +175,7 @@ export function OperatorKiosk({
         operation: targetOp,
         cycleTime: targetCycleTime,
         stdOutput: targetStd,
+        totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
         // If actual is 0 and stdOutput is set, default actual to stdOutput for faster adjustment
         actualOutput: draft.actualOutput === 0 ? targetStd : draft.actualOutput,
       });
@@ -218,6 +237,18 @@ export function OperatorKiosk({
       return;
     }
 
+    const balance = calculateShiftTimeBalance(draft, shiftWorkingMinutes);
+    if (draft.cycleTime > 0 && !balance.isBalanced) {
+      setValidationError(
+        `Shift Time Mismatch: Shift is ${balance.shiftMinutes} mins. Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m) accounts for ${balance.productionMinutes} mins, leaving ${balance.requiredBreakdownMinutes} mins of wasted/breakdown time. You have logged ${balance.loggedBreakdownMinutes} mins (${
+          balance.unaccountedMinutes > 0
+            ? `please add ${balance.unaccountedMinutes} more mins to Breakdown`
+            : `please reduce Breakdown by ${Math.abs(balance.unaccountedMinutes)} mins`
+        }).`
+      );
+      return;
+    }
+
     // Validation rule: If Actual Output is less than Std Output,
     // prompt the worker to log breakdown minutes or a remark before submitting.
     const totalBd = calculateTotalBreakdown(draft.breakdown);
@@ -231,7 +262,10 @@ export function OperatorKiosk({
     }
 
     setValidationError(null);
-    onSaveMachine(draft);
+    onSaveMachine({
+      ...draft,
+      totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+    });
     setSaveSuccessMsg(true);
     setTimeout(() => setSaveSuccessMsg(false), 2500);
   };

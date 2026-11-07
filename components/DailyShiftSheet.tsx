@@ -1,14 +1,14 @@
-"use client"
-import React, { useCallback } from 'react';
+"use client";
+import React, { useState, useCallback } from 'react';
 import {
   Download,
-  Save,
   CheckCircle2,
   AlertTriangle,
   RotateCcw,
   Sparkles,
   ExternalLink,
   Info,
+  Zap,
 } from 'lucide-react';
 import {
   ItemMaster,
@@ -24,7 +24,58 @@ import {
   getOperationsForItem,
   calculateDynamicStdOutput,
   calculateDowntimePct,
+  calculateShiftTimeBalance,
 } from '@/services/storageService';
+
+type BreakdownKey = 'noDisc' | 'change' | 'power' | 'operator';
+
+const BD_KEYS: BreakdownKey[] = ['noDisc', 'change', 'power', 'operator'];
+
+const BD_META: Record<
+  BreakdownKey,
+  {
+    shortLabel: string;
+    fullLabel: string;
+    pillClass: string;
+    activeCellClass: string;
+  }
+> = {
+  noDisc: {
+    shortLabel: 'NO/DISC',
+    fullLabel: 'NO/DISC (Material)',
+    pillClass: 'bg-amber-100 text-amber-900 border-amber-300',
+    activeCellClass: 'bg-amber-50 text-amber-900 font-semibold border-amber-300',
+  },
+  change: {
+    shortLabel: 'CHANGE',
+    fullLabel: 'CHANGE (Tool/Setup)',
+    pillClass: 'bg-sky-100 text-sky-900 border-sky-300',
+    activeCellClass: 'bg-sky-50 text-sky-900 font-semibold border-sky-300',
+  },
+  power: {
+    shortLabel: 'POWER',
+    fullLabel: 'POWER (Electrical)',
+    pillClass: 'bg-rose-100 text-rose-900 border-rose-300',
+    activeCellClass: 'bg-rose-50 text-rose-900 font-semibold border-rose-300',
+  },
+  operator: {
+    shortLabel: 'OPERATOR',
+    fullLabel: 'OPERATOR (Delay)',
+    pillClass: 'bg-purple-100 text-purple-900 border-purple-300',
+    activeCellClass: 'bg-purple-50 text-purple-900 font-semibold border-purple-300',
+  },
+};
+
+const NAV_COLS = [
+  'cycleTime',
+  'stdOutput',
+  'actualOutput',
+  'rework',
+  'noDisc',
+  'change',
+  'power',
+  'operator',
+] as const;
 
 interface DailyShiftSheetProps {
   rows: MachineShiftRow[];
@@ -59,13 +110,26 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const items: ItemMaster[] = masterData?.items ?? [];
   const cycleTimes: MachineItemCycleTime[] = masterData?.cycleTimes ?? [];
 
-  const lineWorkingMinutes =
-    masterData?.lines?.find((l) => l.name === selectedLine)?.dailyWorkingMinutes ?? 1350;
-
+  // Fetched from public.shifts in Supabase (matches displayName or shiftCode)
+  const activeShiftObj = masterData?.shifts?.find(
+    (s) => s.displayName === selectedShift || s.shiftCode === selectedShift
+  );
   const shiftWorkingMinutes =
-    masterData?.shifts?.find((s) => s.displayName === selectedShift)?.shiftWorkingMinutes ?? 450;
+    activeShiftObj?.shiftWorkingMinutes ??
+    rows[0]?.totalWorkingMinutes ??
+    0;
 
   const hasUnsavedChanges = hasUnsavedDraft;
+
+  // Tracks which row + BD cell is currently focused for quick-add buttons
+  const [activeBdCell, setActiveBdCell] = useState<{
+    rowIndex: number;
+    field: BreakdownKey;
+  } | null>(null);
+
+  // State for Line-Wide Bulk Breakdown Applier (e.g., Power Cut across all machines)
+  const [bulkBdField, setBulkBdField] = useState<BreakdownKey>('power');
+  const [bulkBdMinutes, setBulkBdMinutes] = useState<string>('');
 
   // Apply a patch to one row (single onRowsChange call -> single draft write)
   const updateRow = useCallback(
@@ -102,15 +166,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         return;
       }
 
-      const totalBd = calculateTotalBreakdown(currentRow.breakdown);
       const target = resolveMachineItemTarget(
         currentRow.machineId,
         itemId,
         items,
         cycleTimes,
         undefined, // Let helper pick the 1st operation for this item
-        shiftWorkingMinutes,
-        totalBd
+        shiftWorkingMinutes
       );
 
       updateRow(index, {
@@ -119,10 +181,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         operation: target.operation,
         cycleTime: target.cycleTime,
         stdOutput: target.stdOutput,
-        totalWorkingMinutes: currentRow.totalWorkingMinutes || lineWorkingMinutes,
+        totalWorkingMinutes: shiftWorkingMinutes,
       });
     },
-    [rows, items, cycleTimes, shiftWorkingMinutes, lineWorkingMinutes, updateRow]
+    [rows, items, cycleTimes, shiftWorkingMinutes, updateRow]
   );
 
   // 2. When Operation changes: re-fetch Cycle Time for (Machine + Item + selected Operation)
@@ -134,50 +196,138 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         return;
       }
 
-      const totalBd = calculateTotalBreakdown(currentRow.breakdown);
       const target = resolveMachineItemTarget(
         currentRow.machineId,
         currentRow.itemId,
         items,
         cycleTimes,
         operationName,
-        shiftWorkingMinutes,
-        totalBd
+        shiftWorkingMinutes
       );
 
       updateRow(index, {
         operation: operationName,
         cycleTime: target.cycleTime,
         stdOutput: target.stdOutput,
+        totalWorkingMinutes: shiftWorkingMinutes,
       });
     },
     [rows, items, cycleTimes, shiftWorkingMinutes, updateRow]
   );
 
-  // Handle Breakdown Sub-column update (recalculates stdOutput dynamically if cycleTime > 0)
+  // Handle Breakdown Sub-column update
   const handleBreakdownChange = useCallback(
-    (index: number, field: 'noDisc' | 'change' | 'power' | 'operator', val: number) => {
-      const currentRow = rows[index];
-      const currentBd = currentRow.breakdown || { noDisc: 0, change: 0, power: 0, operator: 0 };
-      const safeVal = isNaN(val) ? 0 : Math.max(0, val);
-      const nextBd = {
-        ...currentBd,
-        [field]: safeVal,
+    (index: number, field: BreakdownKey, val: number) => {
+      const current = rows[index]?.breakdown || {
+        noDisc: 0,
+        change: 0,
+        power: 0,
+        operator: 0,
       };
-
-      const nextTotalBd = calculateTotalBreakdown(nextBd);
-      const updatedStd =
-        currentRow.cycleTime > 0
-          ? calculateDynamicStdOutput(currentRow.cycleTime, shiftWorkingMinutes, nextTotalBd)
-          : currentRow.stdOutput;
-
+      const safeVal = isNaN(val) ? 0 : Math.max(0, val);
       updateRow(index, {
-        breakdown: nextBd,
-        stdOutput: updatedStd,
+        breakdown: {
+          ...current,
+          [field]: safeVal,
+        },
       });
     },
-    [rows, shiftWorkingMinutes, updateRow]
+    [rows, updateRow]
   );
+
+  // Quick-adjust the currently focused BD cell (+5, +10, +15, +30, +60, -5, Clear)
+  const handleQuickAdjustBd = (deltaOrExact: number, mode: 'add' | 'set' = 'add') => {
+    if (!activeBdCell) return;
+    const targetRow = rows[activeBdCell.rowIndex];
+    if (!targetRow) return;
+
+    const currentVal = Number(targetRow.breakdown?.[activeBdCell.field] ?? 0);
+    const nextVal =
+      mode === 'set' ? Math.max(0, deltaOrExact) : Math.max(0, currentVal + deltaOrExact);
+
+    handleBreakdownChange(activeBdCell.rowIndex, activeBdCell.field, nextVal);
+  };
+
+  // Auto-balance unaccounted minutes into the active BD column (or noDisc if none focused on that row)
+  const handleFillUnaccountedBd = (rowIndex: number, preferredField?: BreakdownKey) => {
+    const row = rows[rowIndex];
+    if (!row) return;
+
+    const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
+    const balance = calculateShiftTimeBalance(row, rowShiftMins);
+    if (balance.unaccountedMinutes <= 0) return;
+
+    const targetField: BreakdownKey =
+      preferredField ??
+      (activeBdCell?.rowIndex === rowIndex ? activeBdCell.field : 'noDisc');
+
+    const currentVal = Number(row.breakdown?.[targetField] ?? 0);
+    handleBreakdownChange(rowIndex, targetField, currentVal + balance.unaccountedMinutes);
+    setActiveBdCell({ rowIndex, field: targetField });
+  };
+
+  // Apply bulk breakdown minutes across all machines on the line (e.g., Power Cut)
+  const handleApplyBulkLineBd = () => {
+    const minsToAdd = parseInt(bulkBdMinutes, 10);
+    if (!minsToAdd || minsToAdd <= 0) return;
+
+    patchRows((row) => {
+      const currentBd = row.breakdown || {
+        noDisc: 0,
+        change: 0,
+        power: 0,
+        operator: 0,
+      };
+      return {
+        breakdown: {
+          ...currentBd,
+          [bulkBdField]: Math.max(0, Number(currentBd[bulkBdField] || 0) + minsToAdd),
+        },
+      };
+    });
+    setBulkBdMinutes('');
+  };
+
+  // Excel-style Arrow Key & Enter navigation across numeric cells
+  const handleGridKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    rowIndex: number,
+    colKey: string
+  ) => {
+    if (
+      !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter'].includes(e.key)
+    ) {
+      return;
+    }
+
+    let nextRow = rowIndex;
+    let nextCol = colKey;
+
+    if (e.key === 'ArrowUp') {
+      nextRow = rowIndex - 1;
+    } else if (e.key === 'ArrowDown' || e.key === 'Enter') {
+      nextRow = rowIndex + 1;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const colIdx = NAV_COLS.indexOf(colKey as (typeof NAV_COLS)[number]);
+      if (colIdx !== -1) {
+        const targetIdx = e.key === 'ArrowLeft' ? colIdx - 1 : colIdx + 1;
+        if (targetIdx >= 0 && targetIdx < NAV_COLS.length) {
+          nextCol = NAV_COLS[targetIdx];
+        } else {
+          return;
+        }
+      }
+    }
+
+    const targetInput = document.querySelector<HTMLInputElement>(
+      `input[data-grid-cell="${nextRow}-${nextCol}"]`
+    );
+    if (targetInput) {
+      e.preventDefault();
+      targetInput.focus();
+      targetInput.select();
+    }
+  };
 
   // Quick fill remaining unassigned machines with sensible defaults
   const handleQuickFillEmpty = () => {
@@ -186,14 +336,21 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       if (row.operatorName && row.itemId) return null;
       const op = operators[idx % operators.length];
       const it = items[idx % items.length];
-      const target = resolveMachineItemTarget(row.machineId, it.id, items, cycleTimes);
+      const target = resolveMachineItemTarget(
+        row.machineId,
+        it.id,
+        items,
+        cycleTimes,
+        undefined,
+        shiftWorkingMinutes
+      );
       return {
         operatorName: op,
         itemId: it.id,
         itemName: target.itemName,
         operation: target.operation,
         cycleTime: target.cycleTime,
-        totalWorkingMinutes: row.totalWorkingMinutes || lineWorkingMinutes,
+        totalWorkingMinutes: shiftWorkingMinutes,
         stdOutput: target.stdOutput,
         actualOutput: Math.max(0, target.stdOutput - 4),
         rework: 1,
@@ -206,13 +363,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   // Reset current shift sheet to blank rows
   const handleClearSheet = () => {
     if (window.confirm('Clear all inputs on this shift sheet?')) {
-      patchRows((row) => ({
+      patchRows(() => ({
         operatorName: '',
         itemId: '',
         itemName: '',
         operation: '',
         cycleTime: 0,
-        totalWorkingMinutes: row.totalWorkingMinutes || lineWorkingMinutes,
+        totalWorkingMinutes: shiftWorkingMinutes,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -222,14 +379,43 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     }
   };
 
+  const handleSaveWithValidation = () => {
+    const unbalancedRows = rows.filter((row) => {
+      if (!row.itemId || !(row.cycleTime > 0)) return false;
+      const balance = calculateShiftTimeBalance(row, shiftWorkingMinutes);
+      return !balance.isBalanced;
+    });
+
+    if (unbalancedRows.length > 0) {
+      const firstBad = unbalancedRows[0];
+      const bal = calculateShiftTimeBalance(firstBad, shiftWorkingMinutes);
+      alert(
+        `Shift Time Mismatch on ${firstBad.machineName} (Row #${firstBad.srNo}):\n\n` +
+          `• Shift Duration (from DB): ${bal.shiftMinutes} mins\n` +
+          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
+          `• Required Breakdown / Wasted Time: ${bal.requiredBreakdownMinutes} mins\n` +
+          `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
+          `Please fill the remaining ${bal.unaccountedMinutes} mins in the Breakdown columns so total time equals ${bal.shiftMinutes} mins.`
+      );
+      return;
+    }
+
+    onSave(
+      rows.map((r) => ({
+        ...r,
+        totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes,
+      }))
+    );
+  };
+
   // Calculations for summary footer row
   const totalStd = rows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
   const totalAct = rows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
   const totalRework = rows.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-  const totalNoDisc = rows.reduce((acc, r) => acc + (Number(r.breakdown.noDisc) || 0), 0);
-  const totalChange = rows.reduce((acc, r) => acc + (Number(r.breakdown.change) || 0), 0);
-  const totalPower = rows.reduce((acc, r) => acc + (Number(r.breakdown.power) || 0), 0);
-  const totalOperator = rows.reduce((acc, r) => acc + (Number(r.breakdown.operator) || 0), 0);
+  const totalNoDisc = rows.reduce((acc, r) => acc + (Number(r.breakdown?.noDisc) || 0), 0);
+  const totalChange = rows.reduce((acc, r) => acc + (Number(r.breakdown?.change) || 0), 0);
+  const totalPower = rows.reduce((acc, r) => acc + (Number(r.breakdown?.power) || 0), 0);
+  const totalOperator = rows.reduce((acc, r) => acc + (Number(r.breakdown?.operator) || 0), 0);
   const grandBreakdown = totalNoDisc + totalChange + totalPower + totalOperator;
   const overallEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
   const activeMachineCount = rows.filter((r) => (Number(r.stdOutput) || 0) > 0).length;
@@ -237,7 +423,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   // Footer downtime %: total minutes vs. available minutes of machines that are in use
   const footerWorkingMinutes = rows.reduce((acc, r) => {
     const inUse = (Number(r.stdOutput) || 0) > 0 || calculateTotalBreakdown(r.breakdown) > 0;
-    return inUse ? acc + (r.totalWorkingMinutes || lineWorkingMinutes) : acc;
+    return inUse ? acc + (r.totalWorkingMinutes || shiftWorkingMinutes) : acc;
   }, 0);
   const renderFooterPct = (mins: number) =>
     mins > 0 && footerWorkingMinutes > 0 ? (
@@ -246,8 +432,18 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       </div>
     ) : null;
 
+  // Derive active row & its remaining unaccounted BD balance for the Quick BD Strip
+  const focusedRow = activeBdCell ? rows[activeBdCell.rowIndex] : null;
+  const focusedRowBalance =
+    focusedRow && focusedRow.itemId && focusedRow.cycleTime > 0
+      ? calculateShiftTimeBalance(
+          focusedRow,
+          shiftWorkingMinutes || focusedRow.totalWorkingMinutes
+        )
+      : null;
+
   return (
-    <div className="w-full space-y-3">
+    <div className="w-full space-y-2.5">
       {/* Top Action Bar matching factory paper log instructions */}
       <div className="bg-white rounded-lg border border-slate-200 p-3 sm:p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -311,7 +507,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
           <button
             type="button"
-            onClick={() => onSave(rows)}
+            onClick={handleSaveWithValidation}
             disabled={isSaving}
             className={`px-4 py-1.5 text-xs font-bold rounded flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-60 disabled:cursor-not-allowed ${
               hasUnsavedChanges
@@ -329,9 +525,118 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             ) : (
               <>
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Save Shift Log</span>
+                <span>Shift Log Synced</span>
               </>
             )}
+          </button>
+        </div>
+      </div>
+
+      {/* NEW: Quick Breakdown Entry & Line-Wide Bulk Action Strip */}
+      <div className="bg-white border border-slate-200 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs">
+        {/* Left: Context-Sensitive Quick-Add Buttons for the Focused BD Cell */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="font-bold text-slate-700 flex items-center gap-1 mr-1">
+            <Zap className="w-3.5 h-3.5 text-amber-500" />
+            <span>Quick BD Entry:</span>
+          </span>
+
+          {activeBdCell && focusedRow ? (
+            <>
+              <span
+                className={`px-2 py-0.5 rounded border font-bold ${
+                  BD_META[activeBdCell.field].pillClass
+                }`}
+              >
+                #{focusedRow.srNo} {focusedRow.machineName} · {BD_META[activeBdCell.field].fullLabel}
+              </span>
+
+              {[5, 10, 15, 30, 45, 60].map((mins) => (
+                <button
+                  key={mins}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault(); // Keeps focus inside the input cell
+                    handleQuickAdjustBd(mins, 'add');
+                  }}
+                  className="px-2 py-1 bg-slate-100 hover:bg-slate-900 hover:text-white text-slate-800 font-mono font-bold rounded border border-slate-300 transition-colors"
+                >
+                  +{mins}m
+                </button>
+              ))}
+
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  handleQuickAdjustBd(-5, 'add');
+                }}
+                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono font-semibold rounded border border-slate-300"
+              >
+                -5m
+              </button>
+
+              {focusedRowBalance && focusedRowBalance.unaccountedMinutes > 0 && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    handleFillUnaccountedBd(activeBdCell.rowIndex, activeBdCell.field);
+                  }}
+                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-mono font-bold rounded shadow-2xs"
+                  title="Fill exact remaining unaccounted shift minutes into this cell"
+                >
+                  +Fill Balance ({focusedRowBalance.unaccountedMinutes}m)
+                </button>
+              )}
+
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  handleQuickAdjustBd(0, 'set');
+                }}
+                className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold rounded border border-rose-200"
+              >
+                Clear (0)
+              </button>
+            </>
+          ) : (
+            <span className="text-slate-500">
+              Click any <strong>NO/DISC</strong>, <strong>CHANGE</strong>, <strong>POWER</strong>, or <strong>OPERATOR</strong> cell below to unlock 1-click <strong>+5m / +15m / +30m / +Fill Balance</strong> buttons.
+            </span>
+          )}
+        </div>
+
+        {/* Right: Line-Wide Bulk Breakdown Applier (e.g., Power Cut across all 16 machines) */}
+        <div className="flex items-center gap-1.5 border-t sm:border-t-0 sm:border-l border-slate-200 pt-2 sm:pt-0 sm:pl-3 w-full sm:w-auto">
+          <span className="font-semibold text-slate-600 whitespace-nowrap">Line-Wide BD:</span>
+          <select
+            value={bulkBdField}
+            onChange={(e) => setBulkBdField(e.target.value as BreakdownKey)}
+            className="border border-slate-300 rounded px-2 py-1 text-xs bg-slate-50 font-medium text-slate-800 focus:outline-none focus:border-slate-800"
+          >
+            <option value="power">POWER (All Machines)</option>
+            <option value="noDisc">NO/DISC (All Machines)</option>
+            <option value="change">CHANGE (All Machines)</option>
+            <option value="operator">OPERATOR (All Machines)</option>
+          </select>
+          <input
+            type="number"
+            min="1"
+            step="5"
+            placeholder="Mins"
+            value={bulkBdMinutes}
+            onChange={(e) => setBulkBdMinutes(e.target.value)}
+            className="w-16 border border-slate-300 rounded px-2 py-1 text-xs font-mono text-center focus:outline-none focus:border-slate-800"
+          />
+          <button
+            type="button"
+            onClick={handleApplyBulkLineBd}
+            disabled={!bulkBdMinutes || Number(bulkBdMinutes) <= 0}
+            className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white px-2.5 py-1 rounded text-xs font-semibold whitespace-nowrap transition-colors"
+          >
+            + Apply to All
           </button>
         </div>
       </div>
@@ -364,7 +669,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20">
                   STD O/PUT
                 </th>
-                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20 bg-slate-850">
+                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20 bg-slate-800">
                   ACT. O/PUT
                 </th>
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-18">
@@ -376,7 +681,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 >
                   BREAKDOWN (MINUTES)
                 </th>
-                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-18 bg-slate-800 text-amber-200">
+                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-24 bg-slate-800 text-amber-200">
                   TOTAL BD
                 </th>
                 <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-42.5">
@@ -408,7 +713,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             {/* Table Rows (16 fixed machine rows) */}
             <tbody className="divide-y divide-slate-200">
               {rows.map((row, index) => {
-                const totalBd = calculateTotalBreakdown(row.breakdown);
                 const hasTarget = row.stdOutput > 0;
                 const efficiency = hasTarget ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
                 const isUnderperforming = hasTarget && row.actualOutput < row.stdOutput;
@@ -416,8 +720,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 const rowOperations = row.itemId
                   ? getOperationsForItem(row.itemId, items, cycleTimes, row.machineId)
                   : [];
-                const rowWorkingMinutes = row.totalWorkingMinutes || lineWorkingMinutes;
+                const rowWorkingMinutes = row.totalWorkingMinutes || shiftWorkingMinutes;
                 const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
+
+                const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
+                const timeBalance = calculateShiftTimeBalance(row, rowShiftMins);
+                const isRowActive = !!row.itemId && row.cycleTime > 0;
 
                 return (
                   <tr
@@ -436,7 +744,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       <div className="flex items-center justify-between gap-1.5">
                         <span>{row.machineName}</span>
                         {isRowConfigured && (
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" title="Configured" />
+                          <span
+                            className="w-1.5 h-1.5 rounded-full bg-emerald-500"
+                            title="Configured"
+                          />
                         )}
                       </div>
                     </td>
@@ -467,13 +778,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         <option value="">— Select Item —</option>
                         {items.map((item) => (
                           <option key={item.id} value={item.id}>
-                            {item.itemName} ({item.itemCode})
+                            {`${item.itemName} (${item.itemCode})`}
                           </option>
                         ))}
                       </select>
                     </td>
 
-                    {/* 5. OPERATION (Dropdown when multiple operations exist for selected Item) */}
+                    {/* 5. OPERATION */}
                     <td className="px-1.5 py-1 border-r border-slate-200">
                       {!row.itemId ? (
                         <span className="block px-2 py-1 text-xs text-slate-400 italic">
@@ -502,12 +813,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       )}
                     </td>
 
-                    {/* 5B. CYCLE TIME (Auto-fetched from Machine x Item x Operation) */}
+                    {/* 5B. CYCLE TIME */}
                     <td className="px-1 py-1 border-r border-slate-200 text-center">
                       <input
                         type="number"
                         min="0"
                         step="0.01"
+                        data-grid-cell={`${index}-cycleTime`}
                         value={row.cycleTime > 0 ? row.cycleTime : ''}
                         placeholder="—"
                         title={
@@ -516,12 +828,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                             : 'No cycle time configured for this Machine + Item + Operation in Master Data'
                         }
                         onFocus={(e) => e.target.select()}
+                        onKeyDown={(e) => handleGridKeyDown(e, index, 'cycleTime')}
                         onChange={(e) => {
                           const newCt = parseFloat(e.target.value) || 0;
-                          const totalBd = calculateTotalBreakdown(row.breakdown);
                           const newStd =
                             newCt > 0
-                              ? calculateDynamicStdOutput(newCt, shiftWorkingMinutes, totalBd)
+                              ? calculateDynamicStdOutput(newCt, shiftWorkingMinutes)
                               : row.stdOutput;
                           updateRow(index, { cycleTime: newCt, stdOutput: newStd });
                         }}
@@ -538,9 +850,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       <input
                         type="number"
                         min="0"
+                        data-grid-cell={`${index}-stdOutput`}
                         value={row.stdOutput || ''}
                         onFocus={(e) => e.target.select()}
-                        onChange={(e) => updateRow(index, { stdOutput: Number(e.target.value) || 0 })}
+                        onKeyDown={(e) => handleGridKeyDown(e, index, 'stdOutput')}
+                        onChange={(e) =>
+                          updateRow(index, { stdOutput: Number(e.target.value) || 0 })
+                        }
                         className="w-16 mx-auto text-center font-mono font-semibold text-slate-700 bg-transparent px-1 py-1 rounded border border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white focus:outline-none"
                       />
                     </td>
@@ -550,9 +866,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       <input
                         type="number"
                         min="0"
-                        value={row.actualOutput || (row.actualOutput === 0 && hasTarget ? 0 : '')}
+                        data-grid-cell={`${index}-actualOutput`}
+                        value={row.actualOutput > 0 ? row.actualOutput : hasTarget ? 0 : ''}
                         onFocus={(e) => e.target.select()}
-                        onChange={(e) => updateRow(index, { actualOutput: Number(e.target.value) || 0 })}
+                        onKeyDown={(e) => handleGridKeyDown(e, index, 'actualOutput')}
+                        onChange={(e) =>
+                          updateRow(index, { actualOutput: Number(e.target.value) || 0 })
+                        }
                         className={`w-16 mx-auto text-center font-mono font-bold px-1 py-1 rounded border ${
                           isUnderperforming
                             ? 'bg-amber-50 text-amber-900 border-amber-300'
@@ -568,109 +888,102 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       <input
                         type="number"
                         min="0"
-                        value={row.rework || (row.rework === 0 ? 0 : '')}
+                        data-grid-cell={`${index}-rework`}
+                        value={row.rework > 0 ? row.rework : ''}
+                        placeholder="0"
                         onFocus={(e) => e.target.select()}
-                        onChange={(e) => updateRow(index, { rework: Number(e.target.value) || 0 })}
+                        onKeyDown={(e) => handleGridKeyDown(e, index, 'rework')}
+                        onChange={(e) =>
+                          updateRow(index, { rework: Number(e.target.value) || 0 })
+                        }
                         className={`w-14 mx-auto text-center font-mono px-1 py-1 rounded border ${
-                          row.rework > 0 ? 'bg-rose-50 text-rose-800 border-rose-200 font-bold' : 'text-slate-600 border-transparent hover:border-slate-300'
+                          row.rework > 0
+                            ? 'bg-rose-50 text-rose-800 border-rose-200 font-bold'
+                            : 'text-slate-600 border-transparent hover:border-slate-300'
                         } focus:border-slate-800 focus:bg-white focus:outline-none`}
                       />
                     </td>
 
-                    {/* 9. BREAKDOWN SUB-COLUMNS (MINUTES) */}
-                    {/* NO/DISC */}
-                    <td className="px-1 py-1 border-r border-slate-200 text-center">
-                      <input
-                        type="number"
-                        min="0"
-                        value={row.breakdown.noDisc || (row.breakdown.noDisc === 0 ? '' : 0)}
-                        placeholder="0"
-                        onFocus={(e) => e.target.select()}
-                        onChange={(e) => handleBreakdownChange(index, 'noDisc', Number(e.target.value))}
-                        className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border ${
-                          row.breakdown.noDisc > 0 ? 'bg-amber-50 text-amber-900 font-semibold border-amber-300' : 'text-slate-500 border-transparent hover:border-slate-300'
-                        } focus:border-slate-800 focus:bg-white focus:outline-none`}
-                      />
-                      {row.breakdown.noDisc > 0 && (
-                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
-                          ({pct(row.breakdown.noDisc)}%)
-                        </div>
-                      )}
-                    </td>
+                    {/* 9. BREAKDOWN SUB-COLUMNS (NO/DISC, CHANGE, POWER, OPERATOR) */}
+                    {BD_KEYS.map((bdKey) => {
+                      const val = Number(row.breakdown?.[bdKey] ?? 0);
+                      const isFocused =
+                        activeBdCell?.rowIndex === index && activeBdCell?.field === bdKey;
 
-                    {/* CHANGE */}
-                    <td className="px-1 py-1 border-r border-slate-200 text-center">
-                      <input
-                        type="number"
-                        min="0"
-                        value={row.breakdown.change || (row.breakdown.change === 0 ? '' : 0)}
-                        placeholder="0"
-                        onFocus={(e) => e.target.select()}
-                        onChange={(e) => handleBreakdownChange(index, 'change', Number(e.target.value))}
-                        className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border ${
-                          row.breakdown.change > 0 ? 'bg-amber-50 text-amber-900 font-semibold border-amber-300' : 'text-slate-500 border-transparent hover:border-slate-300'
-                        } focus:border-slate-800 focus:bg-white focus:outline-none`}
-                      />
-                      {row.breakdown.change > 0 && (
-                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
-                          ({pct(row.breakdown.change)}%)
-                        </div>
-                      )}
-                    </td>
+                      return (
+                        <td
+                          key={bdKey}
+                          className={`px-1 py-1 border-r border-slate-200 text-center transition-colors ${
+                            isFocused ? 'bg-blue-50/40' : ''
+                          }`}
+                        >
+                          <input
+                            type="number"
+                            min="0"
+                            step="5"
+                            data-grid-cell={`${index}-${bdKey}`}
+                            value={val > 0 ? val : ''}
+                            placeholder="0"
+                            onFocus={(e) => {
+                              e.target.select();
+                              setActiveBdCell({ rowIndex: index, field: bdKey });
+                            }}
+                            onKeyDown={(e) => handleGridKeyDown(e, index, bdKey)}
+                            onChange={(e) =>
+                              handleBreakdownChange(index, bdKey, Number(e.target.value))
+                            }
+                            className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border transition-colors focus:outline-none ${
+                              isFocused
+                                ? 'border-blue-600 ring-2 ring-blue-200 bg-white font-bold text-slate-900'
+                                : val > 0
+                                ? BD_META[bdKey].activeCellClass
+                                : 'text-slate-400 border-transparent hover:border-slate-300 bg-transparent'
+                            }`}
+                          />
+                          {val > 0 && (
+                            <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
+                              ({pct(val)}%)
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
 
-                    {/* POWER */}
-                    <td className="px-1 py-1 border-r border-slate-200 text-center">
-                      <input
-                        type="number"
-                        min="0"
-                        value={row.breakdown.power || (row.breakdown.power === 0 ? '' : 0)}
-                        placeholder="0"
-                        onFocus={(e) => e.target.select()}
-                        onChange={(e) => handleBreakdownChange(index, 'power', Number(e.target.value))}
-                        className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border ${
-                          row.breakdown.power > 0 ? 'bg-rose-50 text-rose-900 font-semibold border-rose-300' : 'text-slate-500 border-transparent hover:border-slate-300'
-                        } focus:border-slate-800 focus:bg-white focus:outline-none`}
-                      />
-                      {row.breakdown.power > 0 && (
-                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
-                          ({pct(row.breakdown.power)}%)
-                        </div>
-                      )}
-                    </td>
-
-                    {/* OPERATOR */}
-                    <td className="px-1 py-1 border-r border-slate-200 text-center">
-                      <input
-                        type="number"
-                        min="0"
-                        value={row.breakdown.operator || (row.breakdown.operator === 0 ? '' : 0)}
-                        placeholder="0"
-                        onFocus={(e) => e.target.select()}
-                        onChange={(e) => handleBreakdownChange(index, 'operator', Number(e.target.value))}
-                        className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border ${
-                          row.breakdown.operator > 0 ? 'bg-amber-50 text-amber-900 font-semibold border-amber-300' : 'text-slate-500 border-transparent hover:border-slate-300'
-                        } focus:border-slate-800 focus:bg-white focus:outline-none`}
-                      />
-                      {row.breakdown.operator > 0 && (
-                        <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
-                          ({pct(row.breakdown.operator)}%)
-                        </div>
-                      )}
-                    </td>
-
-                    {/* TOTAL BD */}
-                    <td className="px-2 py-1 border-r border-slate-200 text-center bg-slate-50/60 font-mono font-bold text-slate-800">
-                      {totalBd > 0 ? (
-                        <div className="leading-tight">
-                          <span className={totalBd > 30 ? 'text-rose-700 block' : 'text-amber-700 block'}>
-                            {totalBd}m
-                          </span>
-                          <span className="text-[10px] text-slate-500 font-normal">
-                            ({pct(totalBd)}%)
-                          </span>
-                        </div>
-                      ) : (
+                    {/* TOTAL BD & SHIFT TIME BALANCE (Click badge to auto-fill remaining balance) */}
+                    <td className="px-2 py-1 border-r border-slate-200 text-center bg-slate-50/60 font-mono text-xs">
+                      {!isRowActive ? (
                         <span className="text-slate-400 font-normal">0</span>
+                      ) : (
+                        <div className="leading-tight space-y-0.5">
+                          <div className="font-bold text-slate-900">
+                            {timeBalance.loggedBreakdownMinutes}m / {timeBalance.requiredBreakdownMinutes}m
+                          </div>
+                          {timeBalance.unaccountedMinutes > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => handleFillUnaccountedBd(index)}
+                              className="inline-block px-1.5 py-0.5 rounded bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-[10px] cursor-pointer transition-colors border border-rose-300"
+                              title={`Click to auto-fill +${timeBalance.unaccountedMinutes}m into ${
+                                activeBdCell?.rowIndex === index
+                                  ? BD_META[activeBdCell.field].shortLabel
+                                  : 'NO/DISC'
+                              }`}
+                            >
+                              +Fill {timeBalance.unaccountedMinutes}m BD
+                            </button>
+                          ) : timeBalance.unaccountedMinutes < 0 ? (
+                            <span
+                              className="inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[10px]"
+                              title={`Total time (${timeBalance.totalAccountedMinutes}m) exceeds shift duration (${timeBalance.shiftMinutes}m) by ${Math.abs(timeBalance.unaccountedMinutes)}m.`}
+                            >
+                              Over {Math.abs(timeBalance.unaccountedMinutes)}m
+                            </span>
+                          ) : (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                              {timeBalance.shiftMinutes}m Matched
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
 
@@ -707,6 +1020,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                     {/* ACTION / KIOSK LINK */}
                     <td className="px-2 py-2 text-center">
                       <button
+                        type="button"
                         onClick={() => onOpenMachineInKiosk?.(row.machineId)}
                         title={`Open ${row.machineName} in Operator Kiosk`}
                         className="p-1 text-slate-400 hover:text-slate-900 hover:bg-slate-200 rounded transition-colors"
@@ -750,7 +1064,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   {totalNoDisc}m
                   {renderFooterPct(totalNoDisc)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-amber-300">
+                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-sky-300">
                   {totalChange}m
                   {renderFooterPct(totalChange)}
                 </td>
@@ -758,7 +1072,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   {totalPower}m
                   {renderFooterPct(totalPower)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-amber-300">
+                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-purple-300">
                   {totalOperator}m
                   {renderFooterPct(totalOperator)}
                 </td>
@@ -809,10 +1123,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
           </div>
 
           <div className="text-slate-500 text-[11px]">
-            * TAB/Enter moves focus. Changes auto-cached and stored locally.
+            * Arrow Keys / Enter / TAB navigate cells. Click "+Fill BD" badge to auto-balance shift minutes.
           </div>
         </div>
       </div>
     </div>
   );
 };
+
+export default DailyShiftSheet;

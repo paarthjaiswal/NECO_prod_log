@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useTransition, useMemo } from "react";
 import dynamic from "next/dynamic";
+import { CheckCircle2 } from "lucide-react";
 import Header from "@/components/Header";
 import { DailyShiftSheet } from "@/components/DailyShiftSheet";
 import { OperatorKiosk } from "@/components/OperatorKiosk";
@@ -23,6 +24,7 @@ import {
   generateDefaultShiftRows,
 } from "@/data/initialData";
 import { exportShiftToExcel } from "@/services/excelExport";
+import { calculateShiftTimeBalance } from "@/services/storageService";
 
 // Lazy-loaded: zero RAM impact on shop-floor PCs unless clicked
 const AnalyticsPreview = dynamic(
@@ -203,6 +205,35 @@ export default function DashboardClient({
   };
 
   const handleSaveShiftSheet = async (rowsToSave: MachineShiftRow[]) => {
+    // Validate shift time accounting
+    const activeShiftObj = masterData.shifts?.find(
+      (s) => s.displayName === selectedShift || s.shiftCode === selectedShift
+    );
+    const shiftWorkingMinutes =
+      activeShiftObj?.shiftWorkingMinutes ??
+      rowsToSave[0]?.totalWorkingMinutes ??
+      0;
+
+    const unbalancedRows = rowsToSave.filter((row) => {
+      if (!row.itemId || !(row.cycleTime > 0)) return false;
+      const balance = calculateShiftTimeBalance(row, shiftWorkingMinutes);
+      return !balance.isBalanced;
+    });
+
+    if (unbalancedRows.length > 0) {
+      const firstBad = unbalancedRows[0];
+      const bal = calculateShiftTimeBalance(firstBad, shiftWorkingMinutes);
+      alert(
+        `Shift Time Mismatch on ${firstBad.machineName} (Row #${firstBad.srNo}):\n\n` +
+          `• Shift Duration (from DB): ${bal.shiftMinutes} mins\n` +
+          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
+          `• Required Breakdown / Wasted Time: ${bal.requiredBreakdownMinutes} mins\n` +
+          `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
+          `Please fill the remaining ${bal.unaccountedMinutes} mins in the Breakdown columns so total time equals ${bal.shiftMinutes} mins.`
+      );
+      return;
+    }
+
     startTransition(async () => {
       try {
         const result = await saveShiftSheetRows(rowsToSave);
@@ -296,40 +327,8 @@ export default function DashboardClient({
         onSaveShiftLog={() => handleSaveShiftSheet(currentShiftRows)}
         onExportExcel={handleExportExcel}
         onResetDemo={handleResetDemo}
+        isSaving={isPending}
       />
-
-      {/* Lightweight status bar — only shows draft prompt on Sheet/Kiosk tabs with direct action buttons */}
-      {(isPending ||
-        statusMessage ||
-        (hasUnsavedDraft && (activeTab === "sheet" || activeTab === "kiosk"))) && (
-        <div className="bg-slate-800 text-white text-xs px-4 py-1.5 flex items-center justify-between gap-4">
-          <span>
-            {isPending
-              ? "Syncing with Supabase..."
-              : statusMessage ||
-                "Unsaved shift sheet draft active — save or discard to clear."}
-          </span>
-
-          {hasUnsavedDraft && !isPending && (
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => handleSaveShiftSheet(currentShiftRows)}
-                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-2.5 py-0.5 rounded text-[11px]"
-              >
-                Save Shift Now
-              </button>
-              <button
-                type="button"
-                onClick={handleDiscardDraft}
-                className="text-slate-300 hover:text-white underline text-[11px]"
-              >
-                Discard Draft
-              </button>
-            </div>
-          )}
-        </div>
-      )}
 
       <main
         className={
@@ -390,6 +389,14 @@ export default function DashboardClient({
           />
         )}
       </main>
+
+      {/* Floating Non-Intrusive Toast (does not push or shift layout) */}
+      {statusMessage && (
+        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white text-xs px-4 py-2.5 rounded-lg shadow-2xl border border-slate-700 flex items-center gap-2 pointer-events-none transition-all animate-bounce">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMessage}</span>
+        </div>
+      )}
     </div>
   );
 }

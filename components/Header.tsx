@@ -11,6 +11,7 @@ import {
   Calendar,
   Clock,
   CheckCircle2,
+  AlertTriangle,
   Layers,
 } from 'lucide-react';
 import { ActiveTab, ShiftType } from '@/types';
@@ -32,6 +33,7 @@ interface HeaderProps {
   onSaveShiftLog: () => void;         // Required to trigger saveShiftSheetRows
   onExportExcel: () => void;          // Required to trigger Excel export
   onResetDemo?: () => void;           // <-- Add '?' to make this optional!
+  isSaving?: boolean;                 // Pulsing Syncing status
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -49,6 +51,7 @@ export const Header: React.FC<HeaderProps> = ({
   onExportExcel,
   hasUnsavedChanges,
   onSaveShiftLog,
+  isSaving = false,
 }) => {
   const availableShifts = shifts && shifts.length > 0 ? shifts : (SHIFTS as ShiftType[]);
   return (
@@ -225,16 +228,24 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* Save Status / Button */}
             <div className="flex items-center gap-3">
-              {hasUnsavedChanges ? (
+              {isSaving ? (
+                <div className="flex items-center gap-1.5 text-amber-300 text-xs font-semibold px-2.5 py-1 rounded bg-amber-950/40 border border-amber-500/30">
+                  <div className="w-3 h-3 rounded-full border-2 border-amber-300 border-t-transparent animate-spin" />
+                  <span>Syncing with Cloud...</span>
+                </div>
+              ) : hasUnsavedChanges ? (
                 <button
+                  type="button"
                   onClick={onSaveShiftLog}
-                  className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded transition-colors flex items-center gap-1.5 shadow-xs animate-pulse"
+                  className="px-3.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded transition-all flex items-center gap-1.5 shadow-md ring-2 ring-amber-400/60 ring-offset-1 ring-offset-slate-950 animate-pulse hover:animate-none"
+                  title="Unsaved changes active — click to save and sync shift sheet to database"
                 >
+                  <AlertTriangle className="w-3.5 h-3.5 text-slate-950" />
                   <span>Save Shift Log *</span>
                 </button>
               ) : (
-                <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-medium">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-semibold bg-emerald-950/60 border border-emerald-600/40 px-2.5 py-1 rounded shadow-xs">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Shift Log Synced</span>
                 </div>
               )}
