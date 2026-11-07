@@ -121,11 +121,11 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
 
   const hasUnsavedChanges = hasUnsavedDraft;
 
-  // Tracks which row + BD cell is currently focused for quick-add buttons
+  // Tracks which row + BD cell is currently focused for quick-add buttons (defaults to row 0, noDisc)
   const [activeBdCell, setActiveBdCell] = useState<{
     rowIndex: number;
     field: BreakdownKey;
-  } | null>(null);
+  }>({ rowIndex: 0, field: 'noDisc' });
 
   // State for Line-Wide Bulk Breakdown Applier (e.g., Power Cut across all machines)
   const [bulkBdField, setBulkBdField] = useState<BreakdownKey>('power');
@@ -272,15 +272,15 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
 
   // Quick-adjust the currently focused BD cell (+5, +10, +15, +30, +60, -5, Clear)
   const handleQuickAdjustBd = (deltaOrExact: number, mode: 'add' | 'set' = 'add') => {
-    if (!activeBdCell) return;
-    const targetRow = rows[activeBdCell.rowIndex];
+    const active = activeBdCell || { rowIndex: 0, field: 'noDisc' };
+    const targetRow = rows[active.rowIndex] || rows[0];
     if (!targetRow) return;
 
-    const currentVal = Number(targetRow.breakdown?.[activeBdCell.field] ?? 0);
+    const currentVal = Number(targetRow.breakdown?.[active.field] ?? 0);
     const nextVal =
       mode === 'set' ? Math.max(0, deltaOrExact) : Math.max(0, currentVal + deltaOrExact);
 
-    handleBreakdownChange(activeBdCell.rowIndex, activeBdCell.field, nextVal);
+    handleBreakdownChange(active.rowIndex, active.field, nextVal);
   };
 
   // Auto-balance unaccounted minutes into the active BD column (or noDisc if none focused on that row)
@@ -509,7 +509,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
     ) : null;
 
   // Derive active row & its remaining unaccounted BD balance for the Quick BD Strip
-  const focusedRow = activeBdCell ? rows[activeBdCell.rowIndex] : null;
+  const focusedRow = rows[activeBdCell?.rowIndex ?? 0] || rows[0] || null;
   const focusedRowBalance =
     focusedRow && focusedRow.itemId && focusedRow.cycleTime > 0
       ? calculateShiftTimeBalance(
@@ -639,90 +639,126 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
         </div>
       </div>
 
-      {/* NEW: Quick Breakdown Entry & Line-Wide Bulk Action Strip */}
+      {/* Quick Breakdown Entry & Line-Wide Bulk Action Strip */}
       <div className="bg-white border border-slate-200 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs">
         {/* Left: Context-Sensitive Quick-Add Buttons for the Focused BD Cell */}
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="font-bold text-slate-700 flex items-center gap-1 mr-1">
             <Zap className="w-3.5 h-3.5 text-amber-500" />
-            <span>Quick BD Entry:</span>
+            <span>Quick BD:</span>
           </span>
 
-          {activeBdCell && focusedRow ? (
-            <>
-              <span
-                className={`px-2 py-0.5 rounded border font-bold ${
-                  BD_META[activeBdCell.field].pillClass
-                }`}
-              >
-                #{focusedRow.srNo} {focusedRow.machineName} · {BD_META[activeBdCell.field].fullLabel}
-              </span>
-
-              {[5, 10, 15, 30, 45, 60].map((mins) => (
-                <button
-                  key={mins}
-                  type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault(); // Keeps focus inside the input cell
-                    handleQuickAdjustBd(mins, 'add');
-                  }}
-                  className="px-2 py-1 bg-slate-100 hover:bg-slate-900 hover:text-white text-slate-800 font-mono font-bold rounded border border-slate-300 transition-colors"
-                >
-                  +{mins}m
-                </button>
+          {/* Machine Selector */}
+          <div className="flex items-center gap-1 bg-slate-100 rounded px-2 py-0.5 border border-slate-300">
+            <span className="text-[11px] font-semibold text-slate-500">Machine:</span>
+            <select
+              value={activeBdCell.rowIndex}
+              onChange={(e) =>
+                setActiveBdCell({
+                  rowIndex: Number(e.target.value),
+                  field: activeBdCell.field,
+                })
+              }
+              className="bg-transparent font-bold text-slate-900 text-xs focus:outline-none cursor-pointer"
+            >
+              {rows.map((r, i) => (
+                <option key={r.machineId || i} value={i}>
+                  #{r.srNo} {r.machineName}
+                </option>
               ))}
+            </select>
+          </div>
 
-              <button
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  handleQuickAdjustBd(-5, 'add');
-                }}
-                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono font-semibold rounded border border-slate-300"
-              >
-                -5m
-              </button>
-
-              {focusedRowBalance && (focusedRowBalance.isOver || focusedRowBalance.isProductionExceeded) && (
-                <span className="px-2.5 py-1 bg-rose-100 text-rose-800 font-mono font-bold rounded border border-rose-300 flex items-center gap-1">
-                  <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
-                  <span>
-                    Exceeds Shift by {Math.abs(focusedRowBalance.unaccountedMinutes)}m ({focusedRowBalance.totalAccountedMinutes}m / {focusedRowBalance.shiftMinutes}m)
-                  </span>
-                </span>
-              )}
-
-              {focusedRowBalance && focusedRowBalance.unaccountedMinutes > 0 && (
+          {/* Breakdown Field Pills */}
+          <div className="flex items-center gap-1">
+            {BD_KEYS.map((k) => {
+              const isSelected = activeBdCell.field === k;
+              return (
                 <button
+                  key={k}
                   type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    handleFillUnaccountedBd(activeBdCell.rowIndex, activeBdCell.field);
-                  }}
-                  className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold rounded shadow-2xs flex items-center gap-1"
-                  title="Fill exact remaining unaccounted shift minutes into this cell"
+                  onClick={() =>
+                    setActiveBdCell({
+                      rowIndex: activeBdCell.rowIndex,
+                      field: k,
+                    })
+                  }
+                  className={`px-2 py-0.5 rounded text-xs font-bold transition-all cursor-pointer border ${
+                    isSelected
+                      ? `${BD_META[k].pillClass} ring-2 ring-blue-300 shadow-2xs`
+                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                  }`}
                 >
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  <span>+Fill Balance ({focusedRowBalance.unaccountedMinutes}m)</span>
+                  {BD_META[k].shortLabel}
                 </button>
-              )}
+              );
+            })}
+          </div>
 
-              <button
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  handleQuickAdjustBd(0, 'set');
-                }}
-                className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold rounded border border-rose-200"
-              >
-                Clear (0)
-              </button>
-            </>
-          ) : (
-            <span className="text-slate-500">
-              Click any <strong>NO/DISC</strong>, <strong>CHANGE</strong>, <strong>POWER</strong>, or <strong>OPERATOR</strong> cell below to unlock 1-click <strong>+5m / +15m / +30m / +Fill Balance</strong> buttons.
+          {/* 1-Click Adjust Buttons: Always available */}
+          {[5, 10, 15, 30, 45, 60].map((mins) => (
+            <button
+              key={mins}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault(); // Keeps focus inside the input cell
+                handleQuickAdjustBd(mins, 'add');
+              }}
+              onClick={() => handleQuickAdjustBd(mins, 'add')}
+              className="px-2 py-1 bg-slate-100 hover:bg-slate-900 hover:text-white text-slate-800 font-mono font-bold rounded border border-slate-300 transition-colors cursor-pointer"
+            >
+              +{mins}m
+            </button>
+          ))}
+
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              handleQuickAdjustBd(-5, 'add');
+            }}
+            onClick={() => handleQuickAdjustBd(-5, 'add')}
+            className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono font-semibold rounded border border-slate-300 cursor-pointer"
+          >
+            -5m
+          </button>
+
+          {focusedRowBalance && (focusedRowBalance.isOver || focusedRowBalance.isProductionExceeded) && (
+            <span className="px-2.5 py-1 bg-rose-100 text-rose-800 font-mono font-bold rounded border border-rose-300 flex items-center gap-1">
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
+              <span>
+                Exceeds Shift by {Math.abs(focusedRowBalance.unaccountedMinutes)}m ({focusedRowBalance.totalAccountedMinutes}m / {focusedRowBalance.shiftMinutes}m)
+              </span>
             </span>
           )}
+
+          {focusedRowBalance && focusedRowBalance.unaccountedMinutes > 0 && (
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleFillUnaccountedBd(activeBdCell.rowIndex, activeBdCell.field);
+              }}
+              onClick={() => handleFillUnaccountedBd(activeBdCell.rowIndex, activeBdCell.field)}
+              className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold rounded shadow-2xs flex items-center gap-1 cursor-pointer animate-pulse"
+              title="Fill exact remaining unaccounted shift minutes into this cell"
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>+Fill Balance ({focusedRowBalance.unaccountedMinutes}m)</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              handleQuickAdjustBd(0, 'set');
+            }}
+            onClick={() => handleQuickAdjustBd(0, 'set')}
+            className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold rounded border border-rose-200 cursor-pointer"
+          >
+            Clear (0)
+          </button>
         </div>
 
         {/* Right: Line-Wide Bulk Breakdown Applier (e.g., Power Cut across all 16 machines) */}
