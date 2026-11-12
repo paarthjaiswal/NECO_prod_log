@@ -11,12 +11,14 @@ import {
   MachineShiftRow,
   MasterDataState,
   ShiftType,
+  ShiftLockInfo,
 } from "@/types";
 import {
   getShiftSheetRows,
   saveShiftSheetRows,
   updateSingleMachineLog,
   getMasterData,
+  getFactoryTimeContext,
 } from "@/actions/shiftActions";
 import {
   PRODUCTION_LINES,
@@ -27,6 +29,7 @@ import { exportShiftToExcel } from "@/services/excelExport";
 import {
   calculateShiftTimeBalance,
   calculateTotalBreakdown,
+  evaluateShiftLock,
 } from "@/services/storageService";
 
 // Lazy-loaded: zero RAM impact on shop-floor PCs unless clicked
@@ -53,12 +56,49 @@ const DRAFT_STORAGE_KEY = "shopfloor_unsaved_draft";
 const getDraftKey = (date: string, shift: string, line: string) =>
   `${DRAFT_STORAGE_KEY}:${date}:${shift}:${line}`;
 
+const parseIstMs = (str?: string): number => {
+  if (!str) return Date.now();
+  const clean = str.trim().replace(" ", "T");
+  const parsed =
+    clean.includes("+") ||
+    clean.includes("Z") ||
+    (clean.length > 10 && clean.slice(10).includes("-"))
+      ? new Date(clean).getTime()
+      : new Date(`${clean}+05:30`).getTime();
+  return Number.isNaN(parsed) ? Date.now() : parsed;
+};
+
+const formatMsToIstString = (ms: number): string => {
+  const d = new Date(ms);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const getPart = (type: string) =>
+    parts.find((p) => p.type === type)?.value || "";
+  const year = getPart("year");
+  const month = getPart("month");
+  const day = getPart("day");
+  const hour = getPart("hour") === "24" ? "00" : getPart("hour");
+  const minute = getPart("minute");
+  const second = getPart("second");
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}+05:30`;
+};
+
 export interface DashboardClientProps {
   initialMasterData: MasterDataState;
   initialRows: MachineShiftRow[];
   initialDate: string;
   initialShift: ShiftType;
   initialLine: string;
+  isAdmin: boolean;
+  serverNowIst: string;
 }
 
 export default function DashboardClient({
@@ -67,6 +107,8 @@ export default function DashboardClient({
   initialDate,
   initialShift,
   initialLine,
+  isAdmin = false,
+  serverNowIst = "",
 }: DashboardClientProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>("sheet");
   const [kioskMachineId, setKioskMachineId] = useState<string | null>(null);
@@ -78,7 +120,72 @@ export default function DashboardClient({
   const [selectedShift, setSelectedShift] = useState<ShiftType>(initialShift);
   const [selectedLine, setSelectedLine] = useState<string>(initialLine);
 
-  // Holds ONLY the 16 rows for the current Date + Shift + Line (never allLogs[])
+  // Live server-anchored clock state
+  const [currentServerNowIst, setCurrentServerNowIst] = useState<string>(
+    serverNowIst || formatMsToIstString(Date.now())
+  );
+  const baseServerMsRef = useRef<number>(parseIstMs(serverNowIst));
+  const basePerfMsRef = useRef<number>(
+    typeof performance !== "undefined" ? performance.now() : 0
+  );
+
+  // Re-anchor clock if serverNowIst prop refreshes from Server Component
+  useEffect(() => {
+    if (serverNowIst) {
+      baseServerMsRef.current = parseIstMs(serverNowIst);
+      basePerfMsRef.current =
+        typeof performance !== "undefined" ? performance.now() : 0;
+      setCurrentServerNowIst(serverNowIst);
+    }
+  }, [serverNowIst]);
+
+  // 30-second interval advancing server time using monotonic elapsed time
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const elapsed =
+        typeof performance !== "undefined"
+          ? performance.now() - basePerfMsRef.current
+          : 0;
+      const currentMs = baseServerMsRef.current + elapsed;
+      setCurrentServerNowIst(formatMsToIstString(currentMs));
+    }, 30_000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // Sync clock with true server timestamp when filters change
+  useEffect(() => {
+    let isMounted = true;
+    getFactoryTimeContext()
+      .then((ctx) => {
+        if (isMounted && ctx?.serverNowIst) {
+          baseServerMsRef.current = parseIstMs(ctx.serverNowIst);
+          basePerfMsRef.current =
+            typeof performance !== "undefined" ? performance.now() : 0;
+          setCurrentServerNowIst(ctx.serverNowIst);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedDate, selectedShift, selectedLine]);
+
+  // Compute shift lock info based strictly on server time
+  const shiftLock: ShiftLockInfo = useMemo(() => {
+    return evaluateShiftLock(
+      selectedDate,
+      selectedShift,
+      masterData.shifts ?? [],
+      currentServerNowIst,
+      isAdmin,
+      30
+    );
+  }, [selectedDate, selectedShift, masterData.shifts, currentServerNowIst, isAdmin]);
+
+  const isShiftLocked = !shiftLock.isEditable;
+
+  // Holds ONLY the rows for the current Date + Shift + Line
   const [currentShiftRows, setCurrentShiftRows] =
     useState<MachineShiftRow[]>(initialRows);
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
@@ -104,6 +211,13 @@ export default function DashboardClient({
   const draftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
   const isFirstLoad = useRef(true);
 
+  // Redirect to sheet if non-admin tries to access settings
+  useEffect(() => {
+    if (activeTab === "settings" && !isAdmin) {
+      setActiveTab("sheet");
+    }
+  }, [activeTab, isAdmin]);
+
   const writeDraft = (rows: MachineShiftRow[]) => {
     try {
       localStorage.setItem(
@@ -125,25 +239,28 @@ export default function DashboardClient({
   useEffect(() => {
     let isMounted = true;
 
-    try {
-      const rawDraft = localStorage.getItem(draftKey);
-      if (rawDraft) {
-        const parsed = JSON.parse(rawDraft);
-        if (
-          parsed.date === selectedDate &&
-          parsed.shift === selectedShift &&
-          parsed.line === selectedLine &&
-          Array.isArray(parsed.rows) &&
-          parsed.rows.length > 0
-        ) {
-          setCurrentShiftRows(parsed.rows);
-          setHasUnsavedDraft(true);
-          isFirstLoad.current = false;
-          return;
+    // Do NOT restore unsaved localStorage draft if shift is locked
+    if (!isShiftLocked) {
+      try {
+        const rawDraft = localStorage.getItem(draftKey);
+        if (rawDraft) {
+          const parsed = JSON.parse(rawDraft);
+          if (
+            parsed.date === selectedDate &&
+            parsed.shift === selectedShift &&
+            parsed.line === selectedLine &&
+            Array.isArray(parsed.rows) &&
+            parsed.rows.length > 0
+          ) {
+            setCurrentShiftRows(parsed.rows);
+            setHasUnsavedDraft(true);
+            isFirstLoad.current = false;
+            return;
+          }
         }
+      } catch {
+        // Ignore malformed localStorage data
       }
-    } catch {
-      // Ignore malformed localStorage data
     }
 
     if (isFirstLoad.current) {
@@ -176,9 +293,10 @@ export default function DashboardClient({
       isMounted = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate, selectedShift, selectedLine]);
+  }, [selectedDate, selectedShift, selectedLine, isShiftLocked]);
 
   const handleRowsChange = (updatedRows: MachineShiftRow[]) => {
+    if (isShiftLocked) return;
     setCurrentShiftRows(updatedRows);
     setHasUnsavedDraft(true);
     writeDraft(updatedRows);
@@ -208,6 +326,11 @@ export default function DashboardClient({
   };
 
   const handleSaveShiftSheet = async (rowsToSave: MachineShiftRow[]) => {
+    if (isShiftLocked) {
+      alert(shiftLock.reason || "Shift is locked. Data is read-only.");
+      return;
+    }
+
     // Validate shift time accounting
     const activeShiftObj = masterData.shifts?.find(
       (s) => s.displayName === selectedShift || s.shiftCode === selectedShift
@@ -272,15 +395,27 @@ export default function DashboardClient({
           setTimeout(() => setStatusMessage(null), 3000);
         } else {
           setStatusMessage("Save failed. Your local draft is safe.");
+          setTimeout(() => setStatusMessage(null), 5000);
         }
-      } catch (err) {
+      } catch (err: unknown) {
         console.error("Error saving shift sheet:", err);
-        setStatusMessage("Error saving logs. Your local draft is safe.");
+        const msg =
+          err instanceof Error
+            ? err.message
+            : "Error saving logs. Your local draft is safe.";
+        setStatusMessage(msg);
+        setTimeout(() => setStatusMessage(null), 5000);
       }
     });
   };
 
   const handleSaveSingleKioskRow = async (singleRow: MachineShiftRow) => {
+    if (isShiftLocked) {
+      setStatusMessage("Shift is locked — changes cannot be saved.");
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
+
     startTransition(async () => {
       try {
         const result = await updateSingleMachineLog(singleRow);
@@ -293,9 +428,12 @@ export default function DashboardClient({
           setStatusMessage(`Saved ${result.row.machineName}`);
           setTimeout(() => setStatusMessage(null), 2500);
         }
-      } catch (err) {
+      } catch (err: unknown) {
         console.error("Error saving kiosk log:", err);
-        setStatusMessage("Failed to save machine log.");
+        const msg =
+          err instanceof Error ? err.message : "Failed to save machine log.";
+        setStatusMessage(msg);
+        setTimeout(() => setStatusMessage(null), 5000);
       }
     });
   };
@@ -319,6 +457,10 @@ export default function DashboardClient({
   };
 
   const handleResetDemo = () => {
+    if (isShiftLocked) {
+      alert(shiftLock.reason || "Shift is locked. Data cannot be reset.");
+      return;
+    }
     if (!window.confirm("Reset current shift rows to sample demo baseline?")) return;
     try {
       localStorage.removeItem(draftKey);
@@ -355,6 +497,9 @@ export default function DashboardClient({
         onExportExcel={handleExportExcel}
         onResetDemo={handleResetDemo}
         isSaving={isPending}
+        isAdmin={isAdmin}
+        isShiftLocked={isShiftLocked}
+        shiftLock={shiftLock}
       />
 
       <main
@@ -381,6 +526,9 @@ export default function DashboardClient({
               if (machineId) setKioskMachineId(machineId);
               setActiveTab("kiosk");
             }}
+            isAdmin={isAdmin}
+            isShiftLocked={isShiftLocked}
+            shiftLock={shiftLock}
           />
         )}
 
@@ -395,6 +543,9 @@ export default function DashboardClient({
             onSelectMachineId={setKioskMachineId}
             onSaveMachine={handleSaveSingleKioskRow}
             isSaving={isPending}
+            isAdmin={isAdmin}
+            isShiftLocked={isShiftLocked}
+            shiftLock={shiftLock}
           />
         )}
 
@@ -408,7 +559,7 @@ export default function DashboardClient({
           />
         )}
 
-        {activeTab === "settings" && (
+        {activeTab === "settings" && isAdmin && (
           <MasterDataSettings
             masterData={masterData}
             onRefreshMasterData={handleRefreshMasterData}
@@ -417,7 +568,7 @@ export default function DashboardClient({
         )}
       </main>
 
-      {/* Floating Non-Intrusive Toast (does not push or shift layout) */}
+      {/* Floating Non-Intrusive Toast */}
       {statusMessage && (
         <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white text-xs px-4 py-2.5 rounded-lg shadow-2xl border border-slate-700 flex items-center gap-2 pointer-events-none transition-all animate-bounce">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />

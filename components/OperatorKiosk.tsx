@@ -10,11 +10,13 @@ import {
   ArrowRight,
   Plus,
   Minus,
+  Lock,
 } from 'lucide-react';
 import {
   MachineShiftRow,
   MasterDataState,
   ShiftType,
+  ShiftLockInfo,
 } from '@/types';
 import {
   calculateEfficiency,
@@ -36,6 +38,9 @@ interface OperatorKioskProps {
   isSaving?: boolean;
   selectedMachineId?: string | null;
   onSelectMachineId?: (machineId: string | null) => void;
+  isAdmin?: boolean;
+  isShiftLocked?: boolean;
+  shiftLock?: ShiftLockInfo;
 }
 
 export function OperatorKiosk({
@@ -48,6 +53,9 @@ export function OperatorKiosk({
   isSaving = false,
   selectedMachineId: externalMachineId,
   onSelectMachineId: externalOnSelectMachineId,
+  isAdmin = false,
+  isShiftLocked = false,
+  shiftLock,
 }: OperatorKioskProps) {
   const { machines, operators, items } = masterData;
   const cycleTimes = useMemo(() => masterData.cycleTimes ?? [], [masterData.cycleTimes]);
@@ -99,6 +107,7 @@ export function OperatorKiosk({
     if (existingRow) {
       setDraft((prev) => {
         const baseRow =
+          !isShiftLocked &&
           prev &&
           prev.machineId === existingRow.machineId &&
           prev.date === existingRow.date &&
@@ -112,8 +121,8 @@ export function OperatorKiosk({
                   shiftWorkingMinutes || existingRow.totalWorkingMinutes,
               };
 
-        // If item is already set but cycleTime is 0, auto-resolve from masterData.cycleTimes
-        if (baseRow.itemId && !(baseRow.cycleTime > 0) && cycleTimes.length > 0) {
+        // If item is already set but cycleTime is 0, auto-resolve from masterData.cycleTimes (only when editable)
+        if (!isShiftLocked && baseRow.itemId && !(baseRow.cycleTime > 0) && cycleTimes.length > 0) {
           const target = resolveMachineItemTarget(
             baseRow.machineId,
             baseRow.itemId,
@@ -181,11 +190,12 @@ export function OperatorKiosk({
     shiftWorkingMinutes,
     items,
     cycleTimes,
+    isShiftLocked,
   ]);
 
   // 1. When Item changes in draft: auto-set Operation, Cycle Time, and Std Output
   const handleItemSelect = (itemId: string) => {
-    if (!draft) return;
+    if (isShiftLocked || !draft) return;
     setValidationError(null);
 
     if (!itemId) {
@@ -223,7 +233,7 @@ export function OperatorKiosk({
 
   // 2. When Operation changes in draft: re-fetch Cycle Time & Std Output for (Machine + Item + Operation)
   const handleOperationSelect = (operationName: string) => {
-    if (!draft) return;
+    if (isShiftLocked || !draft) return;
     setValidationError(null);
 
     if (!draft.itemId) {
@@ -251,14 +261,14 @@ export function OperatorKiosk({
   };
 
   const handleAdjustActual = (delta: number) => {
-    if (!draft) return;
+    if (isShiftLocked || !draft) return;
     setValidationError(null);
     const newVal = Math.max(0, (draft.actualOutput || 0) + delta);
     setDraft({ ...draft, actualOutput: newVal });
   };
 
   const handleAdjustRework = (delta: number) => {
-    if (!draft) return;
+    if (isShiftLocked || !draft) return;
     const newVal = Math.max(0, (draft.rework || 0) + delta);
     setDraft({ ...draft, rework: newVal });
   };
@@ -267,7 +277,7 @@ export function OperatorKiosk({
     field: 'noDisc' | 'change' | 'power' | 'operator',
     delta: number
   ) => {
-    if (!draft) return;
+    if (isShiftLocked || !draft) return;
     setValidationError(null);
     const currentVal = Number(draft.breakdown?.[field]) || 0;
     const nextVal = Math.max(0, currentVal + delta);
@@ -284,7 +294,7 @@ export function OperatorKiosk({
     field: 'noDisc' | 'change' | 'power' | 'operator',
     unaccountedMins: number
   ) => {
-    if (!draft || unaccountedMins <= 0) return;
+    if (isShiftLocked || !draft || unaccountedMins <= 0) return;
     setValidationError(null);
     const currentVal = Number(draft.breakdown?.[field]) || 0;
     setDraft({
@@ -297,7 +307,7 @@ export function OperatorKiosk({
   };
 
   const handleQuickRemark = (chip: string) => {
-    if (!draft) return;
+    if (isShiftLocked || !draft) return;
     const existing = draft.remarks ? draft.remarks + '; ' : '';
     setDraft({ ...draft, remarks: existing + chip });
   };
@@ -305,7 +315,7 @@ export function OperatorKiosk({
   // Submission with strict Shift Time Balance validation (same as DailyShiftSheet)
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!draft) return;
+    if (isShiftLocked || !draft) return;
 
     if (!draft.operatorName) {
       setValidationError('Please select the operator name for this machine.');
@@ -370,6 +380,49 @@ export function OperatorKiosk({
   if (!selectedMachineId || !draft) {
     return (
       <div className="space-y-6">
+        {/* Shift Lock Banner */}
+        {isShiftLocked && (
+          <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3.5 text-rose-100 flex items-center justify-between gap-3 shadow-md">
+            <div className="flex items-center gap-2.5 text-xs font-semibold">
+              <Lock className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>
+                {shiftLock?.reason ||
+                  'Shift Locked — The 30-minute post-shift editing window has closed. Data is now immutable.'}
+              </span>
+              {shiftLock?.lockDeadlineText && (
+                <span className="text-rose-300 font-mono text-[11px] bg-rose-900/60 px-2 py-0.5 rounded border border-rose-700/60">
+                  Locked at: {shiftLock.lockDeadlineText}
+                </span>
+              )}
+            </div>
+            <span className="text-[11px] font-bold uppercase tracking-wider bg-rose-900 text-rose-200 px-2.5 py-0.5 rounded border border-rose-700 shrink-0">
+              Read-Only
+            </span>
+          </div>
+        )}
+
+        {/* Grace Period Banner */}
+        {!isShiftLocked && shiftLock?.status === 'grace_period' && (
+          <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex items-center justify-between gap-3 shadow-md">
+            <div className="flex items-center gap-2.5 text-xs font-semibold">
+              <span className="text-base leading-none animate-pulse">⏳</span>
+              <span>
+                Shift has concluded. Grace period active —{' '}
+                <strong>{shiftLock.remainingMinutes} mins remaining</strong> before shift
+                permanently locks.
+              </span>
+              {shiftLock?.lockDeadlineText && (
+                <span className="text-amber-200 font-mono text-[11px] bg-amber-900/60 px-2 py-0.5 rounded border border-amber-600/60">
+                  Lock Deadline: {shiftLock.lockDeadlineText}
+                </span>
+              )}
+            </div>
+            <span className="text-[11px] font-bold uppercase tracking-wider bg-amber-800 text-amber-100 px-2.5 py-0.5 rounded border border-amber-600 shrink-0">
+              Grace Window
+            </span>
+          </div>
+        )}
+
         {/* Kiosk Mode Banner */}
         <div className="bg-slate-900 text-white p-4 rounded-lg border border-slate-800 flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -609,6 +662,49 @@ export function OperatorKiosk({
 
   return (
     <div className="max-w-4xl mx-auto space-y-5">
+      {/* Shift Lock Banner */}
+      {isShiftLocked && (
+        <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3.5 text-rose-100 flex items-center justify-between gap-3 shadow-md">
+          <div className="flex items-center gap-2.5 text-xs font-semibold">
+            <Lock className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>
+              {shiftLock?.reason ||
+                'Shift Locked — The 30-minute post-shift editing window has closed. Data is now immutable.'}
+            </span>
+            {shiftLock?.lockDeadlineText && (
+              <span className="text-rose-300 font-mono text-[11px] bg-rose-900/60 px-2 py-0.5 rounded border border-rose-700/60">
+                Locked at: {shiftLock.lockDeadlineText}
+              </span>
+            )}
+          </div>
+          <span className="text-[11px] font-bold uppercase tracking-wider bg-rose-900 text-rose-200 px-2.5 py-0.5 rounded border border-rose-700 shrink-0">
+            Read-Only
+          </span>
+        </div>
+      )}
+
+      {/* Grace Period Banner */}
+      {!isShiftLocked && shiftLock?.status === 'grace_period' && (
+        <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex items-center justify-between gap-3 shadow-md">
+          <div className="flex items-center gap-2.5 text-xs font-semibold">
+            <span className="text-base leading-none animate-pulse">⏳</span>
+            <span>
+              Shift has concluded. Grace period active —{' '}
+              <strong>{shiftLock.remainingMinutes} mins remaining</strong> before shift
+              permanently locks.
+            </span>
+            {shiftLock?.lockDeadlineText && (
+              <span className="text-amber-200 font-mono text-[11px] bg-amber-900/60 px-2 py-0.5 rounded border border-amber-600/60">
+                Lock Deadline: {shiftLock.lockDeadlineText}
+              </span>
+            )}
+          </div>
+          <span className="text-[11px] font-bold uppercase tracking-wider bg-amber-800 text-amber-100 px-2.5 py-0.5 rounded border border-amber-600 shrink-0">
+            Grace Window
+          </span>
+        </div>
+      )}
+
       {/* Top Machine Nav & Header */}
       <div className="bg-slate-900 text-white rounded-lg p-4 flex flex-wrap items-center justify-between gap-3 border border-slate-800 shadow-xs">
         <div className="flex items-center gap-3">
@@ -730,10 +826,11 @@ export function OperatorKiosk({
               </label>
               <select
                 value={draft.operatorName}
+                disabled={isShiftLocked}
                 onChange={(e) =>
                   setDraft({ ...draft, operatorName: e.target.value })
                 }
-                className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none"
+                className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 <option value="">— Select Assigned Operator —</option>
                 {operators.map((op) => (
@@ -751,8 +848,9 @@ export function OperatorKiosk({
               </label>
               <select
                 value={draft.itemId}
+                disabled={isShiftLocked}
                 onChange={(e) => handleItemSelect(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none"
+                className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 <option value="">— Select Item from Master —</option>
                 {items.map((it) => (
@@ -777,8 +875,9 @@ export function OperatorKiosk({
               ) : draftOperations.length > 1 ? (
                 <select
                   value={draft.operation}
+                  disabled={isShiftLocked}
                   onChange={(e) => handleOperationSelect(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   <option value="">— Select Operation —</option>
                   {draftOperations.map((op) => (
@@ -794,14 +893,16 @@ export function OperatorKiosk({
                 <input
                   type="text"
                   value={draft.operation}
+                  disabled={isShiftLocked}
+                  readOnly={isShiftLocked}
                   onChange={(e) => handleOperationSelect(e.target.value)}
                   placeholder="e.g. OP-10 Rough Turning"
-                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                 />
               )}
             </div>
 
-            {/* Cycle Time (Auto-filled from Machine x Item x Operation) */}
+            {/* Cycle Time (Auto-filled from Machine x Item x Operation; Locked for Non-Admins) */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Cycle Time
@@ -811,10 +912,20 @@ export function OperatorKiosk({
                   type="number"
                   min="0"
                   step="0.01"
+                  disabled={!isAdmin || isShiftLocked}
+                  readOnly={!isAdmin || isShiftLocked}
+                  title={
+                    !isAdmin
+                      ? 'Cycle Time is auto-configured from Master Data (Unit Head override required to edit manually)'
+                      : isShiftLocked
+                      ? 'Shift is locked'
+                      : undefined
+                  }
                   value={draft.cycleTime > 0 ? draft.cycleTime : ''}
                   placeholder="0.00"
                   onFocus={(e) => e.target.select()}
                   onChange={(e) => {
+                    if (!isAdmin || isShiftLocked) return;
                     const newCt = parseFloat(e.target.value) || 0;
                     const newStd =
                       newCt > 0
@@ -826,7 +937,7 @@ export function OperatorKiosk({
                       stdOutput: newStd,
                     });
                   }}
-                  className={`w-full border rounded-md px-3 py-2 text-sm font-mono font-bold text-center focus:bg-white focus:border-slate-800 focus:outline-none ${
+                  className={`w-full border rounded-md px-3 py-2 text-sm font-mono font-bold text-center focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-75 disabled:cursor-not-allowed ${
                     timeBalance.missingCycleTime
                       ? 'bg-rose-100 text-rose-950 border-rose-500 ring-2 ring-rose-300 animate-pulse'
                       : draft.cycleTime > 0
@@ -838,7 +949,7 @@ export function OperatorKiosk({
               </div>
             </div>
 
-            {/* Std Output Target (Auto-calculated from Shift Mins / Cycle Time) */}
+            {/* Std Output Target (Auto-calculated; Locked for Non-Admins) */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Std Output (Shift)
@@ -847,16 +958,26 @@ export function OperatorKiosk({
                 <input
                   type="number"
                   min="0"
+                  disabled={!isAdmin || isShiftLocked}
+                  readOnly={!isAdmin || isShiftLocked}
+                  title={
+                    !isAdmin
+                      ? 'Std Output is auto-calculated from Cycle Time (Unit Head override required to edit manually)'
+                      : isShiftLocked
+                      ? 'Shift is locked'
+                      : undefined
+                  }
                   value={draft.stdOutput || ''}
                   placeholder="0"
                   onFocus={(e) => e.target.select()}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    if (!isAdmin || isShiftLocked) return;
                     setDraft({
                       ...draft,
                       stdOutput: Number(e.target.value) || 0,
-                    })
-                  }
-                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm font-mono font-bold text-slate-900 text-center focus:bg-white focus:border-slate-800 focus:outline-none"
+                    });
+                  }}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm font-mono font-bold text-slate-900 text-center focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-75 disabled:cursor-not-allowed"
                 />
                 <span className="ml-2 text-xs font-medium text-slate-500">pcs</span>
               </div>
@@ -913,21 +1034,25 @@ export function OperatorKiosk({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() => handleAdjustActual(-5)}
-                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center text-sm"
+                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   -5
                 </button>
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() => handleAdjustActual(-1)}
-                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center"
+                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Minus className="w-4 h-4" />
                 </button>
                 <input
                   type="number"
                   min="0"
+                  disabled={isShiftLocked}
+                  readOnly={isShiftLocked}
                   value={
                     draft.actualOutput > 0
                       ? draft.actualOutput
@@ -943,7 +1068,7 @@ export function OperatorKiosk({
                       actualOutput: Number(e.target.value) || 0,
                     });
                   }}
-                  className={`flex-1 text-center font-mono text-2xl font-black py-1.5 border rounded focus:bg-white focus:border-slate-800 focus:outline-none ${
+                  className={`flex-1 text-center font-mono text-2xl font-black py-1.5 border rounded focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed ${
                     timeBalance.isProductionExceeded ||
                     timeBalance.missingCycleTime
                       ? 'bg-rose-100 text-rose-900 border-rose-500'
@@ -952,15 +1077,17 @@ export function OperatorKiosk({
                 />
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() => handleAdjustActual(1)}
-                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center"
+                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-4 h-4" />
                 </button>
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() => handleAdjustActual(5)}
-                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center text-sm"
+                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   +5
                 </button>
@@ -970,31 +1097,36 @@ export function OperatorKiosk({
               <div className="flex items-center gap-1.5 justify-center pt-1">
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() =>
-                    setDraft({ ...draft, actualOutput: draft.stdOutput })
+                    !isShiftLocked && setDraft({ ...draft, actualOutput: draft.stdOutput })
                   }
-                  className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded"
+                  className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Exact Target ({draft.stdOutput})
                 </button>
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() =>
+                    !isShiftLocked &&
                     setDraft({
                       ...draft,
                       actualOutput: Math.max(0, draft.stdOutput - 5),
                     })
                   }
-                  className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 px-2 py-0.5 rounded"
+                  className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 px-2 py-0.5 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   -5 Pcs
                 </button>
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() =>
+                    !isShiftLocked &&
                     setDraft({ ...draft, actualOutput: draft.stdOutput + 5 })
                   }
-                  className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 px-2 py-0.5 rounded"
+                  className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 px-2 py-0.5 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   +5 Pcs
                 </button>
@@ -1054,26 +1186,30 @@ export function OperatorKiosk({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() => handleAdjustRework(-1)}
-                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center"
+                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Minus className="w-4 h-4" />
                 </button>
                 <input
                   type="number"
                   min="0"
+                  disabled={isShiftLocked}
+                  readOnly={isShiftLocked}
                   value={draft.rework > 0 ? draft.rework : ''}
                   placeholder="0"
                   onFocus={(e) => e.target.select()}
                   onChange={(e) =>
                     setDraft({ ...draft, rework: Number(e.target.value) || 0 })
                   }
-                  className="flex-1 text-center font-mono text-2xl font-black py-1.5 bg-slate-50 border border-slate-300 rounded focus:bg-white focus:border-slate-800 focus:outline-none"
+                  className="flex-1 text-center font-mono text-2xl font-black py-1.5 bg-slate-50 border border-slate-300 rounded focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                 />
                 <button
                   type="button"
+                  disabled={isShiftLocked}
                   onClick={() => handleAdjustRework(1)}
-                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center"
+                  className="w-10 h-10 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-4 h-4" />
                 </button>
@@ -1202,6 +1338,8 @@ export function OperatorKiosk({
                       <input
                         type="number"
                         min="0"
+                        disabled={isShiftLocked}
+                        readOnly={isShiftLocked}
                         value={val > 0 ? val : ''}
                         placeholder="0"
                         onFocus={(e) => e.target.select()}
@@ -1218,7 +1356,7 @@ export function OperatorKiosk({
                             },
                           });
                         }}
-                        className="w-full text-center font-mono text-base font-bold bg-slate-50 border border-slate-300 rounded py-1 focus:bg-white focus:border-slate-800 focus:outline-none"
+                        className="w-full text-center font-mono text-base font-bold bg-slate-50 border border-slate-300 rounded py-1 focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                       />
                       <span className="text-xs text-slate-500">m</span>
                     </div>
@@ -1226,15 +1364,17 @@ export function OperatorKiosk({
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
+                        disabled={isShiftLocked}
                         onClick={() => handleBreakdownStep(card.key, card.step1)}
-                        className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+                        className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         +{card.step1}m
                       </button>
                       <button
                         type="button"
+                        disabled={isShiftLocked}
                         onClick={() => handleBreakdownStep(card.key, card.step2)}
-                        className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+                        className="text-[10px] flex-1 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         +{card.step2}m
                       </button>
@@ -1244,13 +1384,14 @@ export function OperatorKiosk({
                     {draft.cycleTime > 0 && timeBalance.unaccountedMinutes > 0 && (
                       <button
                         type="button"
+                        disabled={isShiftLocked}
                         onClick={() =>
                           handleFillUnaccountedToField(
                             card.key,
                             timeBalance.unaccountedMinutes
                           )
                         }
-                        className="w-full py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-[10px] transition-colors shadow-2xs"
+                        className="w-full py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold text-[10px] transition-colors shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed"
                         title={`Add remaining ${timeBalance.unaccountedMinutes}m into ${card.title}`}
                       >
                         +Fill ({timeBalance.unaccountedMinutes}m)
@@ -1270,10 +1411,12 @@ export function OperatorKiosk({
           </label>
           <input
             type="text"
+            disabled={isShiftLocked}
+            readOnly={isShiftLocked}
             value={draft.remarks}
             onChange={(e) => setDraft({ ...draft, remarks: e.target.value })}
             placeholder="Type notes or tap quick chips below..."
-            className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 focus:bg-white focus:border-slate-800 focus:outline-none"
+            className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
           />
 
           <div className="flex items-center gap-1.5 flex-wrap pt-1 text-xs">
@@ -1289,8 +1432,9 @@ export function OperatorKiosk({
               <button
                 key={chip}
                 type="button"
+                disabled={isShiftLocked}
                 onClick={() => handleQuickRemark(chip)}
-                className="text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-2 py-0.5 rounded transition-colors"
+                className="text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-2 py-0.5 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 + {chip}
               </button>
@@ -1309,29 +1453,40 @@ export function OperatorKiosk({
           </button>
 
           <div className="flex items-center gap-3">
-            <button
-              type="submit"
-              disabled={isSaving}
-              className={`px-6 py-2.5 text-white font-bold text-xs uppercase tracking-wider rounded-md shadow-xs flex items-center gap-2 transition-colors disabled:opacity-50 ${
-                hasEntryError
-                  ? 'bg-rose-600 hover:bg-rose-700'
-                  : 'bg-emerald-600 hover:bg-emerald-500'
-              }`}
-            >
-              {hasEntryError ? (
-                <>
-                  <AlertTriangle className="w-4 h-4" />
-                  <span>Fix Time Mismatch to Save</span>
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>
-                    {isSaving ? 'Saving...' : 'Submit & Save Machine Entry'}
-                  </span>
-                </>
-              )}
-            </button>
+            {isShiftLocked ? (
+              <button
+                type="button"
+                disabled
+                title={shiftLock?.reason || 'Shift is locked (View Only)'}
+                className="px-6 py-2.5 bg-slate-200 text-slate-600 font-bold text-xs uppercase tracking-wider rounded-md border border-slate-300 flex items-center gap-2 cursor-not-allowed"
+              >
+                <span>🔒 Shift Locked — View Only</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={isSaving}
+                className={`px-6 py-2.5 text-white font-bold text-xs uppercase tracking-wider rounded-md shadow-xs flex items-center gap-2 transition-colors disabled:opacity-50 ${
+                  hasEntryError
+                    ? 'bg-rose-600 hover:bg-rose-700'
+                    : 'bg-emerald-600 hover:bg-emerald-500'
+                }`}
+              >
+                {hasEntryError ? (
+                  <>
+                    <AlertTriangle className="w-4 h-4" />
+                    <span>Fix Time Mismatch to Save</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>
+                      {isSaving ? 'Saving...' : 'Submit & Save Machine Entry'}
+                    </span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </form>

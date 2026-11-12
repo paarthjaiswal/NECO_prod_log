@@ -3,6 +3,8 @@ import {
   BreakdownMinutes,
   MachineShiftRow,
   MachineItemCycleTime,
+  ShiftMaster,
+  ShiftLockInfo,
 } from "@/types";
 
 /**
@@ -454,4 +456,136 @@ export function calculateDowntimePct(
   const denom = Number(shiftWorkingMinutes) || 0;
   if (denom <= 0) return 0;
   return Number(((Number(minutes || 0) / denom) * 100).toFixed(2));
+}
+
+/**
+ * Pure evaluation function for Shift Editing / Locking rules based on Supabase server time in IST.
+ * CRITICAL RULE: Never uses client browser's new Date() - always anchored to serverNowIstStr.
+ */
+export function evaluateShiftLock(
+  date: string,
+  shiftName: string,
+  shiftsMaster: ShiftMaster[] = [],
+  serverNowIstStr: string,
+  isAdmin: boolean,
+  bufferMinutes: number = 30
+): ShiftLockInfo {
+  // 1. Unit Head Override: Immediate access to all historical and future shifts
+  if (isAdmin) {
+    return {
+      isEditable: true,
+      status: "admin_override",
+      reason:
+        "Unit Head Override Active — All historical and future shifts unlocked.",
+    };
+  }
+
+  // 2. Resolve Shift Timings
+  const shift = shiftsMaster.find(
+    (s) => s.displayName === shiftName || s.shiftCode === shiftName
+  );
+
+  let startTime = "06:00:00";
+  let endTime = "14:00:00";
+  const lower = (shiftName || "").toLowerCase();
+
+  if (shift) {
+    startTime = shift.startTime;
+    endTime = shift.endTime;
+  } else if (lower.includes("b") || lower.includes("2pm")) {
+    startTime = "14:00:00";
+    endTime = "22:00:00";
+  } else if (lower.includes("c") || lower.includes("10pm")) {
+    startTime = "22:00:00";
+    endTime = "06:00:00";
+  }
+
+  const normalizeTime = (t: string) => {
+    const parts = (t || "").trim().split(":");
+    const h = (parts[0] || "00").padStart(2, "0");
+    const m = (parts[1] || "00").padStart(2, "0");
+    const s = (parts[2] || "00").padStart(2, "0");
+    return `${h}:${m}:${s}`;
+  };
+
+  const normStart = normalizeTime(startTime);
+  const normEnd = normalizeTime(endTime);
+
+  // 3. Parse Server Timestamp in IST (UTC+05:30)
+  const parseIstTimestamp = (str: string): number => {
+    if (!str) return 0;
+    const clean = str.trim().replace(" ", "T");
+    if (clean.includes("+") || clean.includes("Z") || (clean.length > 10 && clean.slice(10).includes("-"))) {
+      return new Date(clean).getTime();
+    }
+    return new Date(`${clean}+05:30`).getTime();
+  };
+
+  const serverNow = parseIstTimestamp(serverNowIstStr);
+
+  // 4. Construct Shift Start & End Times in IST
+  const shiftStart = new Date(`${date}T${normStart}+05:30`).getTime();
+
+  let shiftEnd: number;
+  if (normEnd <= normStart) {
+    // Overnight Shift (e.g. Shift C 22:00 -> 06:00 next day)
+    const [y, m, d] = date.split("-").map(Number);
+    const nextDateObj = new Date(Date.UTC(y, m - 1, d + 1));
+    const nextDateStr = nextDateObj.toISOString().slice(0, 10);
+    shiftEnd = new Date(`${nextDateStr}T${normEnd}+05:30`).getTime();
+  } else {
+    shiftEnd = new Date(`${date}T${normEnd}+05:30`).getTime();
+  }
+
+  const lockDeadline = shiftEnd + bufferMinutes * 60_000;
+
+  let lockDeadlineText: string | undefined;
+  try {
+    lockDeadlineText = new Intl.DateTimeFormat("en-IN", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).format(new Date(lockDeadline)) + " IST";
+  } catch {
+    lockDeadlineText = undefined;
+  }
+
+  // 5. Evaluate Lock Status
+  if (serverNow < shiftStart) {
+    return {
+      isEditable: false,
+      status: "future",
+      reason: "Shift Locked — This shift has not started yet.",
+      lockDeadlineText,
+    };
+  }
+
+  if (serverNow > lockDeadline) {
+    return {
+      isEditable: false,
+      status: "locked",
+      reason:
+        "Shift Locked — The 30-minute post-shift editing window has closed.",
+      lockDeadlineText,
+    };
+  }
+
+  if (serverNow >= shiftEnd && serverNow <= lockDeadline) {
+    const remainingMinutes = Math.max(1, Math.ceil((lockDeadline - serverNow) / 60000));
+    return {
+      isEditable: true,
+      status: "grace_period",
+      reason: `Grace Period Active — ${remainingMinutes}m left before shift locks.`,
+      lockDeadlineText,
+      remainingMinutes,
+    };
+  }
+
+  return {
+    isEditable: true,
+    status: "open",
+    reason: null,
+    lockDeadlineText,
+  };
 }

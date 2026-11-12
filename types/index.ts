@@ -102,3 +102,17 @@ export interface MasterDataState {
 }
 
 export type ActiveTab = 'sheet' | 'kiosk' | 'analytics' | 'settings';
+
+export interface ShiftLockInfo {
+  isEditable: boolean;
+  status: 'open' | 'grace_period' | 'locked' | 'future' | 'admin_override';
+  reason: string | null;
+  lockDeadlineText?: string;
+  remainingMinutes?: number;
+}
+
+export interface FactoryTimeContext {
+  serverNowIst: string; // ISO/timestamp string from Supabase in Asia/Kolkata
+  activeDate: string;   // YYYY-MM-DD
+  autoSelectedShift: ShiftType;
+}

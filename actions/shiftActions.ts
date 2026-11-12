@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { createAdminClient } from "@/utils/supabase/server";
+import { getIsUnitHead } from "@/actions/authActions";
+import { evaluateShiftLock } from "@/services/storageService";
 import {
   MachineShiftRow,
   MachineMaster,
@@ -11,6 +13,7 @@ import {
   ProductionLineMaster,
   ShiftMaster,
   MachineItemCycleTime,
+  FactoryTimeContext,
 } from "@/types";
 
 // ============================================================================
@@ -314,6 +317,256 @@ function hydrateShiftSheetRows(
 // ============================================================================
 
 /**
+ * Resolves factory-grounded time context strictly on the server in Asia/Kolkata timezone.
+ * First queries Supabase RPC 'get_factory_time_context'.
+ * Falls back to computing via Node server Intl.DateTimeFormat with public.shifts.
+ */
+export async function getFactoryTimeContext(): Promise<FactoryTimeContext> {
+  const supabase = createAdminClient();
+
+  try {
+    const { data, error } = await supabase.rpc("get_factory_time_context");
+    if (!error && data) {
+      const rpcRow = (Array.isArray(data) ? data[0] : data) as Record<
+        string,
+        unknown
+      > | null;
+      const serverNow = rpcRow?.server_now_ist ?? rpcRow?.serverNowIst;
+      const actDate = rpcRow?.active_date ?? rpcRow?.activeDate;
+      const selShift = rpcRow?.auto_selected_shift ?? rpcRow?.autoSelectedShift;
+      if (serverNow && actDate && selShift) {
+        return {
+          serverNowIst: String(serverNow),
+          activeDate: String(actDate),
+          autoSelectedShift: String(selShift) as ShiftType,
+        };
+      }
+    }
+  } catch {
+    // RPC not available yet, fall back to Node server computation below
+  }
+
+  // Node server IST fallback
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+
+  const parts = formatter.formatToParts(now);
+  const getPart = (type: string) =>
+    parts.find((p) => p.type === type)?.value || "";
+  const year = getPart("year");
+  const month = getPart("month");
+  const day = getPart("day");
+  const parsedHour = parseInt(getPart("hour"), 10);
+  const hour = Number.isNaN(parsedHour) ? 0 : parsedHour % 24;
+  const parsedMinute = parseInt(getPart("minute"), 10);
+  const minute = Number.isNaN(parsedMinute) ? 0 : parsedMinute;
+  const second = getPart("second");
+
+  const todayStr = `${year}-${month}-${day}`;
+  const serverNowIst = `${todayStr}T${String(hour).padStart(2, "0")}:${String(
+    minute
+  ).padStart(2, "0")}:${second}+05:30`;
+
+  // Fetch active shifts to determine schedule
+  let shifts: ShiftMaster[] = [];
+  try {
+    const { data: dbShifts } = await supabase
+      .from("shifts")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+    if (dbShifts && dbShifts.length > 0) {
+      shifts = dbShifts.map(mapDbShiftToUi);
+    }
+  } catch {
+    // ignore
+  }
+
+  const timeMinutes = hour * 60 + minute;
+
+  // Calculate yesterday in IST for overnight shift C (00:00 - 05:59)
+  const prevDateObj = new Date(
+    Date.UTC(parseInt(year, 10), parseInt(month, 10) - 1, parseInt(day, 10) - 1)
+  );
+  const yesterdayStr = prevDateObj.toISOString().slice(0, 10);
+
+  if (shifts.length > 0) {
+    // Match against shift records
+    for (const s of shifts) {
+      const [sh, sm] = (s.startTime || "00:00").split(":").map(Number);
+      const [eh, em] = (s.endTime || "00:00").split(":").map(Number);
+      const startMins = (sh || 0) * 60 + (sm || 0);
+      const endMins = (eh || 0) * 60 + (em || 0);
+
+      if (endMins > startMins) {
+        // Normal daytime shift (e.g., 06:00 - 14:00 or 14:00 - 22:00)
+        if (timeMinutes >= startMins && timeMinutes < endMins) {
+          return {
+            serverNowIst,
+            activeDate: todayStr,
+            autoSelectedShift: s.displayName,
+          };
+        }
+      } else {
+        // Overnight shift (e.g. 22:00 - 06:00)
+        if (timeMinutes >= startMins) {
+          // Started today, ends tomorrow morning
+          return {
+            serverNowIst,
+            activeDate: todayStr,
+            autoSelectedShift: s.displayName,
+          };
+        } else if (timeMinutes < endMins) {
+          // Started yesterday night
+          return {
+            serverNowIst,
+            activeDate: yesterdayStr,
+            autoSelectedShift: s.displayName,
+          };
+        }
+      }
+    }
+  }
+
+  // Standard fallback timings if no custom shifts matched:
+  // Shift A: 06:00 - 14:00
+  // Shift B: 14:00 - 22:00
+  // Shift C: 22:00 - 06:00 (overnight)
+  if (timeMinutes >= 360 && timeMinutes < 840) {
+    return {
+      serverNowIst,
+      activeDate: todayStr,
+      autoSelectedShift: "Shift A (6AM-2PM)",
+    };
+  } else if (timeMinutes >= 840 && timeMinutes < 1320) {
+    return {
+      serverNowIst,
+      activeDate: todayStr,
+      autoSelectedShift: "Shift B (2PM-10PM)",
+    };
+  } else if (timeMinutes >= 1320) {
+    return {
+      serverNowIst,
+      activeDate: todayStr,
+      autoSelectedShift: "Shift C (10PM-6AM)",
+    };
+  } else {
+    // 00:00 - 05:59 -> Shift C belonging to yesterday's date
+    return {
+      serverNowIst,
+      activeDate: yesterdayStr,
+      autoSelectedShift: "Shift C (10PM-6AM)",
+    };
+  }
+}
+
+/**
+ * Enforces server-side shift edit window.
+ * 1. If Unit Head is logged in, immediately allows edit.
+ * 2. Attempts Supabase RPC 'check_shift_edit_window'.
+ * 3. Falls back to evaluateShiftLock using server time and shifts master.
+ * Throws Error if locked.
+ */
+async function assertShiftEditable(logDate: string, shift: string) {
+  const isAdmin = await getIsUnitHead();
+  if (isAdmin) {
+    return;
+  }
+
+  const supabase = createAdminClient();
+
+  let rpcLockError: string | null = null;
+  let rpcHandled = false;
+
+  try {
+    const { data, error } = await supabase.rpc("check_shift_edit_window", {
+      p_log_date: logDate,
+      p_shift: shift,
+      p_buffer_minutes: 30,
+    });
+
+    if (!error && data !== null && data !== undefined) {
+      const rpcRow = Array.isArray(data) ? data[0] : data;
+      if (typeof rpcRow === "boolean") {
+        rpcHandled = true;
+        if (!rpcRow) {
+          rpcLockError = "Shift is locked — the editing window has closed.";
+        }
+      } else if (rpcRow && typeof rpcRow === "object") {
+        const record = rpcRow as Record<string, unknown>;
+        const isEditable = record.is_editable ?? record.isEditable;
+        if (typeof isEditable === "boolean") {
+          rpcHandled = true;
+          if (!isEditable) {
+            rpcLockError =
+              typeof record.reason === "string" && record.reason
+                ? record.reason
+                : "Shift is locked — the editing window has closed.";
+          }
+        }
+      }
+    }
+  } catch {
+    // RPC not created or failed, proceed to evaluateShiftLock fallback
+  }
+
+  if (rpcLockError) {
+    throw new Error(rpcLockError);
+  }
+  if (rpcHandled) {
+    return;
+  }
+
+  // Fallback: evaluateShiftLock using server time context
+  const timeContext = await getFactoryTimeContext();
+  let shiftsMaster: ShiftMaster[] = [];
+  try {
+    const { data: dbShifts } = await supabase
+      .from("shifts")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+    if (dbShifts) {
+      shiftsMaster = dbShifts.map(mapDbShiftToUi);
+    }
+  } catch {
+    // ignore
+  }
+
+  const lockInfo = evaluateShiftLock(
+    logDate,
+    shift,
+    shiftsMaster,
+    timeContext.serverNowIst,
+    false,
+    30
+  );
+
+  if (!lockInfo.isEditable) {
+    throw new Error(lockInfo.reason || "Shift is locked — the editing window has closed.");
+  }
+}
+
+/**
+ * Enforces Unit Head authorization for all Master Data modifications.
+ */
+async function assertUnitHead() {
+  const isHead = await getIsUnitHead();
+  if (!isHead) {
+    throw new Error("Unauthorized: Only the Unit Head can modify Master Data.");
+  }
+}
+
+/**
  * ACTION 1: Fetch All Master Data in Parallel
  * Fetches machines, operators, items, production_lines, shifts, and cycle_times.
  */
@@ -431,6 +684,16 @@ export async function getShiftSheetRows(
 export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
   if (!rows || rows.length === 0) return { success: true, count: 0, rows: [] };
 
+  // Enforce edit-window check for every unique (date, shift) pair in payload
+  const seenKeys = new Set<string>();
+  for (const row of rows) {
+    const key = `${row.date}__${row.shift}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      await assertShiftEditable(row.date, row.shift);
+    }
+  }
+
   const supabase = createAdminClient();
   const dbPayloads = rows.map(mapUiRowToDbRow);
 
@@ -455,6 +718,8 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
  * ACTION 4: Single Machine Kiosk Save (OperatorKiosk.tsx)
  */
 export async function updateSingleMachineLog(row: MachineShiftRow) {
+  await assertShiftEditable(row.date, row.shift);
+
   const supabase = createAdminClient();
   const dbPayload = mapUiRowToDbRow(row);
 
@@ -483,6 +748,7 @@ export async function upsertMachineMaster(
   machine: MachineMaster,
   sortOrder?: number
 ) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const fallbackSortOrder = parseInt(machine.id.replace(/\D/g, ""), 10) || 999;
 
@@ -509,6 +775,7 @@ export async function upsertMachineMaster(
 }
 
 export async function disableMachineMaster(machineId: string) {
+  await assertUnitHead();
   const supabase = createAdminClient();
 
   const { error } = await supabase
@@ -522,6 +789,7 @@ export async function disableMachineMaster(machineId: string) {
 }
 
 export async function upsertItemMaster(item: ItemMaster) {
+  await assertUnitHead();
   const supabase = createAdminClient();
 
   const { data, error } = await supabase
@@ -545,6 +813,7 @@ export async function upsertItemMaster(item: ItemMaster) {
 }
 
 export async function deleteItemMaster(itemId: string) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const { error } = await supabase.from("items").delete().eq("id", itemId);
 
@@ -554,6 +823,7 @@ export async function deleteItemMaster(itemId: string) {
 }
 
 export async function addOperatorMaster(operatorName: string) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const cleanName = operatorName.trim();
 
@@ -567,6 +837,7 @@ export async function addOperatorMaster(operatorName: string) {
 }
 
 export async function removeOperatorMaster(operatorName: string) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const { error } = await supabase
     .from("operators")
@@ -579,6 +850,7 @@ export async function removeOperatorMaster(operatorName: string) {
 }
 
 export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const { error } = await supabase.from("machine_item_cycle_times").upsert(
     {
@@ -598,6 +870,7 @@ export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
 }
 
 export async function deleteMachineItemCycleTime(id: number) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const { error } = await supabase
     .from("machine_item_cycle_times")
@@ -610,6 +883,7 @@ export async function deleteMachineItemCycleTime(id: number) {
 }
 
 export async function upsertProductionLine(line: ProductionLineMaster) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const { error } = await supabase.from("production_lines").upsert(
     {
@@ -629,6 +903,7 @@ export async function upsertProductionLine(line: ProductionLineMaster) {
 }
 
 export async function upsertShiftMaster(shift: ShiftMaster) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   const { error } = await supabase.from("shifts").upsert(
     {
@@ -650,6 +925,7 @@ export async function upsertShiftMaster(shift: ShiftMaster) {
 }
 
 export async function deleteProductionLine(lineId: string) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   // Soft-delete so historical shift_logs on this line stay intact
   const { error } = await supabase
@@ -663,6 +939,7 @@ export async function deleteProductionLine(lineId: string) {
 }
 
 export async function deleteShiftMaster(shiftId: string) {
+  await assertUnitHead();
   const supabase = createAdminClient();
   // Soft-delete so historical shift_logs on this shift stay intact
   const { error } = await supabase

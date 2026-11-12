@@ -1,7 +1,6 @@
-"use client"
-import React from 'react';
+"use client";
+import React, { useState } from 'react';
 import {
-  Factory,
   TableProperties,
   Monitor,
   BarChart3,
@@ -13,11 +12,12 @@ import {
   CheckCircle2,
   AlertTriangle,
   Layers,
+  LogOut,
 } from 'lucide-react';
-import { ActiveTab, ShiftType } from '@/types';
+import { ActiveTab, ShiftType, ShiftLockInfo } from '@/types';
 import { SHIFTS } from '@/data/initialData';
+import { logoutUnitHead } from '@/actions/authActions';
 
-// Inside components/Header.tsx
 interface HeaderProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
@@ -27,13 +27,16 @@ interface HeaderProps {
   setSelectedShift: (shift: ShiftType) => void;
   selectedLine: string;
   setSelectedLine: (line: string) => void;
-  productionLines: string[];          // Dynamic Line 1 / 2 / 3 dropdown
-  shifts?: ShiftType[];               // Dynamic Shift A / B / C dropdown
-  hasUnsavedChanges: boolean;         // Required for Save button indicator
-  onSaveShiftLog: () => void;         // Required to trigger saveShiftSheetRows
-  onExportExcel: () => void;          // Required to trigger Excel export
-  onResetDemo?: () => void;           // <-- Add '?' to make this optional!
-  isSaving?: boolean;                 // Pulsing Syncing status
+  productionLines: string[];
+  shifts?: ShiftType[];
+  hasUnsavedChanges: boolean;
+  onSaveShiftLog: () => void;
+  onExportExcel: () => void;
+  onResetDemo?: () => void;
+  isSaving?: boolean;
+  isAdmin?: boolean;
+  isShiftLocked?: boolean;
+  shiftLock?: ShiftLockInfo;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -52,8 +55,24 @@ export const Header: React.FC<HeaderProps> = ({
   hasUnsavedChanges,
   onSaveShiftLog,
   isSaving = false,
+  isAdmin = false,
+  isShiftLocked = false,
+  shiftLock,
 }) => {
   const availableShifts = shifts && shifts.length > 0 ? shifts : (SHIFTS as ShiftType[]);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+  const handleLogout = async () => {
+    try {
+      setIsLoggingOut(true);
+      await logoutUnitHead();
+      window.location.reload();
+    } catch (err) {
+      console.error("Logout error:", err);
+      window.location.reload();
+    }
+  };
+
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-40 shadow-sm">
       {/* Primary Top Bar */}
@@ -129,21 +148,43 @@ export const Header: React.FC<HeaderProps> = ({
               <span>Analytics & Power BI</span>
             </button>
 
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-semibold whitespace-nowrap transition-colors ${
-                activeTab === 'settings'
-                  ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-900'
-              }`}
-            >
-              <Sliders className="w-4 h-4" />
-              <span>Master Data</span>
-            </button>
+            {/* Master Data Tab: Only shown for Unit Head / Admin */}
+            {isAdmin && (
+              <button
+                onClick={() => setActiveTab('settings')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-semibold whitespace-nowrap transition-colors ${
+                  activeTab === 'settings'
+                    ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-900'
+                }`}
+              >
+                <Sliders className="w-4 h-4" />
+                <span>Master Data</span>
+              </button>
+            )}
           </nav>
 
-          {/* Zone 3: Global Actions */}
+          {/* Zone 3: Global Actions & Admin Status */}
           <div className="flex items-center gap-2 shrink-0">
+            {/* Unit Head Override Badge & Exit Button */}
+            {isAdmin && (
+              <div className="flex items-center gap-2 bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 px-2.5 py-1 rounded text-xs font-medium shadow-xs">
+                <span className="flex items-center gap-1 font-bold">
+                  <span>🔓 Unit Head Override</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  disabled={isLoggingOut}
+                  className="px-2 py-0.5 bg-emerald-800/80 hover:bg-rose-900 text-white rounded text-[11px] font-semibold transition-colors flex items-center gap-1 disabled:opacity-50"
+                  title="Exit Unit Head session and lock override"
+                >
+                  <LogOut className="w-3 h-3" />
+                  <span>{isLoggingOut ? 'Exiting...' : 'Lock & Exit'}</span>
+                </button>
+              </div>
+            )}
+
             {onResetDemo && (
               <button
                 onClick={onResetDemo}
@@ -206,7 +247,7 @@ export const Header: React.FC<HeaderProps> = ({
                 })}
               </div>
 
-              {/* Production Line Selector (Styled exactly like Shift selector) */}
+              {/* Production Line Selector */}
               <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
                 <Layers className="w-3.5 h-3.5 text-slate-400 ml-2" />
                 <span className="text-slate-400 font-medium px-1">Line:</span>
@@ -226,12 +267,44 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             </div>
 
-            {/* Save Status / Button */}
+            {/* Save Status / Lock Status Indicator */}
             <div className="flex items-center gap-3">
               {isSaving ? (
                 <div className="flex items-center gap-1.5 text-amber-300 text-xs font-semibold px-2.5 py-1 rounded bg-amber-950/40 border border-amber-500/30">
                   <div className="w-3 h-3 rounded-full border-2 border-amber-300 border-t-transparent animate-spin" />
                   <span>Syncing with Cloud...</span>
+                </div>
+              ) : isShiftLocked ? (
+                <div
+                  className="flex items-center gap-1.5 text-rose-300 text-xs font-bold bg-rose-950/70 border border-rose-500/50 px-3 py-1 rounded shadow-xs"
+                  title={shiftLock?.reason || "Shift editing window has closed"}
+                >
+                  <span>🔒 Shift Locked (Read-Only)</span>
+                </div>
+              ) : shiftLock?.status === 'grace_period' ? (
+                <div className="flex items-center gap-2">
+                  <div
+                    className="flex items-center gap-1.5 text-amber-300 text-xs font-bold bg-amber-950/70 border border-amber-500/50 px-2.5 py-1 rounded shadow-xs animate-pulse"
+                    title={shiftLock.reason || undefined}
+                  >
+                    <span>⏳ Grace Buffer: {shiftLock.remainingMinutes}m left to save</span>
+                  </div>
+                  {hasUnsavedChanges ? (
+                    <button
+                      type="button"
+                      onClick={onSaveShiftLog}
+                      className="px-3.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded transition-all flex items-center gap-1.5 shadow-md ring-2 ring-amber-400/60 ring-offset-1 ring-offset-slate-950 animate-pulse hover:animate-none"
+                      title="Unsaved changes active — click to save and sync shift sheet to database"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5 text-slate-950" />
+                      <span>Save Shift Log *</span>
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-semibold bg-emerald-950/60 border border-emerald-600/40 px-2.5 py-1 rounded shadow-xs">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Shift Log Synced</span>
+                    </div>
+                  )}
                 </div>
               ) : hasUnsavedChanges ? (
                 <button
