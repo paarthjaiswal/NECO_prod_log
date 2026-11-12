@@ -8,7 +8,7 @@ import { loginUnitHead } from "@/actions/authActions";
 
 export default function UnitHeadLoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("unithead@neco.com");
+  const [email, setEmail] = useState("unithead@nsslindia.com");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -87,7 +87,7 @@ export default function UnitHeadLoginPage() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="unithead@neco.com"
+                placeholder="unithead@nsslindia.com"
                 disabled={isSubmitting}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-200 font-mono placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors disabled:opacity-50"
               />
