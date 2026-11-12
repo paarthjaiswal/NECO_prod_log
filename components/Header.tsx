@@ -127,59 +127,61 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Zone 2: Navigation Tabs (Wraps cleanly onto full-width row on mobile) */}
-          <nav className="order-3 lg:order-2 w-full lg:w-auto flex flex-wrap items-center justify-center lg:justify-start gap-1 bg-slate-950/70 p-1 rounded-lg border border-slate-800">
-            <button
-              onClick={() => setActiveTab('sheet')}
-              className={`flex items-center justify-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors grow sm:grow-0 ${
-                activeTab === 'sheet'
-                  ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-900'
-              }`}
-            >
-              <TableProperties className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-              <span>Daily Shift Sheet</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('kiosk')}
-              className={`flex items-center justify-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors grow sm:grow-0 ${
-                activeTab === 'kiosk'
-                  ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-900'
-              }`}
-            >
-              <Monitor className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-              <span>Machines</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('analytics')}
-              className={`flex items-center justify-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors grow sm:grow-0 ${
-                activeTab === 'analytics'
-                  ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-900'
-              }`}
-            >
-              <BarChart3 className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-              <span>Analytics & Power BI</span>
-            </button>
-
-            {/* Master Data Tab: Only shown for Unit Head / Admin */}
-            {isAdmin && (
+          {/* Zone 2: Navigation Tabs (Centered on mobile row 2 with tight pill sizing matching PC) */}
+          <div className="order-3 lg:order-2 w-full lg:w-auto flex justify-center">
+            <nav className="w-fit max-w-full flex flex-wrap items-center justify-center gap-1 bg-slate-950/70 p-1 rounded-lg border border-slate-800">
               <button
-                onClick={() => setActiveTab('settings')}
-                className={`flex items-center justify-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors grow sm:grow-0 ${
-                  activeTab === 'settings'
+                onClick={() => setActiveTab('sheet')}
+                className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors ${
+                  activeTab === 'sheet'
                     ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
                     : 'text-slate-300 hover:text-white hover:bg-slate-900'
                 }`}
               >
-                <Sliders className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-                <span>Master Data</span>
+                <TableProperties className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+                <span>Daily Shift Sheet</span>
               </button>
-            )}
-          </nav>
+
+              <button
+                onClick={() => setActiveTab('kiosk')}
+                className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors ${
+                  activeTab === 'kiosk'
+                    ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-900'
+                }`}
+              >
+                <Monitor className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+                <span>Machines</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors ${
+                  activeTab === 'analytics'
+                    ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-900'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+                <span>Analytics & Power BI</span>
+              </button>
+
+              {/* Master Data Tab: Only shown for Unit Head / Admin */}
+              {isAdmin && (
+                <button
+                  onClick={() => setActiveTab('settings')}
+                  className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors ${
+                    activeTab === 'settings'
+                      ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-900'
+                  }`}
+                >
+                  <Sliders className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+                  <span>Master Data</span>
+                </button>
+              )}
+            </nav>
+          </div>
 
           {/* Zone 3: Global Actions & Admin Status */}
           <div className="order-2 lg:order-3 flex flex-wrap items-center justify-end gap-1.5 sm:gap-2">
