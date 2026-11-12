@@ -322,151 +322,151 @@ function hydrateShiftSheetRows(
  * Falls back to computing via Node server Intl.DateTimeFormat with public.shifts.
  */
 export async function getFactoryTimeContext(): Promise<FactoryTimeContext> {
-  const supabase = createAdminClient();
+  const supabase = createAdminClient();
 
-  try {
-    const { data, error } = await supabase.rpc("get_factory_time_context");
-    if (!error && data) {
-      const rpcRow = (Array.isArray(data) ? data[0] : data) as Record<
-        string,
-        unknown
-      > | null;
-      const serverNow = rpcRow?.server_now_ist ?? rpcRow?.serverNowIst;
-      const actDate = rpcRow?.active_date ?? rpcRow?.activeDate;
-      const selShift = rpcRow?.auto_selected_shift ?? rpcRow?.autoSelectedShift;
-      if (serverNow && actDate && selShift) {
-        return {
-          serverNowIst: String(serverNow),
-          activeDate: String(actDate),
-          autoSelectedShift: String(selShift) as ShiftType,
-        };
-      }
-    }
-  } catch {
-    // RPC not available yet, fall back to Node server computation below
-  }
+  try {
+    const { data, error } = await supabase.rpc("get_factory_time_context");
+    if (!error && data) {
+      const rpcRow = (Array.isArray(data) ? data[0] : data) as Record<
+        string,
+        unknown
+      > | null;
+      const serverNow = rpcRow?.server_now_ist ?? rpcRow?.serverNowIst;
+      const actDate = rpcRow?.active_date ?? rpcRow?.activeDate;
+      const selShift = rpcRow?.auto_selected_shift ?? rpcRow?.autoSelectedShift;
+      if (serverNow && actDate && selShift) {
+        return {
+          serverNowIst: String(serverNow),
+          activeDate: String(actDate),
+          autoSelectedShift: String(selShift) as ShiftType,
+        };
+      }
+    }
+  } catch {
+    // RPC not available yet, fall back to Node server computation below
+  }
 
-  // Node server IST fallback
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  });
+  // Node server IST fallback
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
 
-  const parts = formatter.formatToParts(now);
-  const getPart = (type: string) =>
-    parts.find((p) => p.type === type)?.value || "";
-  const year = getPart("year");
-  const month = getPart("month");
-  const day = getPart("day");
-  const parsedHour = parseInt(getPart("hour"), 10);
-  const hour = Number.isNaN(parsedHour) ? 0 : parsedHour % 24;
-  const parsedMinute = parseInt(getPart("minute"), 10);
-  const minute = Number.isNaN(parsedMinute) ? 0 : parsedMinute;
-  const second = getPart("second");
+  const parts = formatter.formatToParts(now);
+  const getPart = (type: string) =>
+    parts.find((p) => p.type === type)?.value || "";
+  const year = getPart("year");
+  const month = getPart("month");
+  const day = getPart("day");
+  const parsedHour = parseInt(getPart("hour"), 10);
+  const hour = Number.isNaN(parsedHour) ? 0 : parsedHour % 24;
+  const parsedMinute = parseInt(getPart("minute"), 10);
+  const minute = Number.isNaN(parsedMinute) ? 0 : parsedMinute;
+  const second = getPart("second");
 
-  const todayStr = `${year}-${month}-${day}`;
-  const serverNowIst = `${todayStr}T${String(hour).padStart(2, "0")}:${String(
-    minute
-  ).padStart(2, "0")}:${second}+05:30`;
+  const todayStr = `${year}-${month}-${day}`;
+  const serverNowIst = `${todayStr}T${String(hour).padStart(2, "0")}:${String(
+    minute
+  ).padStart(2, "0")}:${second}+05:30`;
 
-  // Fetch active shifts to determine schedule
-  let shifts: ShiftMaster[] = [];
-  try {
-    const { data: dbShifts } = await supabase
-      .from("shifts")
-      .select("*")
-      .eq("is_active", true)
-      .order("sort_order", { ascending: true });
-    if (dbShifts && dbShifts.length > 0) {
-      shifts = dbShifts.map(mapDbShiftToUi);
-    }
-  } catch {
-    // ignore
-  }
+  // Fetch active shifts to determine schedule
+  let shifts: ShiftMaster[] = [];
+  try {
+    const { data: dbShifts } = await supabase
+      .from("shifts")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+    if (dbShifts && dbShifts.length > 0) {
+      shifts = dbShifts.map(mapDbShiftToUi);
+    }
+  } catch {
+    // ignore
+  }
 
-  const timeMinutes = hour * 60 + minute;
+  const timeMinutes = hour * 60 + minute;
 
-  // Calculate yesterday in IST for overnight shift C (00:00 - 05:59)
-  const prevDateObj = new Date(
-    Date.UTC(parseInt(year, 10), parseInt(month, 10) - 1, parseInt(day, 10) - 1)
-  );
-  const yesterdayStr = prevDateObj.toISOString().slice(0, 10);
+  // Calculate yesterday in IST for overnight shift C (00:00 - 05:59)
+  const prevDateObj = new Date(
+    Date.UTC(parseInt(year, 10), parseInt(month, 10) - 1, parseInt(day, 10) - 1)
+  );
+  const yesterdayStr = prevDateObj.toISOString().slice(0, 10);
 
-  if (shifts.length > 0) {
-    // Match against shift records
-    for (const s of shifts) {
-      const [sh, sm] = (s.startTime || "00:00").split(":").map(Number);
-      const [eh, em] = (s.endTime || "00:00").split(":").map(Number);
-      const startMins = (sh || 0) * 60 + (sm || 0);
-      const endMins = (eh || 0) * 60 + (em || 0);
+  if (shifts.length > 0) {
+    // Match against shift records
+    for (const s of shifts) {
+      const [sh, sm] = (s.startTime || "00:00").split(":").map(Number);
+      const [eh, em] = (s.endTime || "00:00").split(":").map(Number);
+      const startMins = (sh || 0) * 60 + (sm || 0);
+      const endMins = (eh || 0) * 60 + (em || 0);
 
-      if (endMins > startMins) {
-        // Normal daytime shift (e.g., 06:00 - 14:00 or 14:00 - 22:00)
-        if (timeMinutes >= startMins && timeMinutes < endMins) {
-          return {
-            serverNowIst,
-            activeDate: todayStr,
-            autoSelectedShift: s.displayName,
-          };
-        }
-      } else {
-        // Overnight shift (e.g. 22:00 - 06:00)
-        if (timeMinutes >= startMins) {
-          // Started today, ends tomorrow morning
-          return {
-            serverNowIst,
-            activeDate: todayStr,
-            autoSelectedShift: s.displayName,
-          };
-        } else if (timeMinutes < endMins) {
-          // Started yesterday night
-          return {
-            serverNowIst,
-            activeDate: yesterdayStr,
-            autoSelectedShift: s.displayName,
-          };
-        }
-      }
-    }
-  }
+      if (endMins > startMins) {
+        // Normal daytime shift (e.g., 06:00 - 14:00 or 14:00 - 22:00)
+        if (timeMinutes >= startMins && timeMinutes < endMins) {
+          return {
+            serverNowIst,
+            activeDate: todayStr,
+            autoSelectedShift: s.displayName,
+          };
+        }
+      } else {
+        // Overnight shift (e.g. 22:00 - 06:00)
+        if (timeMinutes >= startMins) {
+          // Started today, ends tomorrow morning
+          return {
+            serverNowIst,
+            activeDate: todayStr,
+            autoSelectedShift: s.displayName,
+          };
+        } else if (timeMinutes < endMins) {
+          // Started yesterday night
+          return {
+            serverNowIst,
+            activeDate: yesterdayStr,
+            autoSelectedShift: s.displayName,
+          };
+        }
+      }
+    }
+  }
 
-  // Standard fallback timings if no custom shifts matched:
-  // Shift A: 06:00 - 14:00
-  // Shift B: 14:00 - 22:00
-  // Shift C: 22:00 - 06:00 (overnight)
-  if (timeMinutes >= 360 && timeMinutes < 840) {
-    return {
-      serverNowIst,
-      activeDate: todayStr,
-      autoSelectedShift: "Shift A (6AM-2PM)",
-    };
-  } else if (timeMinutes >= 840 && timeMinutes < 1320) {
-    return {
-      serverNowIst,
-      activeDate: todayStr,
-      autoSelectedShift: "Shift B (2PM-10PM)",
-    };
-  } else if (timeMinutes >= 1320) {
-    return {
-      serverNowIst,
-      activeDate: todayStr,
-      autoSelectedShift: "Shift C (10PM-6AM)",
-    };
-  } else {
-    // 00:00 - 05:59 -> Shift C belonging to yesterday's date
-    return {
-      serverNowIst,
-      activeDate: yesterdayStr,
-      autoSelectedShift: "Shift C (10PM-6AM)",
-    };
-  }
+  // Standard fallback timings if no custom shifts matched:
+  // Shift A: 06:00 - 14:00
+  // Shift B: 14:00 - 22:00
+  // Shift C: 22:00 - 06:00 (overnight)
+  if (timeMinutes >= 360 && timeMinutes < 840) {
+    return {
+      serverNowIst,
+      activeDate: todayStr,
+      autoSelectedShift: "Shift A (6AM-2PM)",
+    };
+  } else if (timeMinutes >= 840 && timeMinutes < 1320) {
+    return {
+      serverNowIst,
+      activeDate: todayStr,
+      autoSelectedShift: "Shift B (2PM-10PM)",
+    };
+  } else if (timeMinutes >= 1320) {
+    return {
+      serverNowIst,
+      activeDate: todayStr,
+      autoSelectedShift: "Shift C (10PM-6AM)",
+    };
+  } else {
+    // 00:00 - 05:59 -> Shift C belonging to yesterday's date
+    return {
+      serverNowIst,
+      activeDate: yesterdayStr,
+      autoSelectedShift: "Shift C (10PM-6AM)",
+    };
+  }
 }
 
 /**
@@ -477,83 +477,83 @@ export async function getFactoryTimeContext(): Promise<FactoryTimeContext> {
  * Throws Error if locked.
  */
 async function assertShiftEditable(logDate: string, shift: string) {
-  const isAdmin = await getIsUnitHead();
-  if (isAdmin) {
-    return;
-  }
+  const isAdmin = await getIsUnitHead();
+  if (isAdmin) {
+    return;
+  }
 
-  const supabase = createAdminClient();
+  const supabase = createAdminClient();
 
-  let rpcLockError: string | null = null;
-  let rpcHandled = false;
+  let rpcLockError: string | null = null;
+  let rpcHandled = false;
 
-  try {
-    const { data, error } = await supabase.rpc("check_shift_edit_window", {
-      p_log_date: logDate,
-      p_shift: shift,
-      p_buffer_minutes: 30,
-    });
+  try {
+    const { data, error } = await supabase.rpc("check_shift_edit_window", {
+      p_log_date: logDate,
+      p_shift: shift,
+      p_buffer_minutes: 30,
+    });
 
-    if (!error && data !== null && data !== undefined) {
-      const rpcRow = Array.isArray(data) ? data[0] : data;
-      if (typeof rpcRow === "boolean") {
-        rpcHandled = true;
-        if (!rpcRow) {
-          rpcLockError = "Shift is locked — the editing window has closed.";
-        }
-      } else if (rpcRow && typeof rpcRow === "object") {
-        const record = rpcRow as Record<string, unknown>;
-        const isEditable = record.is_editable ?? record.isEditable;
-        if (typeof isEditable === "boolean") {
-          rpcHandled = true;
-          if (!isEditable) {
-            rpcLockError =
-              typeof record.reason === "string" && record.reason
-                ? record.reason
-                : "Shift is locked — the editing window has closed.";
-          }
-        }
-      }
-    }
-  } catch {
-    // RPC not created or failed, proceed to evaluateShiftLock fallback
-  }
+    if (!error && data !== null && data !== undefined) {
+      const rpcRow = Array.isArray(data) ? data[0] : data;
+      if (typeof rpcRow === "boolean") {
+        rpcHandled = true;
+        if (!rpcRow) {
+          rpcLockError = "Shift is locked — the editing window has closed.";
+        }
+      } else if (rpcRow && typeof rpcRow === "object") {
+        const record = rpcRow as Record<string, unknown>;
+        const isEditable = record.is_editable ?? record.isEditable;
+        if (typeof isEditable === "boolean") {
+          rpcHandled = true;
+          if (!isEditable) {
+            rpcLockError =
+              typeof record.reason === "string" && record.reason
+                ? record.reason
+                : "Shift is locked — the editing window has closed.";
+          }
+        }
+      }
+    }
+  } catch {
+    // RPC not created or failed, proceed to evaluateShiftLock fallback
+  }
 
-  if (rpcLockError) {
-    throw new Error(rpcLockError);
-  }
-  if (rpcHandled) {
-    return;
-  }
+  if (rpcLockError) {
+    throw new Error(rpcLockError);
+  }
+  if (rpcHandled) {
+    return;
+  }
 
-  // Fallback: evaluateShiftLock using server time context
-  const timeContext = await getFactoryTimeContext();
-  let shiftsMaster: ShiftMaster[] = [];
-  try {
-    const { data: dbShifts } = await supabase
-      .from("shifts")
-      .select("*")
-      .eq("is_active", true)
-      .order("sort_order", { ascending: true });
-    if (dbShifts) {
-      shiftsMaster = dbShifts.map(mapDbShiftToUi);
-    }
-  } catch {
-    // ignore
-  }
+  // Fallback: evaluateShiftLock using server time context
+  const timeContext = await getFactoryTimeContext();
+  let shiftsMaster: ShiftMaster[] = [];
+  try {
+    const { data: dbShifts } = await supabase
+      .from("shifts")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+    if (dbShifts) {
+      shiftsMaster = dbShifts.map(mapDbShiftToUi);
+    }
+  } catch {
+    // ignore
+  }
 
-  const lockInfo = evaluateShiftLock(
-    logDate,
-    shift,
-    shiftsMaster,
-    timeContext.serverNowIst,
-    false,
-    30
-  );
+  const lockInfo = evaluateShiftLock(
+    logDate,
+    shift,
+    shiftsMaster,
+    timeContext.serverNowIst,
+    false,
+    30
+  );
 
-  if (!lockInfo.isEditable) {
-    throw new Error(lockInfo.reason || "Shift is locked — the editing window has closed.");
-  }
+  if (!lockInfo.isEditable) {
+    throw new Error(lockInfo.reason || "Shift is locked — the editing window has closed.");
+  }
 }
 
 /**

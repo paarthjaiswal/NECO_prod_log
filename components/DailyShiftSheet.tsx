@@ -775,10 +775,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
               <button
                 key={mins}
                 type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  handleQuickAdjustBd(mins, 'add');
-                }}
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => handleQuickAdjustBd(mins, 'add')}
                 className="px-2 py-1 bg-slate-100 hover:bg-slate-900 hover:text-white text-slate-800 font-mono font-bold rounded border border-slate-300 transition-colors cursor-pointer"
               >
@@ -788,10 +785,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
 
             <button
               type="button"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                handleQuickAdjustBd(-5, 'add');
-              }}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => handleQuickAdjustBd(-5, 'add')}
               className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono font-semibold rounded border border-slate-300 cursor-pointer"
             >
@@ -810,10 +804,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
             {focusedRowBalance && focusedRowBalance.unaccountedMinutes > 0 && (
               <button
                 type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  handleFillUnaccountedBd(activeBdCell.rowIndex, activeBdCell.field);
-                }}
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => handleFillUnaccountedBd(activeBdCell.rowIndex, activeBdCell.field)}
                 className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-bold rounded shadow-2xs flex items-center gap-1 cursor-pointer animate-pulse"
                 title="Fill exact remaining unaccounted shift minutes into this cell"
@@ -825,10 +816,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
 
             <button
               type="button"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                handleQuickAdjustBd(0, 'set');
-              }}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => handleQuickAdjustBd(0, 'set')}
               className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold rounded border border-rose-200 cursor-pointer"
             >

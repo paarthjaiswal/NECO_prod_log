@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   TableProperties,
   Monitor,
@@ -61,6 +61,23 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const availableShifts = shifts && shifts.length > 0 ? shifts : (SHIFTS as ShiftType[]);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const dateInputRef = useRef<HTMLInputElement>(null);
+
+  const handleOpenDatePicker = () => {
+    const input = dateInputRef.current;
+    if (!input) return;
+    try {
+      if (typeof input.showPicker === 'function') {
+        input.showPicker();
+      } else {
+        input.focus();
+        input.click();
+      }
+    } catch {
+      input.focus();
+      input.click();
+    }
+  };
 
   const handleLogout = async () => {
     try {
@@ -212,17 +229,33 @@ export const Header: React.FC<HeaderProps> = ({
         <div className={`bg-slate-950 border-t border-slate-800/80 py-2 ${activeTab === 'sheet' ? 'w-full px-1.25 sm:px-2.5' : 'px-4 sm:px-6 lg:px-8'}`}>
           <div className={`${activeTab === 'sheet' ? 'w-full' : 'max-w-7xl mx-auto'} flex flex-wrap items-center justify-between gap-3 text-xs`}>
             <div className="flex items-center gap-4 flex-wrap">
-              {/* Date Selector */}
-              <div className="flex items-center gap-2 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
-                <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                <span className="text-slate-400 font-medium">Log Date:</span>
+              {/* Date Selector (Whole label & date pill acts as a single button) */}
+              <button
+                type="button"
+                onClick={handleOpenDatePicker}
+                title="Click anywhere to change Log Date"
+                className="relative flex items-center gap-2 bg-slate-900 hover:bg-slate-800 px-2.5 py-1 rounded border border-slate-800 hover:border-slate-600 transition-colors cursor-pointer group focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+              >
+                <Calendar className="w-3.5 h-3.5 text-slate-400 group-hover:text-emerald-400 transition-colors shrink-0" />
+                <span className="text-slate-400 group-hover:text-slate-200 font-medium transition-colors">
+                  Log Date:
+                </span>
+                <span className="text-slate-100 font-mono text-xs font-semibold">
+                  {selectedDate}
+                </span>
                 <input
+                  ref={dateInputRef}
                   type="date"
+                  aria-label="Log Date"
+                  tabIndex={-1}
                   value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
-                  className="bg-transparent text-slate-100 font-mono text-xs focus:outline-none cursor-pointer"
+                  onChange={(e) => {
+                    if (e.target.value) setSelectedDate(e.target.value);
+                  }}
+                  style={{ colorScheme: 'dark' }}
+                  className="absolute inset-0 w-full h-full opacity-0 pointer-events-none"
                 />
-              </div>
+              </button>
 
               {/* Shift Selector */}
               <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded border border-slate-800">
