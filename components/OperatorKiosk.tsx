@@ -382,8 +382,8 @@ export function OperatorKiosk({
       <div className="space-y-6">
         {/* Shift Lock Banner */}
         {isShiftLocked && (
-          <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3.5 text-rose-100 flex items-center justify-between gap-3 shadow-md">
-            <div className="flex items-center gap-2.5 text-xs font-semibold">
+          <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3.5 text-rose-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
               <Lock className="w-4 h-4 text-rose-400 shrink-0" />
               <span>
                 {shiftLock?.reason ||
@@ -403,8 +403,8 @@ export function OperatorKiosk({
 
         {/* Grace Period Banner */}
         {!isShiftLocked && shiftLock?.status === 'grace_period' && (
-          <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex items-center justify-between gap-3 shadow-md">
-            <div className="flex items-center gap-2.5 text-xs font-semibold">
+          <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
               <span className="text-base leading-none animate-pulse">⏳</span>
               <span>
                 Shift has concluded. Grace period active —{' '}
@@ -438,7 +438,7 @@ export function OperatorKiosk({
               ({selectedDate}).
             </p>
           </div>
-          <div className="flex items-center gap-4 text-xs font-mono">
+          <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs font-mono">
             {shiftWorkingMinutes > 0 && (
               <span className="text-amber-300">
                 Shift Duration: <strong>{shiftWorkingMinutes}m</strong>
@@ -455,7 +455,7 @@ export function OperatorKiosk({
         </div>
 
         {/* Machine Visual Grid for current line */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-2.5 sm:gap-4">
           {lineMachines.map((machine, index) => {
             const row = rows.find((r) => r.machineId === machine.id);
             const totalBd = row ? calculateTotalBreakdown(row.breakdown) : 0;
@@ -482,7 +482,7 @@ export function OperatorKiosk({
               <button
                 key={machine.id}
                 onClick={() => onSelectMachineId(machine.id)}
-                className={`relative text-left p-4 rounded-lg border transition-all text-slate-900 flex flex-col justify-between h-44 group ${
+                className={`relative text-left p-3 sm:p-4 rounded-lg border transition-all text-slate-900 flex flex-col justify-between min-h-40 sm:min-h-44 group ${
                   hasTimeMismatch
                     ? balance.missingCycleTime ||
                       balance.isProductionExceeded ||
@@ -664,8 +664,8 @@ export function OperatorKiosk({
     <div className="max-w-4xl mx-auto space-y-5">
       {/* Shift Lock Banner */}
       {isShiftLocked && (
-        <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3.5 text-rose-100 flex items-center justify-between gap-3 shadow-md">
-          <div className="flex items-center gap-2.5 text-xs font-semibold">
+        <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3.5 text-rose-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
             <Lock className="w-4 h-4 text-rose-400 shrink-0" />
             <span>
               {shiftLock?.reason ||
@@ -685,8 +685,8 @@ export function OperatorKiosk({
 
       {/* Grace Period Banner */}
       {!isShiftLocked && shiftLock?.status === 'grace_period' && (
-        <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex items-center justify-between gap-3 shadow-md">
-          <div className="flex items-center gap-2.5 text-xs font-semibold">
+        <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
             <span className="text-base leading-none animate-pulse">⏳</span>
             <span>
               Shift has concluded. Grace period active —{' '}
@@ -707,16 +707,16 @@ export function OperatorKiosk({
 
       {/* Top Machine Nav & Header */}
       <div className="bg-slate-900 text-white rounded-lg p-4 flex flex-wrap items-center justify-between gap-3 border border-slate-800 shadow-xs">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           <button
             type="button"
             onClick={() => onSelectMachineId(null)}
-            className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+            className="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors shrink-0"
             title="Return to machine grid"
           >
             <ArrowLeft className="w-4 h-4" />
           </button>
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-mono font-bold text-emerald-400">
                 {selectedLine} · MACHINE #{currentIdx + 1} OF {lineMachines.length}
@@ -734,7 +734,7 @@ export function OperatorKiosk({
                 </>
               )}
             </div>
-            <div className="flex items-center gap-2.5 mt-0.5">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 mt-0.5">
               <h2 className="text-xl font-extrabold text-white tracking-tight">
                 {draft.machineName}
               </h2>

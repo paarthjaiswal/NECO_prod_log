@@ -542,8 +542,8 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
     <div className="w-full space-y-2.5">
       {/* Shift Lock Banner */}
       {isShiftLocked && (
-        <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3 text-rose-100 flex items-center justify-between gap-3 shadow-md">
-          <div className="flex items-center gap-2.5 text-xs font-semibold">
+        <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3 text-rose-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
             <Lock className="w-4 h-4 text-rose-400 shrink-0" />
             <span>
               {shiftLock?.reason ||
@@ -563,8 +563,8 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
 
       {/* Grace Period Warning Banner */}
       {!isShiftLocked && shiftLock?.status === 'grace_period' && (
-        <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex items-center justify-between gap-3 shadow-md">
-          <div className="flex items-center gap-2.5 text-xs font-semibold">
+        <div className="bg-amber-950 border border-amber-500/60 rounded-lg p-3 text-amber-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
             <span className="text-base leading-none animate-pulse">⏳</span>
             <span>
               Shift has concluded. Grace period active — <strong>{shiftLock.remainingMinutes} mins remaining</strong> before shift permanently locks.
@@ -582,9 +582,9 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
       )}
 
       {/* Top Action Bar matching factory paper log instructions */}
-      <div className="bg-white rounded-lg border border-slate-200 p-3 sm:p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="bg-slate-900 text-white px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-2">
+      <div className="bg-white rounded-lg border border-slate-200 p-3 sm:p-4 shadow-2xs flex flex-wrap items-center justify-between gap-3 sm:gap-4">
+        <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
+          <div className="bg-slate-900 text-white px-2.5 sm:px-3 py-1.5 rounded text-xs font-semibold flex flex-wrap items-center gap-1.5 sm:gap-2">
             <span className="text-emerald-400 font-bold uppercase">{selectedLine}</span>
             <span className="text-slate-600">·</span>
             <span className="text-slate-400">SHIFT:</span>
@@ -596,13 +596,13 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
               </>
             )}
           </div>
-          <div className="text-xs text-slate-600 hidden md:flex items-center gap-2">
-            <span>Date: <strong className="text-slate-900">{selectedDate}</strong></span>
-            <span>·</span>
-            <span>Active Machines: <strong className="text-emerald-700">{activeMachineCount} / {rows.length}</strong></span>
-            <span>·</span>
-            <span>Line Target: <strong className="text-slate-900">{totalStd} pcs</strong></span>
-            <span>·</span>
+          <div className="text-xs text-slate-600 flex flex-wrap items-center gap-2">
+            <span className="hidden md:inline">Date: <strong className="text-slate-900">{selectedDate}</strong></span>
+            <span className="hidden md:inline">·</span>
+            <span className="hidden md:inline">Active Machines: <strong className="text-emerald-700">{activeMachineCount} / {rows.length}</strong></span>
+            <span className="hidden md:inline">·</span>
+            <span className="hidden md:inline">Line Target: <strong className="text-slate-900">{totalStd} pcs</strong></span>
+            <span className="hidden md:inline">·</span>
             {unbalancedCount > 0 ? (
               <span
                 className="px-2 py-0.5 rounded bg-rose-100 text-rose-800 font-bold border border-rose-300 flex items-center gap-1 animate-pulse"
@@ -745,7 +745,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
             </div>
 
             {/* Breakdown Field Pills */}
-            <div className="flex items-center gap-1">
+            <div className="flex flex-wrap items-center gap-1">
               {BD_KEYS.map((k) => {
                 const isSelected = activeBdCell.field === k;
                 return (
@@ -825,7 +825,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
           </div>
 
           {/* Right: Line-Wide Bulk Breakdown Applier */}
-          <div className="flex items-center gap-1.5 border-t sm:border-t-0 sm:border-l border-slate-200 pt-2 sm:pt-0 sm:pl-3 w-full sm:w-auto">
+          <div className="flex flex-wrap items-center gap-1.5 border-t sm:border-t-0 sm:border-l border-slate-200 pt-2 sm:pt-0 sm:pl-3 w-full sm:w-auto">
             <span className="font-semibold text-slate-600 whitespace-nowrap">Line-Wide BD:</span>
             <select
               value={bulkBdField}

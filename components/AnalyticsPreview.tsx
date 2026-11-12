@@ -282,7 +282,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         {/* Action Controls */}
         <div className="flex items-center gap-2 flex-wrap">
           {/* Date Filter */}
-          <div className="flex items-center bg-slate-100 p-1 rounded border border-slate-200 text-xs">
+          <div className="flex flex-wrap items-center gap-0.5 bg-slate-100 p-1 rounded border border-slate-200 text-xs max-w-full">
             <button
               onClick={() => setDateFilter('all')}
               className={`px-2.5 py-1 rounded font-medium transition-colors ${
