@@ -1,12 +1,8 @@
-import tailwindcss from "@tailwindcss/postcss";
-import legacyColorFallback from "./postcss-legacy-color-fallback.mjs";
-
 const config = {
   plugins: [
-    tailwindcss(),
-    legacyColorFallback(),
+    "@tailwindcss/postcss",
+    "./postcss-legacy-color-fallback.cjs",
   ],
 };
 
 export default config;
-

@@ -130,7 +130,7 @@ function isInsideColorMixSupports(decl) {
   return false;
 }
 
-export default function legacyColorFallback() {
+function legacyColorFallbackPlugin() {
   return {
     postcssPlugin: 'postcss-legacy-color-fallback',
     Declaration(decl) {
@@ -147,4 +147,6 @@ export default function legacyColorFallback() {
     },
   };
 }
-legacyColorFallback.postcss = true;
+legacyColorFallbackPlugin.postcss = true;
+
+module.exports = legacyColorFallbackPlugin;
