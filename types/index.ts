@@ -1,27 +1,29 @@
 // Allow dynamic shift names from public.shifts while keeping autocomplete for defaults
 export type ShiftType =
-  | 'Shift A (6AM-2PM)'
-  | 'Shift B (2PM-10PM)'
-  | 'Shift C (10PM-6AM)'
+  | 'Shift A (7AM-3:30PM)'
+  | 'Shift B (3:30PM-12AM)'
+  | 'Shift C (12AM-7AM)'
   | (string & {});
 
 export interface ProductionLineMaster {
   id: string;                  // e.g. 'line_1'
   name: string;                // e.g. 'Line 1'
   description?: string;
-  dailyWorkingMinutes: number; // Default 1350
+  dailyWorkingMinutes: number; // Default 1305
   isActive: boolean;
   sortOrder: number;
 }
 
 export interface ShiftMaster {
-  id: string;                     // e.g. 'shift_a'
-  shiftCode: string;              // e.g. 'Shift A'
-  displayName: ShiftType;         // e.g. 'Shift A (6AM-2PM)'
-  startTime: string;              // e.g. '06:00:00'
-  endTime: string;                // e.g. '14:00:00'
-  shiftWorkingMinutes: number;    // Default 450
-  totalWorkingMinutesRef?: number; // Default 1350
+  id: string;
+  shiftCode: string;
+  displayName: ShiftType;
+  startTime: string;
+  endTime: string;
+  restBreakMinutes?: number;
+  cleaningBreakMinutes?: number;
+  shiftWorkingMinutes: number;
+  totalWorkingMinutesRef: number;
   isActive: boolean;
   sortOrder: number;
 }
@@ -65,15 +67,18 @@ export interface MachineShiftRow {
   date: string;
   shift: ShiftType;
   line: string;
+  productionLine?: string; // Line alias
   srNo: number;
   machineId: string;
+  machineCode?: string;
   machineName: string;
   operatorName: string;
   itemId: string;
   itemName: string;
   operation: string;
   cycleTime: number;           // NEW: Snapshotted cycle time
-  totalWorkingMinutes: number; // NEW: Snapshotted working time (default 1350)
+  totalWorkingMinutes: number; // NEW: Snapshotted working time (default 1305)
+  shiftWorkingMinutes?: number;
   stdOutput: number;
   actualOutput: number;
   rework: number;

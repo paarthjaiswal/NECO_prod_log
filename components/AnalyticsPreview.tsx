@@ -7,11 +7,8 @@ import {
   Clock,
   Download,
   FileSpreadsheet,
-  Filter,
-  CheckCircle,
-  HelpCircle,
-  ChevronRight,
   Search,
+  Calendar,
 } from 'lucide-react';
 import { MachineMaster, MachineShiftRow, MasterDataState, ShiftType } from '@/types';
 import { INITIAL_MACHINES } from '@/data/initialData';
@@ -64,11 +61,59 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   }, [historicalLogs, rows]);
 
   // Filters
-  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week' | 'selected'>('all');
+  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | '7d' | 'week' | 'custom' | 'selected'>('all');
   const [shiftFilter, setShiftFilter] = useState<string>('all');
   const [lineFilter, setLineFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [hoveredMachineId, setHoveredMachineId] = useState<string | null>(null);
+
+  // Custom Date Range State (defaults to past 30 days up to today)
+  const [fromDate, setFromDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  });
+  const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [appliedCustomRange, setAppliedCustomRange] = useState<{ from: string; to: string } | null>(null);
+  const [isLoadingCustom, setIsLoadingCustom] = useState(false);
+
+  // Prevent invalid ranges: clamp toDate if fromDate > toDate, or vice versa
+  const handleFromDateChange = (val: string) => {
+    setFromDate(val);
+    if (toDate && val > toDate) {
+      setToDate(val);
+    }
+  };
+
+  const handleToDateChange = (val: string) => {
+    if (fromDate && val < fromDate) {
+      setToDate(fromDate);
+    } else {
+      setToDate(val);
+    }
+  };
+
+  // Fetch older dates outside initial cache from Supabase when "Apply" is clicked
+  const handleApplyCustomRange = async () => {
+    if (!fromDate || !toDate) return;
+    setAppliedCustomRange({ from: fromDate, to: toDate });
+    setIsLoadingCustom(true);
+    try {
+      const customLogs = await getAnalyticsLogs({ startDate: fromDate, endDate: toDate });
+      if (customLogs && customLogs.length > 0) {
+        setHistoricalLogs((prev) => {
+          const map = new Map<string, MachineShiftRow>();
+          prev.forEach((l) => map.set(l.id, l));
+          customLogs.forEach((l) => map.set(l.id, l));
+          return Array.from(map.values());
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load custom date range logs:', err);
+    } finally {
+      setIsLoadingCustom(false);
+    }
+  };
 
   // Sync internal filters with Header props when they change
   useEffect(() => {
@@ -85,7 +130,12 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     }
   }, [selectedShift]);
 
+  const prevSelectedDateRef = React.useRef(selectedDate);
   useEffect(() => {
+    if (prevSelectedDateRef.current === selectedDate) return;
+    prevSelectedDateRef.current = selectedDate;
+    if (dateFilter === 'custom') return; // Do not stomp active custom date range
+
     const today = new Date().toISOString().slice(0, 10);
     const yesterdayDate = new Date();
     yesterdayDate.setDate(yesterdayDate.getDate() - 1);
@@ -98,7 +148,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     } else if (selectedDate) {
       setDateFilter('selected');
     }
-  }, [selectedDate]);
+  }, [selectedDate, dateFilter]);
 
   // Compute filtered logs
   const filteredLogs = useMemo(() => {
@@ -116,7 +166,13 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       if (dateFilter === 'selected' && log.date !== selectedDate) return false;
       if (dateFilter === 'today' && log.date !== today) return false;
       if (dateFilter === 'yesterday' && log.date !== yesterday) return false;
-      if (dateFilter === 'week' && log.date < weekAgo) return false;
+      if ((dateFilter === 'week' || dateFilter === '7d') && log.date < weekAgo) return false;
+      if (dateFilter === 'custom') {
+        const from = appliedCustomRange?.from || fromDate;
+        const to = appliedCustomRange?.to || toDate;
+        if (from && log.date < from) return false;
+        if (to && log.date > to) return false;
+      }
 
       // Shift filter
       if (shiftFilter !== 'all' && !log.shift.startsWith(shiftFilter)) return false;
@@ -138,7 +194,54 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
       return true;
     });
-  }, [allLogs, dateFilter, selectedDate, shiftFilter, lineFilter, searchQuery]);
+  }, [allLogs, dateFilter, selectedDate, shiftFilter, lineFilter, searchQuery, appliedCustomRange, fromDate, toDate]);
+
+  // Dynamic Export Filename Builder that includes the active date range
+  const getExportFilename = (extension: 'csv' | 'xlsx', basePrefix: string = 'neco_production') => {
+    let datePart = dateFilter as string;
+    if (dateFilter === 'custom') {
+      const from = appliedCustomRange?.from || fromDate;
+      const to = appliedCustomRange?.to || toDate;
+      datePart = `${from}_to_${to}`;
+    } else if (dateFilter === 'today') {
+      datePart = new Date().toISOString().slice(0, 10);
+    } else if (dateFilter === 'yesterday') {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      datePart = d.toISOString().slice(0, 10);
+    } else if (dateFilter === 'week' || dateFilter === '7d') {
+      datePart = 'last_7_days';
+    } else if (dateFilter === 'selected' && selectedDate) {
+      datePart = selectedDate;
+    } else {
+      datePart = 'all_time';
+    }
+
+    const cleanLine = lineFilter !== 'all' ? `_${lineFilter.replace(/\s+/g, '_')}` : '';
+    const cleanShift = shiftFilter !== 'all' ? `_${shiftFilter.replace(/\s+/g, '_')}` : '';
+    return `${basePrefix}_logs_${datePart}${cleanLine}${cleanShift}.${extension}`;
+  };
+
+  const handleExportCSV = () => {
+    const from = dateFilter === 'custom' ? (appliedCustomRange?.from || fromDate) : undefined;
+    const to = dateFilter === 'custom' ? (appliedCustomRange?.to || toDate) : undefined;
+    const filename = getExportFilename('csv', 'neco_powerbi');
+    exportHistoricalToCSV(filteredLogs, from, to, filename);
+  };
+
+  const handleExportExcel = () => {
+    const from = dateFilter === 'custom' ? (appliedCustomRange?.from || fromDate) : undefined;
+    const to = dateFilter === 'custom' ? (appliedCustomRange?.to || toDate) : undefined;
+    const dateRangeLabel = from && to ? `${from}_to_${to}` : (dateFilter === 'selected' ? selectedDate : dateFilter);
+    const filename = getExportFilename('xlsx', 'neco_shift_report');
+    exportShiftToExcel(
+      filteredLogs,
+      dateRangeLabel,
+      shiftFilter !== 'all' ? shiftFilter : undefined,
+      lineFilter !== 'all' ? lineFilter : undefined,
+      filename
+    );
+  };
 
   // Aggregate KPIs
   const kpis = useMemo(() => {
@@ -160,9 +263,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
     const totalWorkingMins =
       activeLogs.reduce(
-        (acc, r) => acc + (Number(r.totalWorkingMinutes) || 1350),
+        (acc, r) => acc + (Number(r.totalWorkingMinutes) || 1305),
         0
-      ) || (activeLogs.length * 1350 || 1350);
+      ) || (activeLogs.length * 1305 || 1305);
 
     const totalBdPctOfWorking =
       totalWorkingMins > 0
@@ -286,7 +389,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             <button
               onClick={() => setDateFilter('all')}
               className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                dateFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               All Time
@@ -294,7 +397,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             <button
               onClick={() => setDateFilter('today')}
               className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === 'today' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                dateFilter === 'today' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               Today
@@ -302,30 +405,84 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             <button
               onClick={() => setDateFilter('yesterday')}
               className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === 'yesterday' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                dateFilter === 'yesterday' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               Yesterday
             </button>
             <button
-              onClick={() => setDateFilter('week')}
+              onClick={() => setDateFilter('7d')}
               className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === 'week' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                dateFilter === '7d' || dateFilter === 'week' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               Last 7 Days
+            </button>
+            <button
+              onClick={() => {
+                setDateFilter('custom');
+                if (!appliedCustomRange) {
+                  setAppliedCustomRange({ from: fromDate, to: toDate });
+                }
+              }}
+              className={`px-2.5 py-1 rounded font-medium transition-colors flex items-center gap-1.5 ${
+                dateFilter === 'custom' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Calendar className="w-3.5 h-3.5 text-slate-500" />
+              <span>Custom Range</span>
             </button>
             {selectedDate && selectedDate !== new Date().toISOString().slice(0, 10) && (
               <button
                 onClick={() => setDateFilter('selected')}
                 className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                  dateFilter === 'selected' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                  dateFilter === 'selected' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 Log Date ({selectedDate})
               </button>
             )}
           </div>
+
+          {/* Inline Custom Date Range Picker (Active when Custom Range is selected) */}
+          {dateFilter === 'custom' && (
+            <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded border border-slate-300 text-xs shadow-2xs">
+              <div className="flex items-center gap-1">
+                <span className="text-[11px] font-semibold text-slate-600 uppercase">From:</span>
+                <input
+                  type="date"
+                  aria-label="From Date"
+                  value={fromDate}
+                  max={toDate}
+                  onChange={(e) => handleFromDateChange(e.target.value)}
+                  className="px-2 py-0.5 text-xs bg-white border border-slate-300 rounded font-mono text-slate-800 focus:outline-none focus:border-slate-800"
+                />
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[11px] font-semibold text-slate-600 uppercase">To:</span>
+                <input
+                  type="date"
+                  aria-label="To Date"
+                  value={toDate}
+                  min={fromDate}
+                  onChange={(e) => handleToDateChange(e.target.value)}
+                  className="px-2 py-0.5 text-xs bg-white border border-slate-300 rounded font-mono text-slate-800 focus:outline-none focus:border-slate-800"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleApplyCustomRange}
+                disabled={isLoadingCustom || !fromDate || !toDate}
+                className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-semibold flex items-center gap-1 transition-colors shadow-2xs disabled:opacity-50"
+              >
+                {isLoadingCustom ? (
+                  <span>Loading...</span>
+                ) : (
+                  <span>Apply</span>
+                )}
+              </button>
+            </div>
+          )}
 
           {/* Shift Filter */}
           <select
@@ -334,9 +491,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             className="bg-white border border-slate-200 text-xs font-medium text-slate-700 rounded px-2.5 py-1.5 focus:outline-none focus:border-slate-800"
           >
             <option value="all">All Shifts</option>
-            <option value="Shift A">Shift A (6AM-2PM)</option>
-            <option value="Shift B">Shift B (2PM-10PM)</option>
-            <option value="Shift C">Shift C (10PM-6AM)</option>
+            <option value="Shift A">Shift A (7AM-3:30PM)</option>
+            <option value="Shift B">Shift B (3:30PM-12AM)</option>
+            <option value="Shift C">Shift C (12AM-7AM)</option>
           </select>
 
           {/* Production Line Filter */}
@@ -353,7 +510,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
           {/* Direct CSV / Excel Export for Power BI */}
           <button
-            onClick={() => exportHistoricalToCSV(filteredLogs)}
+            onClick={handleExportCSV}
             className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
             title="Download clean CSV table structured for Power BI desktop import"
           >
@@ -362,7 +519,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           </button>
 
           <button
-            onClick={() => exportShiftToExcel(filteredLogs, 'Executive_Report')}
+            onClick={handleExportExcel}
             className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
@@ -471,7 +628,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
             <span className="text-slate-500">Working Time Loss:</span>
             <span className="font-mono font-bold text-amber-800">
-              {kpis.totalBdPctOfWorking}% of 1350m
+              {kpis.totalBdPctOfWorking}% of 1305m
             </span>
           </div>
         </div>
@@ -509,7 +666,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               {machineMetrics.map((m, idx) => {
                 const maxScale = Math.max(220, ...machineMetrics.map((item) => Math.max(item.std, item.act)));
                 const actWidth = Math.min(100, (m.act / maxScale) * 100);
-                const stdWidth = Math.min(100, (m.std / maxScale) * 100);
+                const _stdWidth = Math.min(100, (m.std / maxScale) * 100);
 
                 return (
                   <div
@@ -635,7 +792,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   <div className="flex items-center justify-end gap-1.5 text-[10px]">
                     <span className="text-slate-600 font-semibold">{noDiscPct}% share</span>
                     <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.noDisc}% of 1350m</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.noDisc}% of 1305m</span>
                   </div>
                 </div>
               </div>
@@ -653,7 +810,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   <div className="flex items-center justify-end gap-1.5 text-[10px]">
                     <span className="text-slate-600 font-semibold">{changePct}% share</span>
                     <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.change}% of 1350m</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.change}% of 1305m</span>
                   </div>
                 </div>
               </div>
@@ -671,7 +828,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   <div className="flex items-center justify-end gap-1.5 text-[10px]">
                     <span className="text-slate-600 font-semibold">{powerPct}% share</span>
                     <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.power}% of 1350m</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.power}% of 1305m</span>
                   </div>
                 </div>
               </div>
@@ -689,7 +846,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   <div className="flex items-center justify-end gap-1.5 text-[10px]">
                     <span className="text-slate-600 font-semibold">{operatorPct}% share</span>
                     <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.operator}% of 1350m</span>
+                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.operator}% of 1305m</span>
                   </div>
                 </div>
               </div>
@@ -753,7 +910,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             </div>
 
             <button
-              onClick={() => exportHistoricalToCSV(filteredLogs)}
+              onClick={handleExportCSV}
               className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded flex items-center gap-1.5"
             >
               <Download className="w-3.5 h-3.5" />
@@ -797,8 +954,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   const bdPct =
                     row.breakdownPct?.totalBdPct != null && row.breakdownPct.totalBdPct > 0
                       ? `${row.breakdownPct.totalBdPct}%`
-                      : bdTotal > 0 && (row.totalWorkingMinutes || 1350) > 0
-                      ? `${((bdTotal / (row.totalWorkingMinutes || 1350)) * 100).toFixed(1)}%`
+                      : bdTotal > 0 && (row.totalWorkingMinutes || 1305) > 0
+                      ? `${((bdTotal / (row.totalWorkingMinutes || 1305)) * 100).toFixed(1)}%`
                       : '0.0%';
 
                   return (

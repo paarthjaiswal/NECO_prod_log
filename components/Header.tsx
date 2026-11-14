@@ -166,20 +166,18 @@ export const Header: React.FC<HeaderProps> = ({
                 <span>Analytics & Power BI</span>
               </button>
 
-              {/* Master Data Tab: Only shown for Unit Head / Admin */}
-              {isAdmin && (
-                <button
-                  onClick={() => setActiveTab('settings')}
-                  className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors ${
-                    activeTab === 'settings'
-                      ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-900'
-                  }`}
-                >
-                  <Sliders className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-                  <span>Master Data</span>
-                </button>
-              )}
+              {/* Master Data Tab: Open for all users (destructive actions restricted inside) */}
+              <button
+                onClick={() => setActiveTab('settings')}
+                className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-semibold whitespace-nowrap transition-colors ${
+                  activeTab === 'settings'
+                    ? 'bg-slate-800 text-emerald-400 shadow-xs border border-slate-700/80'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-900'
+                }`}
+              >
+                <Sliders className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+                <span>Master Data</span>
+              </button>
             </nav>
           </div>
 

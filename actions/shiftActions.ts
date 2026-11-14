@@ -1,9 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { createAdminClient } from "@/utils/supabase/server";
 import { getIsUnitHead } from "@/actions/authActions";
 import { evaluateShiftLock } from "@/services/storageService";
+import { getFallbackFactoryTimeContext } from "@/utils/factoryTime";
 import {
   MachineShiftRow,
   MachineMaster,
@@ -93,6 +95,8 @@ export interface DbShiftRow {
   display_name: string;
   start_time: string;
   end_time: string;
+  rest_break_minutes?: number;
+  cleaning_break_minutes?: number;
   shift_working_minutes: number;
   total_working_minutes_ref: number;
   is_active: boolean;
@@ -113,8 +117,62 @@ export interface DbCycleTimeRow {
 // STEP 2A & 2B: INTERNAL DATA TRANSLATORS (SQL <-> UI MAPPERS)
 // ============================================================================
 
+function formatTime12(t?: string): string {
+  if (!t) return "";
+  const parts = t.trim().split(":");
+  const h = parseInt(parts[0], 10);
+  if (isNaN(h)) return t;
+  const m = parseInt(parts[1] || "0", 10);
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  const mStr = m > 0 ? `:${String(m).padStart(2, "0")}` : "";
+  return `${h12}${mStr}${ampm}`;
+}
+
+function extractShiftCode(shiftStr: string): string {
+  if (!shiftStr) return "Shift A";
+  const lower = shiftStr.toLowerCase();
+  if (lower.includes("shift a") || lower.includes("6am") || lower.includes("7am")) return "Shift A";
+  if (lower.includes("shift b") || lower.includes("2pm") || lower.includes("3:30pm") || lower.includes("15:30")) return "Shift B";
+  if (lower.includes("shift c") || lower.includes("10pm") || lower.includes("12am")) return "Shift C";
+  const match = shiftStr.match(/^(Shift\s+[A-Za-z0-9]+)/i);
+  return match ? match[1] : shiftStr.trim();
+}
+
+function resolveCleanShiftDisplayName(
+  code: string,
+  rawDisplayName: string,
+  startTime?: string,
+  endTime?: string
+): ShiftType {
+  if (startTime && endTime) {
+    const s = formatTime12(startTime);
+    const e = formatTime12(endTime);
+    if (
+      rawDisplayName.includes("6AM-2PM") ||
+      rawDisplayName.includes("2PM-10PM") ||
+      rawDisplayName.includes("10PM-6AM") ||
+      rawDisplayName === code
+    ) {
+      return `${code} (${s}-${e})` as ShiftType;
+    }
+    return rawDisplayName as ShiftType;
+  }
+  const lower = (rawDisplayName || "").toLowerCase();
+  if (lower.includes("6am-2pm") || lower === "shift a" || (lower.startsWith("shift a") && !lower.includes("7am"))) {
+    return "Shift A (7AM-3:30PM)";
+  }
+  if (lower.includes("2pm-10pm") || lower === "shift b" || (lower.startsWith("shift b") && !lower.includes("3:30pm"))) {
+    return "Shift B (3:30PM-12AM)";
+  }
+  if (lower.includes("10pm-6am") || lower === "shift c" || (lower.startsWith("shift c") && !lower.includes("12am"))) {
+    return "Shift C (12AM-7AM)";
+  }
+  return rawDisplayName as ShiftType;
+}
+
 function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
-  const totalWorking = Number(dbRow.total_working_minutes ?? 0);
+  const totalWorking = Number(dbRow.total_working_minutes ?? 1305);
   const noDisc = Number(dbRow.bd_no_disc ?? 0);
   const change = Number(dbRow.bd_change ?? 0);
   const power = Number(dbRow.bd_power ?? 0);
@@ -122,11 +180,14 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
   const totalBd = Number(
     dbRow.total_bd_minutes ?? noDisc + change + power + operator
   );
+  const rawShift = dbRow.shift ?? "Shift A";
+  const shiftCode = extractShiftCode(rawShift);
+  const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
 
   return {
     id: dbRow.id,
     date: dbRow.log_date,
-    shift: dbRow.shift as ShiftType,
+    shift: cleanShift,
     line: dbRow.line,
     srNo: Number(dbRow.sr_no ?? 0),
     machineId: dbRow.machine_id ?? "",
@@ -164,12 +225,16 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
  * because they are GENERATED ALWAYS AS ... STORED columns in PostgreSQL.
  */
 function mapUiRowToDbRow(uiRow: MachineShiftRow) {
+  const rawShift = uiRow.shift ?? "Shift A";
+  const shiftCode = extractShiftCode(rawShift);
+  const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
+
   return {
     id:
       uiRow.id ||
-      `${uiRow.date}_${uiRow.shift}_${uiRow.line}_${uiRow.machineId}`,
+      `${uiRow.date}_${cleanShift}_${uiRow.line}_${uiRow.machineId}`,
     log_date: uiRow.date,
-    shift: uiRow.shift,
+    shift: cleanShift,
     line: uiRow.line,
     sr_no: Number(uiRow.srNo) || 0,
     machine_id: uiRow.machineId,
@@ -179,7 +244,7 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     item_name: uiRow.itemName?.trim() ?? "",
     operation: uiRow.operation?.trim() ?? "",
     cycle_time: Number(uiRow.cycleTime) || 0,
-    total_working_minutes: Number(uiRow.totalWorkingMinutes) || 0,
+    total_working_minutes: Number(uiRow.totalWorkingMinutes) || 1305,
     std_output: Number(uiRow.stdOutput) || 0,
     actual_output: Number(uiRow.actualOutput) || 0,
     rework: Number(uiRow.rework) || 0,
@@ -218,24 +283,90 @@ function mapDbLineToUi(dbLine: DbProductionLineRow): ProductionLineMaster {
     id: dbLine.id,
     name: dbLine.name,
     description: dbLine.description ?? "",
-    dailyWorkingMinutes: Number(dbLine.daily_working_minutes ?? 1350),
+    dailyWorkingMinutes: Number(dbLine.daily_working_minutes ?? 1305),
     isActive: Boolean(dbLine.is_active),
     sortOrder: Number(dbLine.sort_order ?? 0),
   };
 }
 
 function mapDbShiftToUi(dbShift: DbShiftRow): ShiftMaster {
+  const cleanDisplayName = resolveCleanShiftDisplayName(
+    dbShift.shift_code,
+    dbShift.display_name,
+    dbShift.start_time,
+    dbShift.end_time
+  );
+
   return {
     id: dbShift.id,
     shiftCode: dbShift.shift_code,
-    displayName: dbShift.display_name as ShiftType,
+    displayName: cleanDisplayName,
     startTime: dbShift.start_time,
     endTime: dbShift.end_time,
-    shiftWorkingMinutes: Number(dbShift.shift_working_minutes ?? 450),
-    totalWorkingMinutesRef: Number(dbShift.total_working_minutes_ref ?? 1350),
+    restBreakMinutes: Number(dbShift.rest_break_minutes ?? 30),
+    cleaningBreakMinutes: Number(dbShift.cleaning_break_minutes ?? 15),
+    shiftWorkingMinutes: Number(dbShift.shift_working_minutes ?? 465),
+    totalWorkingMinutesRef: Number(dbShift.total_working_minutes_ref ?? 1305),
     isActive: Boolean(dbShift.is_active),
     sortOrder: Number(dbShift.sort_order ?? 0),
   };
+}
+
+async function syncDefaultShiftTimings(
+  supabase: ReturnType<typeof createAdminClient>,
+  dbShifts: DbShiftRow[]
+) {
+  const needsUpdate = dbShifts.some(
+    (s) =>
+      (s.shift_code === "Shift A" && (s.start_time?.startsWith("06:") || s.display_name?.includes("6AM-2PM"))) ||
+      (s.shift_code === "Shift B" && (s.start_time?.startsWith("14:") || s.display_name?.includes("2PM-10PM"))) ||
+      (s.shift_code === "Shift C" && (s.start_time?.startsWith("22:") || s.display_name?.includes("10PM-6AM")))
+  );
+
+  if (!needsUpdate) return;
+
+  const standardUpdates = [
+    {
+      shift_code: "Shift A",
+      display_name: "Shift A (7AM-3:30PM)",
+      start_time: "07:00:00",
+      end_time: "15:30:00",
+      shift_working_minutes: 465,
+    },
+    {
+      shift_code: "Shift B",
+      display_name: "Shift B (3:30PM-12AM)",
+      start_time: "15:30:00",
+      end_time: "00:00:00",
+      shift_working_minutes: 465,
+    },
+    {
+      shift_code: "Shift C",
+      display_name: "Shift C (12AM-7AM)",
+      start_time: "00:00:00",
+      end_time: "07:00:00",
+      shift_working_minutes: 375,
+    },
+  ];
+
+  for (const std of standardUpdates) {
+    try {
+      await supabase
+        .from("shifts")
+        .update(std)
+        .eq("shift_code", std.shift_code);
+
+      const found = dbShifts.find((s) => s.shift_code === std.shift_code);
+      if (found) {
+        found.display_name = std.display_name;
+        found.start_time = std.start_time;
+        found.end_time = std.end_time;
+        found.shift_working_minutes = std.shift_working_minutes;
+      }
+    } catch (e) {
+      console.warn(`Could not update shift timing for ${std.shift_code}:`, e);
+    }
+  }
 }
 
 function mapDbCycleTimeToUi(dbCt: DbCycleTimeRow): MachineItemCycleTime {
@@ -272,7 +403,7 @@ function hydrateShiftSheetRows(
         ...uiRow,
         srNo: index + 1,
         // Ensure totalWorkingMinutes always reflects the single shift's DB duration
-        totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes,
+        totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes || 1305,
       };
     }
 
@@ -289,7 +420,7 @@ function hydrateShiftSheetRows(
       itemName: "",
       operation: "",
       cycleTime: 0,
-      totalWorkingMinutes: shiftWorkingMinutes,
+      totalWorkingMinutes: shiftWorkingMinutes || 1305,
       stdOutput: 0,
       actualOutput: 0,
       rework: 0,
@@ -322,248 +453,177 @@ function hydrateShiftSheetRows(
  * Falls back to computing via Node server Intl.DateTimeFormat with public.shifts.
  */
 export async function getFactoryTimeContext(): Promise<FactoryTimeContext> {
-  const supabase = createAdminClient();
+  const supabase = createAdminClient();
 
-  try {
-    const { data, error } = await supabase.rpc("get_factory_time_context");
-    if (!error && data) {
-      const rpcRow = (Array.isArray(data) ? data[0] : data) as Record<
-        string,
-        unknown
-      > | null;
-      const serverNow = rpcRow?.server_now_ist ?? rpcRow?.serverNowIst;
-      const actDate = rpcRow?.active_date ?? rpcRow?.activeDate;
-      const selShift = rpcRow?.auto_selected_shift ?? rpcRow?.autoSelectedShift;
-      if (serverNow && actDate && selShift) {
-        return {
-          serverNowIst: String(serverNow),
-          activeDate: String(actDate),
-          autoSelectedShift: String(selShift) as ShiftType,
-        };
-      }
-    }
-  } catch {
-    // RPC not available yet, fall back to Node server computation below
-  }
-
-  // Node server IST fallback
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  });
-
-  const parts = formatter.formatToParts(now);
-  const getPart = (type: string) =>
-    parts.find((p) => p.type === type)?.value || "";
-  const year = getPart("year");
-  const month = getPart("month");
-  const day = getPart("day");
-  const parsedHour = parseInt(getPart("hour"), 10);
-  const hour = Number.isNaN(parsedHour) ? 0 : parsedHour % 24;
-  const parsedMinute = parseInt(getPart("minute"), 10);
-  const minute = Number.isNaN(parsedMinute) ? 0 : parsedMinute;
-  const second = getPart("second");
-
-  const todayStr = `${year}-${month}-${day}`;
-  const serverNowIst = `${todayStr}T${String(hour).padStart(2, "0")}:${String(
-    minute
-  ).padStart(2, "0")}:${second}+05:30`;
-
-  // Fetch active shifts to determine schedule
-  let shifts: ShiftMaster[] = [];
-  try {
-    const { data: dbShifts } = await supabase
-      .from("shifts")
-      .select("*")
-      .eq("is_active", true)
-      .order("sort_order", { ascending: true });
-    if (dbShifts && dbShifts.length > 0) {
-      shifts = dbShifts.map(mapDbShiftToUi);
-    }
-  } catch {
-    // ignore
-  }
-
-  const timeMinutes = hour * 60 + minute;
-
-  // Calculate yesterday in IST for overnight shift C (00:00 - 05:59)
-  const prevDateObj = new Date(
-    Date.UTC(parseInt(year, 10), parseInt(month, 10) - 1, parseInt(day, 10) - 1)
-  );
-  const yesterdayStr = prevDateObj.toISOString().slice(0, 10);
-
-  if (shifts.length > 0) {
-    // Match against shift records
-    for (const s of shifts) {
-      const [sh, sm] = (s.startTime || "00:00").split(":").map(Number);
-      const [eh, em] = (s.endTime || "00:00").split(":").map(Number);
-      const startMins = (sh || 0) * 60 + (sm || 0);
-      const endMins = (eh || 0) * 60 + (em || 0);
-
-      if (endMins > startMins) {
-        // Normal daytime shift (e.g., 06:00 - 14:00 or 14:00 - 22:00)
-        if (timeMinutes >= startMins && timeMinutes < endMins) {
-          return {
-            serverNowIst,
-            activeDate: todayStr,
-            autoSelectedShift: s.displayName,
-          };
-        }
-      } else {
-        // Overnight shift (e.g. 22:00 - 06:00)
-        if (timeMinutes >= startMins) {
-          // Started today, ends tomorrow morning
-          return {
-            serverNowIst,
-            activeDate: todayStr,
-            autoSelectedShift: s.displayName,
-          };
-        } else if (timeMinutes < endMins) {
-          // Started yesterday night
-          return {
-            serverNowIst,
-            activeDate: yesterdayStr,
-            autoSelectedShift: s.displayName,
-          };
-        }
-      }
-    }
-  }
-
-  // Standard fallback timings if no custom shifts matched:
-  // Shift A: 06:00 - 14:00
-  // Shift B: 14:00 - 22:00
-  // Shift C: 22:00 - 06:00 (overnight)
-  if (timeMinutes >= 360 && timeMinutes < 840) {
-    return {
-      serverNowIst,
-      activeDate: todayStr,
-      autoSelectedShift: "Shift A (6AM-2PM)",
-    };
-  } else if (timeMinutes >= 840 && timeMinutes < 1320) {
-    return {
-      serverNowIst,
-      activeDate: todayStr,
-      autoSelectedShift: "Shift B (2PM-10PM)",
-    };
-  } else if (timeMinutes >= 1320) {
-    return {
-      serverNowIst,
-      activeDate: todayStr,
-      autoSelectedShift: "Shift C (10PM-6AM)",
-    };
-  } else {
-    // 00:00 - 05:59 -> Shift C belonging to yesterday's date
-    return {
-      serverNowIst,
-      activeDate: yesterdayStr,
-      autoSelectedShift: "Shift C (10PM-6AM)",
-    };
-  }
-}
-
-/**
- * Enforces server-side shift edit window.
- * 1. If Unit Head is logged in, immediately allows edit.
- * 2. Attempts Supabase RPC 'check_shift_edit_window'.
- * 3. Falls back to evaluateShiftLock using server time and shifts master.
- * Throws Error if locked.
- */
-async function assertShiftEditable(logDate: string, shift: string) {
-  const isAdmin = await getIsUnitHead();
-  if (isAdmin) {
-    return;
-  }
-
-  const supabase = createAdminClient();
-
-  let rpcLockError: string | null = null;
-  let rpcHandled = false;
-
-  try {
-    const { data, error } = await supabase.rpc("check_shift_edit_window", {
-      p_log_date: logDate,
-      p_shift: shift,
-      p_buffer_minutes: 30,
-    });
-
-    if (!error && data !== null && data !== undefined) {
-      const rpcRow = Array.isArray(data) ? data[0] : data;
-      if (typeof rpcRow === "boolean") {
-        rpcHandled = true;
-        if (!rpcRow) {
-          rpcLockError = "Shift is locked — the editing window has closed.";
-        }
-      } else if (rpcRow && typeof rpcRow === "object") {
-        const record = rpcRow as Record<string, unknown>;
-        const isEditable = record.is_editable ?? record.isEditable;
-        if (typeof isEditable === "boolean") {
-          rpcHandled = true;
-          if (!isEditable) {
-            rpcLockError =
-              typeof record.reason === "string" && record.reason
-                ? record.reason
-                : "Shift is locked — the editing window has closed.";
-          }
-        }
-      }
-    }
-  } catch {
-    // RPC not created or failed, proceed to evaluateShiftLock fallback
-  }
-
-  if (rpcLockError) {
-    throw new Error(rpcLockError);
-  }
-  if (rpcHandled) {
-    return;
-  }
-
-  // Fallback: evaluateShiftLock using server time context
-  const timeContext = await getFactoryTimeContext();
-  let shiftsMaster: ShiftMaster[] = [];
-  try {
-    const { data: dbShifts } = await supabase
-      .from("shifts")
-      .select("*")
-      .eq("is_active", true)
-      .order("sort_order", { ascending: true });
-    if (dbShifts) {
-      shiftsMaster = dbShifts.map(mapDbShiftToUi);
-    }
-  } catch {
-    // ignore
-  }
-
-  const lockInfo = evaluateShiftLock(
-    logDate,
-    shift,
-    shiftsMaster,
-    timeContext.serverNowIst,
-    false,
-    30
-  );
-
-  if (!lockInfo.isEditable) {
-    throw new Error(lockInfo.reason || "Shift is locked — the editing window has closed.");
-  }
-}
-
-/**
- * Enforces Unit Head authorization for all Master Data modifications.
- */
-async function assertUnitHead() {
-  const isHead = await getIsUnitHead();
-  if (!isHead) {
-    throw new Error("Unauthorized: Only the Unit Head can modify Master Data.");
+  try {
+    const { data, error } = await supabase.rpc("get_factory_time_context");
+    if (!error && data) {
+      const rpcRow = (Array.isArray(data) ? data[0] : data) as Record<
+        string,
+        unknown
+      > | null;
+      const serverNow = rpcRow?.server_now_ist ?? rpcRow?.serverNowIst;
+      const actDate = rpcRow?.active_date ?? rpcRow?.activeDate;
+      const selShift = rpcRow?.auto_selected_shift ?? rpcRow?.autoSelectedShift;
+      if (serverNow && actDate && selShift) {
+        return {
+          serverNowIst: String(serverNow),
+          activeDate: String(actDate),
+          autoSelectedShift: resolveCleanShiftDisplayName(
+            extractShiftCode(String(selShift)),
+            String(selShift)
+          ) as ShiftType,
+        };
+      }
+    }
+  } catch {
+    // RPC not available yet, fall back to Node server computation below
   }
+
+  // Fetch active shifts to determine schedule if available
+  let shifts: ShiftMaster[] = [];
+  try {
+    const { data: dbShifts } = await supabase
+      .from("shifts")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+    if (dbShifts && dbShifts.length > 0) {
+      shifts = dbShifts.map(mapDbShiftToUi);
+    }
+  } catch {
+    // ignore
+  }
+
+  // Pure fallback resolver mirroring PostgreSQL get_factory_time_context()
+  return getFallbackFactoryTimeContext(shifts);
+}
+
+// Verifies Unit Head cookie/session (adjust cookie name if yours differs)
+async function isUnitHeadSession(): Promise<boolean> {
+  const cookieStore = await cookies();
+  if (cookieStore.get("unit_head_auth")?.value === "true") {
+    return true;
+  }
+  return await getIsUnitHead();
+}
+
+async function assertUnitHead(actionLabel: string = "modify Master Data") {
+  const isAdmin = await isUnitHeadSession();
+  if (!isAdmin) {
+    throw new Error(`Unauthorized: Unit Head privileges required to ${actionLabel}.`);
+  }
+}
+
+async function runLocalShiftLockCheck(
+  logDate: string,
+  shift: string,
+  bufferMinutes: number = 30
+): Promise<{ is_editable: boolean; reason?: string | null }> {
+  const supabase = createAdminClient();
+  const timeContext = await getFactoryTimeContext();
+  let shiftsMaster: ShiftMaster[] = [];
+  try {
+    const { data: dbShifts } = await supabase
+      .from("shifts")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+    if (dbShifts) shiftsMaster = dbShifts.map(mapDbShiftToUi);
+  } catch {
+    // ignore
+  }
+
+  const lockInfo = evaluateShiftLock(
+    logDate,
+    shift,
+    shiftsMaster,
+    timeContext.serverNowIst,
+    false,
+    bufferMinutes
+  );
+
+  return {
+    is_editable: lockInfo.isEditable,
+    reason: lockInfo.reason ?? null,
+  };
+}
+
+async function assertShiftEditable(logDate: string, shift: string) {
+  const isAdmin = await isUnitHeadSession();
+  if (isAdmin) return; // Unit Head can override past/future shift locks
+
+  const shiftCode = extractShiftCode(shift);
+  const supabase = createAdminClient();
+  const { data, error } = await supabase.rpc("check_shift_edit_window", {
+    p_log_date: logDate,
+    p_shift: shiftCode,
+    p_buffer_minutes: 30,
+  });
+
+  if (error) {
+    const localCheck = await runLocalShiftLockCheck(logDate, shiftCode, 30);
+    if (!localCheck.is_editable) {
+      throw new Error(localCheck.reason || "This shift is locked for editing.");
+    }
+    return;
+  }
+
+  const windowCheck = (Array.isArray(data) ? data[0] : data) as
+    | { is_editable?: boolean; reason?: string }
+    | undefined;
+
+  if (!windowCheck?.is_editable) {
+    // If reason mentions "not found" (e.g. legacy shift identifier), fall back to local shift lock evaluator
+    if (windowCheck?.reason && windowCheck.reason.toLowerCase().includes("not found")) {
+      const localCheck = await runLocalShiftLockCheck(logDate, shiftCode, 30);
+      if (!localCheck.is_editable) {
+        throw new Error(localCheck.reason || "This shift is locked for editing.");
+      }
+      return;
+    }
+    throw new Error(windowCheck?.reason || "This shift is locked for editing.");
+  }
+}
+
+/**
+ * Server action wrapper checking whether a shift is currently editable.
+ * Bypassed if caller has Unit Head session.
+ */
+export async function checkShiftEditWindow(
+  logDate: string,
+  shift: string,
+  bufferMinutes: number = 30
+): Promise<{ is_editable: boolean; reason?: string | null }> {
+  const isAdmin = await isUnitHeadSession();
+  if (isAdmin) {
+    return { is_editable: true };
+  }
+
+  const shiftCode = extractShiftCode(shift);
+  const supabase = createAdminClient();
+  const { data, error } = await supabase.rpc("check_shift_edit_window", {
+    p_log_date: logDate,
+    p_shift: shiftCode,
+    p_buffer_minutes: bufferMinutes,
+  });
+
+  if (error) {
+    return await runLocalShiftLockCheck(logDate, shiftCode, bufferMinutes);
+  }
+
+  const windowCheck = (Array.isArray(data) ? data[0] : data) as
+    | { is_editable?: boolean; reason?: string | null }
+    | undefined;
+
+  if (windowCheck?.reason && windowCheck.reason.toLowerCase().includes("not found")) {
+    return await runLocalShiftLockCheck(logDate, shiftCode, bufferMinutes);
+  }
+
+  return {
+    is_editable: Boolean(windowCheck?.is_editable),
+    reason: windowCheck?.reason ?? null,
+  };
 }
 
 /**
@@ -614,6 +674,15 @@ export async function getMasterData(): Promise<MasterDataState> {
   if (shiftsRes.error) throw new Error(shiftsRes.error.message);
   if (cycleTimesRes.error) throw new Error(cycleTimesRes.error.message);
 
+  const rawShifts = (shiftsRes.data as DbShiftRow[]) ?? [];
+  if (rawShifts.length > 0) {
+    try {
+      await syncDefaultShiftTimings(supabase, rawShifts);
+    } catch {
+      // ignore
+    }
+  }
+
   return {
     machines: (machinesRes.data as DbMachineRow[]).map(mapDbMachineToUi),
     operators: (operatorsRes.data as DbOperatorRow[]).map((op) => op.name),
@@ -621,9 +690,7 @@ export async function getMasterData(): Promise<MasterDataState> {
     lines: linesRes.data
       ? (linesRes.data as DbProductionLineRow[]).map(mapDbLineToUi)
       : [],
-    shifts: shiftsRes.data
-      ? (shiftsRes.data as DbShiftRow[]).map(mapDbShiftToUi)
-      : [],
+    shifts: rawShifts.map(mapDbShiftToUi),
     cycleTimes: cycleTimesRes.data
       ? (cycleTimesRes.data as DbCycleTimeRow[]).map(mapDbCycleTimeToUi)
       : [],
@@ -640,6 +707,9 @@ export async function getShiftSheetRows(
   line: string
 ): Promise<MachineShiftRow[]> {
   const supabase = createAdminClient();
+  const shiftCode = shift.startsWith("Shift")
+    ? shift.split(" ")[0] + " " + shift.split(" ")[1]
+    : shift;
 
   const [machinesRes, logsRes, shiftConfigRes] = await Promise.all([
     supabase
@@ -658,7 +728,7 @@ export async function getShiftSheetRows(
     supabase
       .from("shifts")
       .select("shift_working_minutes")
-      .or(`display_name.eq."${shift}",shift_code.eq."${shift}"`)
+      .or(`display_name.eq."${shift}",shift_code.eq."${shift}",shift_code.eq."${shiftCode}"`)
       .maybeSingle(),
   ]);
 
@@ -666,7 +736,7 @@ export async function getShiftSheetRows(
   if (logsRes.error) throw new Error(logsRes.error.message);
   if (shiftConfigRes.error) throw new Error(shiftConfigRes.error.message);
 
-  const dbShiftMinutes = Number(shiftConfigRes.data?.shift_working_minutes ?? 0);
+  const dbShiftMinutes = Number(shiftConfigRes.data?.shift_working_minutes ?? 1305);
 
   return hydrateShiftSheetRows(
     machinesRes.data as DbMachineRow[],
@@ -678,11 +748,80 @@ export async function getShiftSheetRows(
   );
 }
 
+// ============================================================================
+// HELPER: Auto-upsert Machine × Item × Operation cycle time mappings
+// ============================================================================
+
+async function syncMachineItemCycleTimes(
+  supabase: ReturnType<typeof createAdminClient>,
+  rows: MachineShiftRow[]
+) {
+  const validPairs = new Map<
+    string,
+    {
+      id?: string;
+      machine_id: string;
+      item_id: string;
+      operation: string;
+      cycle_time: number;
+      is_active?: boolean;
+      updated_at: string;
+    }
+  >();
+
+  for (const row of rows) {
+    const ct = Number(row.cycleTime);
+    const op = row.operation?.trim();
+    if (row.machineId && row.itemId && op && ct > 0) {
+      const key = `${row.machineId}::${row.itemId}::${op}`;
+      validPairs.set(key, {
+        id: `ct_${row.machineId}_${row.itemId}_${op.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+        machine_id: row.machineId,
+        item_id: row.itemId,
+        operation: op,
+        cycle_time: ct,
+        is_active: true,
+        updated_at: new Date().toISOString(),
+      });
+    }
+  }
+
+  if (validPairs.size === 0) return;
+
+  const { error } = await supabase
+    .from("machine_item_cycle_times")
+    .upsert(Array.from(validPairs.values()), {
+      onConflict: "machine_id,item_id,operation",
+    });
+
+  if (error) {
+    // If the database id column has an integer/serial constraint, retry omitting the string id
+    const withoutId = Array.from(validPairs.values()).map((p) => ({
+      machine_id: p.machine_id,
+      item_id: p.item_id,
+      operation: p.operation,
+      cycle_time: p.cycle_time,
+      is_active: p.is_active,
+      updated_at: p.updated_at,
+    }));
+    const retry = await supabase
+      .from("machine_item_cycle_times")
+      .upsert(withoutId, {
+        onConflict: "machine_id,item_id,operation",
+      });
+    if (retry.error) {
+      console.error("Failed to auto-sync machine_item_cycle_times:", retry.error.message);
+    }
+  }
+}
+
 /**
  * ACTION 3: Batch Save Shift Sheet (DailyShiftSheet.tsx)
  */
 export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
   if (!rows || rows.length === 0) return { success: true, count: 0, rows: [] };
+
+  const isAdmin = await isUnitHeadSession();
 
   // Enforce edit-window check for every unique (date, shift) pair in payload
   const seenKeys = new Set<string>();
@@ -695,7 +834,15 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
   }
 
   const supabase = createAdminClient();
-  const dbPayloads = rows.map(mapUiRowToDbRow);
+  const dbPayloads = rows.map((r) => {
+    const payload = mapUiRowToDbRow(r);
+    if (!isAdmin) {
+      const ct = Number(payload.cycle_time) || 0;
+      const totalWorking = Number(payload.total_working_minutes) || 0;
+      payload.std_output = ct > 0 ? Math.floor(totalWorking / ct) : 0;
+    }
+    return payload;
+  });
 
   const { data, error } = await supabase
     .from("shift_logs")
@@ -705,6 +852,9 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
     .select();
 
   if (error) throw new Error(error.message);
+
+  // Auto-sync valid Machine × Item × Operation cycle times in background
+  await syncMachineItemCycleTimes(supabase, rows);
 
   revalidatePath("/");
   return {
@@ -718,10 +868,17 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
  * ACTION 4: Single Machine Kiosk Save (OperatorKiosk.tsx)
  */
 export async function updateSingleMachineLog(row: MachineShiftRow) {
+  const isAdmin = await isUnitHeadSession();
   await assertShiftEditable(row.date, row.shift);
 
   const supabase = createAdminClient();
   const dbPayload = mapUiRowToDbRow(row);
+
+  if (!isAdmin) {
+    const ct = Number(dbPayload.cycle_time) || 0;
+    const totalWorking = Number(dbPayload.total_working_minutes) || 0;
+    dbPayload.std_output = ct > 0 ? Math.floor(totalWorking / ct) : 0;
+  }
 
   const { data, error } = await supabase
     .from("shift_logs")
@@ -732,6 +889,9 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
     .single();
 
   if (error) throw new Error(error.message);
+
+  // Auto-sync valid Machine × Item × Operation cycle times in background
+  await syncMachineItemCycleTimes(supabase, [row]);
 
   revalidatePath("/");
   return {
@@ -745,21 +905,34 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
 // ============================================================================
 
 export async function upsertMachineMaster(
-  machine: MachineMaster,
+  machine: Partial<MachineMaster> & {
+    name: string;
+    code: string;
+    machineType?: string;
+    productionLine?: string;
+    sortOrder?: number;
+  },
   sortOrder?: number
 ) {
-  await assertUnitHead();
   const supabase = createAdminClient();
-  const fallbackSortOrder = parseInt(machine.id.replace(/\D/g, ""), 10) || 999;
+  const machineId =
+    machine.id ||
+    `m_${machine.code.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_")}_${Date.now()}`;
+  const fallbackSortOrder = parseInt(machineId.replace(/\D/g, ""), 10) || 999;
+  const line = machine.line ?? machine.productionLine ?? "Line 1";
+  const type = machine.type ?? machine.machineType ?? null;
 
   const payload: Partial<DbMachineRow> = {
-    id: machine.id,
+    id: machineId,
     name: machine.name.trim(),
     code: machine.code.trim(),
-    line: machine.line ?? "Line 1",
-    type: machine.type ?? null,
+    line,
+    type,
     status: machine.status ?? "active",
-    sort_order: typeof sortOrder === "number" ? sortOrder : fallbackSortOrder,
+    sort_order:
+      typeof sortOrder === "number"
+        ? sortOrder
+        : (machine.sortOrder ?? fallbackSortOrder),
   };
 
   const { data, error } = await supabase
@@ -771,11 +944,20 @@ export async function upsertMachineMaster(
   if (error) throw new Error(error.message);
 
   revalidatePath("/");
-  return mapDbMachineToUi(data as DbMachineRow);
+  const machineUi = mapDbMachineToUi(data as DbMachineRow);
+  return {
+    success: true,
+    machine: {
+      ...machineUi,
+      machineType: machineUi.type,
+      productionLine: machineUi.line,
+    },
+    ...machineUi,
+  };
 }
 
 export async function disableMachineMaster(machineId: string) {
-  await assertUnitHead();
+  await assertUnitHead("remove machines");
   const supabase = createAdminClient();
 
   const { error } = await supabase
@@ -788,15 +970,23 @@ export async function disableMachineMaster(machineId: string) {
   return { success: true };
 }
 
-export async function upsertItemMaster(item: ItemMaster) {
-  await assertUnitHead();
+export async function upsertItemMaster(
+  item: Partial<ItemMaster> & {
+    itemCode: string;
+    itemName: string;
+    operation: string;
+  }
+) {
   const supabase = createAdminClient();
+  const itemId =
+    item.id ||
+    `item_${item.itemCode.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_")}_${Date.now()}`;
 
   const { data, error } = await supabase
     .from("items")
     .upsert(
       {
-        id: item.id,
+        id: itemId,
         item_code: item.itemCode.trim(),
         item_name: item.itemName.trim(),
         operation: item.operation.trim(),
@@ -809,11 +999,16 @@ export async function upsertItemMaster(item: ItemMaster) {
   if (error) throw new Error(error.message);
 
   revalidatePath("/");
-  return mapDbItemToUi(data as DbItemRow);
+  const itemUi = mapDbItemToUi(data as DbItemRow);
+  return {
+    success: true,
+    item: itemUi,
+    ...itemUi,
+  };
 }
 
 export async function deleteItemMaster(itemId: string) {
-  await assertUnitHead();
+  await assertUnitHead("delete items");
   const supabase = createAdminClient();
   const { error } = await supabase.from("items").delete().eq("id", itemId);
 
@@ -823,21 +1018,29 @@ export async function deleteItemMaster(itemId: string) {
 }
 
 export async function addOperatorMaster(operatorName: string) {
-  await assertUnitHead();
   const supabase = createAdminClient();
   const cleanName = operatorName.trim();
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("operators")
-    .upsert({ name: cleanName, is_active: true }, { onConflict: "name" });
+    .upsert({ name: cleanName, is_active: true }, { onConflict: "name" })
+    .select()
+    .maybeSingle();
 
   if (error) throw new Error(error.message);
   revalidatePath("/");
-  return { success: true, name: cleanName };
+  return {
+    success: true,
+    name: cleanName,
+    operator: {
+      id: data?.id ?? `op_${Date.now()}`,
+      name: cleanName,
+    },
+  };
 }
 
 export async function removeOperatorMaster(operatorName: string) {
-  await assertUnitHead();
+  await assertUnitHead("remove operators");
   const supabase = createAdminClient();
   const { error } = await supabase
     .from("operators")
@@ -850,7 +1053,6 @@ export async function removeOperatorMaster(operatorName: string) {
 }
 
 export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
-  await assertUnitHead();
   const supabase = createAdminClient();
   const { error } = await supabase.from("machine_item_cycle_times").upsert(
     {
@@ -870,7 +1072,7 @@ export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
 }
 
 export async function deleteMachineItemCycleTime(id: number) {
-  await assertUnitHead();
+  await assertUnitHead("delete cycle times");
   const supabase = createAdminClient();
   const { error } = await supabase
     .from("machine_item_cycle_times")
@@ -883,14 +1085,14 @@ export async function deleteMachineItemCycleTime(id: number) {
 }
 
 export async function upsertProductionLine(line: ProductionLineMaster) {
-  await assertUnitHead();
+  await assertUnitHead("modify production line");
   const supabase = createAdminClient();
   const { error } = await supabase.from("production_lines").upsert(
     {
       id: line.id,
       name: line.name.trim(),
       description: line.description ?? "",
-      daily_working_minutes: Number(line.dailyWorkingMinutes) || 1350,
+      daily_working_minutes: Number(line.dailyWorkingMinutes) || 1305,
       is_active: line.isActive ?? true,
       sort_order: line.sortOrder ?? 99,
     },
@@ -903,7 +1105,7 @@ export async function upsertProductionLine(line: ProductionLineMaster) {
 }
 
 export async function upsertShiftMaster(shift: ShiftMaster) {
-  await assertUnitHead();
+  await assertUnitHead("modify shift timings or break minutes");
   const supabase = createAdminClient();
   const { error } = await supabase.from("shifts").upsert(
     {
@@ -912,7 +1114,10 @@ export async function upsertShiftMaster(shift: ShiftMaster) {
       display_name: shift.displayName.trim(),
       start_time: shift.startTime,
       end_time: shift.endTime,
-      shift_working_minutes: Number(shift.shiftWorkingMinutes) || 450,
+      rest_break_minutes: Number(shift.restBreakMinutes) || 30,
+      cleaning_break_minutes: Number(shift.cleaningBreakMinutes) || 15,
+      shift_working_minutes: Number(shift.shiftWorkingMinutes) || 465,
+      total_working_minutes_ref: Number(shift.totalWorkingMinutesRef) || 1305,
       is_active: shift.isActive ?? true,
       sort_order: shift.sortOrder ?? 99,
     },
@@ -925,7 +1130,7 @@ export async function upsertShiftMaster(shift: ShiftMaster) {
 }
 
 export async function deleteProductionLine(lineId: string) {
-  await assertUnitHead();
+  await assertUnitHead("delete production line");
   const supabase = createAdminClient();
   // Soft-delete so historical shift_logs on this line stay intact
   const { error } = await supabase
@@ -939,7 +1144,7 @@ export async function deleteProductionLine(lineId: string) {
 }
 
 export async function deleteShiftMaster(shiftId: string) {
-  await assertUnitHead();
+  await assertUnitHead("delete shift");
   const supabase = createAdminClient();
   // Soft-delete so historical shift_logs on this shift stay intact
   const { error } = await supabase
@@ -953,20 +1158,37 @@ export async function deleteShiftMaster(shiftId: string) {
 }
 
 export async function getAnalyticsLogs(
-  daysBack: number = 30
+  daysBackOrFilter: number | { startDate?: string; endDate?: string } = 30
 ): Promise<MachineShiftRow[]> {
   const supabase = createAdminClient();
 
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - daysBack);
-  const cutoffStr = cutoffDate.toISOString().split("T")[0];
+  let startDate: string | undefined;
+  let endDate: string | undefined;
 
-  const { data, error } = await supabase
+  if (typeof daysBackOrFilter === "object" && daysBackOrFilter !== null) {
+    startDate = daysBackOrFilter.startDate;
+    endDate = daysBackOrFilter.endDate;
+  } else {
+    const daysBack = typeof daysBackOrFilter === "number" ? daysBackOrFilter : 30;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - daysBack);
+    startDate = cutoffDate.toISOString().split("T")[0];
+  }
+
+  let query = supabase
     .from("shift_logs")
     .select("*")
-    .gte("log_date", cutoffStr)
     .order("log_date", { ascending: false })
     .order("sr_no", { ascending: true });
+
+  if (startDate) {
+    query = query.gte("log_date", startDate);
+  }
+  if (endDate) {
+    query = query.lte("log_date", endDate);
+  }
+
+  const { data, error } = await query;
 
   if (error) throw new Error(error.message);
   return (data as DbShiftLogRow[]).map(mapDbRowToUiRow);

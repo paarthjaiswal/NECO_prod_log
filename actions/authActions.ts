@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { createSessionClient } from "@/utils/supabase/server";
 
 export interface AuthActionResult {
@@ -33,6 +34,15 @@ export async function loginUnitHead(
       return { success: false, error: "Invalid Unit Head credentials." };
     }
 
+    const cookieStore = await cookies();
+    cookieStore.set("unit_head_auth", "true", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 7,
+    });
+
     revalidatePath("/");
     return { success: true };
   } catch (err) {
@@ -48,6 +58,10 @@ export async function logoutUnitHead(): Promise<AuthActionResult> {
   try {
     const supabase = await createSessionClient();
     await supabase.auth.signOut();
+
+    const cookieStore = await cookies();
+    cookieStore.delete("unit_head_auth");
+
     revalidatePath("/");
     return { success: true };
   } catch (err) {
@@ -61,6 +75,11 @@ export async function logoutUnitHead(): Promise<AuthActionResult> {
  */
 export async function getIsUnitHead(): Promise<boolean> {
   try {
+    const cookieStore = await cookies();
+    if (cookieStore.get("unit_head_auth")?.value === "true") {
+      return true;
+    }
+
     const supabase = await createSessionClient();
     const {
       data: { user },

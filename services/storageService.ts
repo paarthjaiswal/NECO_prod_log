@@ -481,23 +481,27 @@ export function evaluateShiftLock(
   }
 
   // 2. Resolve Shift Timings
+  const lower = (shiftName || "").toLowerCase();
   const shift = shiftsMaster.find(
-    (s) => s.displayName === shiftName || s.shiftCode === shiftName
+    (s) =>
+      s.displayName === shiftName ||
+      s.shiftCode === shiftName ||
+      (s.shiftCode && lower.startsWith(s.shiftCode.toLowerCase())) ||
+      (s.displayName && lower.startsWith(s.displayName.toLowerCase()))
   );
 
-  let startTime = "06:00:00";
-  let endTime = "14:00:00";
-  const lower = (shiftName || "").toLowerCase();
+  let startTime = "07:00:00";
+  let endTime = "15:30:00";
 
   if (shift) {
     startTime = shift.startTime;
     endTime = shift.endTime;
-  } else if (lower.includes("b") || lower.includes("2pm")) {
-    startTime = "14:00:00";
-    endTime = "22:00:00";
-  } else if (lower.includes("c") || lower.includes("10pm")) {
-    startTime = "22:00:00";
-    endTime = "06:00:00";
+  } else if (lower.includes("b") || lower.includes("3:30pm") || lower.includes("2pm") || lower.includes("15:30")) {
+    startTime = "15:30:00";
+    endTime = "00:00:00";
+  } else if (lower.includes("c") || lower.includes("12am") || lower.includes("10pm")) {
+    startTime = "00:00:00";
+    endTime = "07:00:00";
   }
 
   const normalizeTime = (t: string) => {

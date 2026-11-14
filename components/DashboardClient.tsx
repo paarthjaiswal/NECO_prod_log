@@ -19,6 +19,7 @@ import {
   updateSingleMachineLog,
   getMasterData,
   getFactoryTimeContext,
+  checkShiftEditWindow,
 } from "@/actions/shiftActions";
 import {
   PRODUCTION_LINES,
@@ -97,7 +98,7 @@ export interface DashboardClientProps {
   initialDate: string;
   initialShift: ShiftType;
   initialLine: string;
-  isAdmin: boolean;
+  isAdmin?: boolean;
   serverNowIst: string;
 }
 
@@ -183,7 +184,34 @@ export default function DashboardClient({
     );
   }, [selectedDate, selectedShift, masterData.shifts, currentServerNowIst, isAdmin]);
 
-  const isShiftLocked = !shiftLock.isEditable;
+  const [isShiftLocked, setIsShiftLocked] = useState<boolean>(
+    !isAdmin && !shiftLock.isEditable
+  );
+
+  // Check editability whenever selectedDate or selectedShift changes via server action wrapper
+  useEffect(() => {
+    if (isAdmin) {
+      setIsShiftLocked(false);
+      return;
+    }
+
+    let isMounted = true;
+    checkShiftEditWindow(selectedDate, selectedShift, 30)
+      .then((windowResult) => {
+        if (isMounted) {
+          setIsShiftLocked(!isAdmin && !windowResult.is_editable);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setIsShiftLocked(!isAdmin && !shiftLock.isEditable);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedDate, selectedShift, isAdmin, shiftLock.isEditable]);
 
   // Holds ONLY the rows for the current Date + Shift + Line
   const [currentShiftRows, setCurrentShiftRows] =
@@ -210,13 +238,6 @@ export default function DashboardClient({
 
   const draftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
   const isFirstLoad = useRef(true);
-
-  // Redirect to sheet if non-admin tries to access settings
-  useEffect(() => {
-    if (activeTab === "settings" && !isAdmin) {
-      setActiveTab("sheet");
-    }
-  }, [activeTab, isAdmin]);
 
   const writeDraft = (rows: MachineShiftRow[]) => {
     try {
@@ -384,9 +405,16 @@ export default function DashboardClient({
       return;
     }
 
+    const sanitizedRows = rowsToSave.map((r) => ({
+      ...r,
+      shift: selectedShift || r.shift,
+      date: selectedDate || r.date,
+      line: selectedLine || r.line,
+    }));
+
     startTransition(async () => {
       try {
-        const result = await saveShiftSheetRows(rowsToSave);
+        const result = await saveShiftSheetRows(sanitizedRows);
         if (result.success && result.rows) {
           setCurrentShiftRows(result.rows);
           setHasUnsavedDraft(false);
@@ -416,9 +444,16 @@ export default function DashboardClient({
       return;
     }
 
+    const rowToSave: MachineShiftRow = {
+      ...singleRow,
+      shift: selectedShift || singleRow.shift,
+      date: selectedDate || singleRow.date,
+      line: selectedLine || singleRow.line,
+    };
+
     startTransition(async () => {
       try {
-        const result = await updateSingleMachineLog(singleRow);
+        const result = await updateSingleMachineLog(rowToSave);
         if (result.success && result.row) {
           const updatedRows = currentShiftRows.map((r) =>
             r.machineId === result.row.machineId ? result.row : r
@@ -515,9 +550,13 @@ export default function DashboardClient({
             masterData={masterData}
             onRowsChange={handleRowsChange}
             onSave={handleSaveShiftSheet}
+            onSaveShift={handleSaveShiftSheet}
             isSaving={isPending}
+            currentDate={selectedDate}
             selectedDate={selectedDate}
+            currentShift={selectedShift}
             selectedShift={selectedShift}
+            currentLine={selectedLine}
             selectedLine={selectedLine}
             hasUnsavedDraft={hasUnsavedDraft}
             onDiscardDraft={handleDiscardDraft}
@@ -526,7 +565,9 @@ export default function DashboardClient({
               if (machineId) setKioskMachineId(machineId);
               setActiveTab("kiosk");
             }}
+            onRefreshMasterData={handleRefreshMasterData}
             isAdmin={isAdmin}
+            isReadOnly={isShiftLocked}
             isShiftLocked={isShiftLocked}
             shiftLock={shiftLock}
           />
@@ -544,6 +585,7 @@ export default function DashboardClient({
             onSaveMachine={handleSaveSingleKioskRow}
             isSaving={isPending}
             isAdmin={isAdmin}
+            isReadOnly={isShiftLocked}
             isShiftLocked={isShiftLocked}
             shiftLock={shiftLock}
           />
@@ -559,11 +601,13 @@ export default function DashboardClient({
           />
         )}
 
-        {activeTab === "settings" && isAdmin && (
+        {activeTab === "settings" && (
           <MasterDataSettings
             masterData={masterData}
             onRefreshMasterData={handleRefreshMasterData}
             onResetAllDemoData={handleResetDemo}
+            isAdmin={isAdmin}
+            isReadOnly={isShiftLocked}
           />
         )}
       </main>

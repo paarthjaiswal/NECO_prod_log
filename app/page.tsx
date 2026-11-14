@@ -5,6 +5,7 @@ import {
   getFactoryTimeContext,
 } from "@/actions/shiftActions";
 import { getIsUnitHead } from "@/actions/authActions";
+import { getFallbackFactoryTimeContext } from "@/utils/factoryTime";
 import {
   PRODUCTION_LINES,
   INITIAL_MACHINES,
@@ -27,7 +28,7 @@ export default async function HomePage() {
 
   let initialRows: MachineShiftRow[] = [];
   let initialDate = "";
-  let initialShift: ShiftType = "Shift A (6AM-2PM)";
+  let initialShift: ShiftType = "Shift A (7AM-3:30PM)";
   let isAdmin = false;
   let serverNowIst = "";
 
@@ -67,27 +68,10 @@ export default async function HomePage() {
     );
     if (!initialDate || !serverNowIst) {
       // Safe fallback if timeContext failed completely
-      const now = new Date();
-      const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Kolkata",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hourCycle: "h23",
-      }).formatToParts(now);
-      const getPart = (type: string) =>
-        parts.find((p) => p.type === type)?.value || "";
-      const y = getPart("year");
-      const mo = getPart("month");
-      const da = getPart("day");
-      const ho = getPart("hour");
-      const mi = getPart("minute");
-      const se = getPart("second");
-      if (!initialDate) initialDate = `${y}-${mo}-${da}`;
-      if (!serverNowIst) serverNowIst = `${y}-${mo}-${da}T${ho}:${mi}:${se}+05:30`;
+      const fallbackCtx = getFallbackFactoryTimeContext();
+      if (!initialDate) initialDate = fallbackCtx.activeDate;
+      if (!serverNowIst) serverNowIst = fallbackCtx.serverNowIst;
+      initialShift = fallbackCtx.autoSelectedShift;
     }
     initialRows = generateDefaultShiftRows(
       initialDate,

@@ -22,7 +22,6 @@ import {
   calculateEfficiency,
   calculateTotalBreakdown,
   calculateShiftTimeBalance,
-  calculateDynamicStdOutput,
   calculateDowntimePct,
   getOperationsForItem,
   resolveMachineItemTarget,
@@ -39,6 +38,7 @@ interface OperatorKioskProps {
   selectedMachineId?: string | null;
   onSelectMachineId?: (machineId: string | null) => void;
   isAdmin?: boolean;
+  isReadOnly?: boolean;
   isShiftLocked?: boolean;
   shiftLock?: ShiftLockInfo;
 }
@@ -54,9 +54,11 @@ export function OperatorKiosk({
   selectedMachineId: externalMachineId,
   onSelectMachineId: externalOnSelectMachineId,
   isAdmin = false,
-  isShiftLocked = false,
+  isReadOnly,
+  isShiftLocked: externalShiftLocked = false,
   shiftLock,
 }: OperatorKioskProps) {
+  const isShiftLocked = isReadOnly !== undefined ? isReadOnly : externalShiftLocked;
   const { machines, operators, items } = masterData;
   const cycleTimes = useMemo(() => masterData.cycleTimes ?? [], [masterData.cycleTimes]);
 
@@ -912,37 +914,35 @@ export function OperatorKiosk({
                   type="number"
                   min="0"
                   step="0.01"
-                  disabled={!isAdmin || isShiftLocked}
-                  readOnly={!isAdmin || isShiftLocked}
+                  disabled={isShiftLocked}
+                  readOnly={isShiftLocked}
                   title={
-                    !isAdmin
-                      ? 'Cycle Time is auto-configured from Master Data (Unit Head override required to edit manually)'
-                      : isShiftLocked
+                    isShiftLocked
                       ? 'Shift is locked'
-                      : undefined
+                      : 'Enter or adjust cycle time'
                   }
-                  value={draft.cycleTime > 0 ? draft.cycleTime : ''}
+                  value={draft.cycleTime || ''}
                   placeholder="0.00"
                   onFocus={(e) => e.target.select()}
                   onChange={(e) => {
-                    if (!isAdmin || isShiftLocked) return;
-                    const newCt = parseFloat(e.target.value) || 0;
-                    const newStd =
-                      newCt > 0
-                        ? calculateDynamicStdOutput(newCt, rowShiftMins)
-                        : draft.stdOutput;
+                    if (isShiftLocked) return;
+                    const newCt = Math.max(0, Number(e.target.value) || 0);
+                    const shiftMins =
+                      Number(draft.shiftWorkingMinutes ?? draft.totalWorkingMinutes) ||
+                      rowShiftMins ||
+                      465;
                     setDraft({
                       ...draft,
                       cycleTime: newCt,
-                      stdOutput: newStd,
+                      stdOutput: newCt > 0 ? Math.floor(shiftMins / newCt) : 0,
                     });
                   }}
-                  className={`w-full border rounded-md px-3 py-2 text-sm font-mono font-bold text-center focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-75 disabled:cursor-not-allowed ${
+                  className={`w-full text-sm font-semibold px-3 py-2 border rounded-md bg-white disabled:bg-slate-100 ${
                     timeBalance.missingCycleTime
                       ? 'bg-rose-100 text-rose-950 border-rose-500 ring-2 ring-rose-300 animate-pulse'
                       : draft.cycleTime > 0
-                      ? 'bg-blue-50/70 text-blue-950 border-blue-300'
-                      : 'bg-slate-50 text-slate-900 border-slate-300'
+                      ? 'bg-blue-50/70 text-blue-950 border-blue-300 font-mono font-bold text-center'
+                      : 'border-slate-300 text-slate-900 font-mono font-bold text-center'
                   }`}
                 />
                 <span className="ml-2 text-xs font-medium text-slate-500">m</span>

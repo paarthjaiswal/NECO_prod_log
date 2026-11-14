@@ -92,9 +92,9 @@ export const INITIAL_ITEMS: ItemMaster[] = [
 ];
 
 export const SHIFTS: ShiftType[] = [
-  'Shift A (6AM-2PM)',
-  'Shift B (2PM-10PM)',
-  'Shift C (10PM-6AM)',
+  'Shift A (7AM-3:30PM)',
+  'Shift B (3:30PM-12AM)',
+  'Shift C (12AM-7AM)',
 ];
 
 export const getTodayDateString = (): string => {
@@ -138,7 +138,7 @@ export const generateDefaultShiftRows = (
       itemName: defaultItem?.itemName || "",
       operation: defaultItem?.operation || "",
       cycleTime: 0,
-      totalWorkingMinutes: 1350,
+      totalWorkingMinutes: 1305,
       stdOutput: defaultItem?.stdOutput || 0,
       actualOutput: 0,
       rework: 0,
@@ -156,7 +156,7 @@ export const generateDefaultShiftRows = (
 // Generates sample historical logs for all production lines
 export const generateSampleHistoricalLogs = (): MachineShiftRow[] => {
   const yesterday = getYesterdayDateString();
-  const shifts: ShiftType[] = ['Shift A (6AM-2PM)', 'Shift B (2PM-10PM)'];
+  const shifts: ShiftType[] = ['Shift A (7AM-3:30PM)', 'Shift B (3:30PM-12AM)'];
   const historicalRows: MachineShiftRow[] = [];
 
   PRODUCTION_LINES.forEach((line) => {
@@ -190,7 +190,7 @@ export const generateSampleHistoricalLogs = (): MachineShiftRow[] => {
           itemName: item.itemName,
           operation: item.operation,
           cycleTime: 0,
-          totalWorkingMinutes: 1350,
+          totalWorkingMinutes: 1305,
           stdOutput: item.stdOutput ?? 0,
           actualOutput,
           rework,

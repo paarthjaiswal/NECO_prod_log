@@ -40,12 +40,16 @@ interface MasterDataSettingsProps {
   masterData: MasterDataState;
   onRefreshMasterData: () => Promise<void> | void;
   onResetAllDemoData?: () => void;
+  isAdmin?: boolean;
+  isReadOnly?: boolean;
 }
 
 export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   masterData,
   onRefreshMasterData,
   onResetAllDemoData,
+  isAdmin = false,
+  isReadOnly: _isReadOnly = false,
 }) => {
   const machines = masterData.machines.filter((m) => m.status !== "idle");
   const { operators, items } = masterData;
@@ -345,14 +349,14 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   // ==========================================================================
   const [newLineName, setNewLineName] = useState("");
   const [newLineDesc, setNewLineDesc] = useState("");
-  const [newLineMinutes, setNewLineMinutes] = useState<string>("1350");
+  const [newLineMinutes, setNewLineMinutes] = useState<string>("1305");
 
   // New Shift Form State
   const [newShiftCode, setNewShiftCode] = useState("");
   const [newShiftDisplay, setNewShiftDisplay] = useState("");
-  const [newShiftStart, setNewShiftStart] = useState("06:00");
-  const [newShiftEnd, setNewShiftEnd] = useState("14:00");
-  const [newShiftMins, setNewShiftMins] = useState<string>("450");
+  const [newShiftStart, setNewShiftStart] = useState("07:00");
+  const [newShiftEnd, setNewShiftEnd] = useState("15:30");
+  const [newShiftMins, setNewShiftMins] = useState<string>("465");
 
   const [lineEdits, setLineEdits] = useState<Record<string, string>>({});
   const [shiftEdits, setShiftEdits] = useState<
@@ -378,13 +382,13 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         id: generatedId,
         name: cleanName,
         description: newLineDesc.trim(),
-        dailyWorkingMinutes: parseFloat(newLineMinutes) || 1350,
+        dailyWorkingMinutes: parseFloat(newLineMinutes) || 1305,
         isActive: true,
         sortOrder: (masterData.lines?.length ?? 3) + 1,
       });
       setNewLineName("");
       setNewLineDesc("");
-      setNewLineMinutes("1350");
+      setNewLineMinutes("1305");
       await onRefreshMasterData();
       showFeedback(`Added ${cleanName}.`);
     } catch (err) {
@@ -405,12 +409,12 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         id: line.id,
         name: line.name,
         description: line.description ?? "",
-        dailyWorkingMinutes: updatedMins || 1350,
+        dailyWorkingMinutes: updatedMins || 1305,
         isActive: line.isActive,
         sortOrder: line.sortOrder,
       });
       await onRefreshMasterData();
-      showFeedback(`Updated ${line.name} working time to ${updatedMins || 1350} mins.`);
+      showFeedback(`Updated ${line.name} working time to ${updatedMins || 1305} mins.`);
     } catch (err) {
       console.error("Failed to update line:", err);
       showFeedback("Error updating line working minutes.");
@@ -456,13 +460,16 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         displayName: display as ShiftType,
         startTime: `${newShiftStart}:00`,
         endTime: `${newShiftEnd}:00`,
-        shiftWorkingMinutes: parseFloat(newShiftMins) || 450,
+        restBreakMinutes: 30,
+        cleaningBreakMinutes: 15,
+        shiftWorkingMinutes: parseFloat(newShiftMins) || 465,
+        totalWorkingMinutesRef: 1305,
         isActive: true,
         sortOrder: (masterData.shifts?.length ?? 3) + 1,
       });
       setNewShiftCode("");
       setNewShiftDisplay("");
-      setNewShiftMins("450");
+      setNewShiftMins("465");
       await onRefreshMasterData();
       showFeedback(`Added shift "${display}".`);
     } catch (err) {
@@ -488,7 +495,10 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         displayName: shift.displayName as ShiftType,
         startTime: draft.startTime,
         endTime: draft.endTime,
-        shiftWorkingMinutes: parseFloat(draft.shiftWorkingMinutes) || 450,
+        restBreakMinutes: shift.restBreakMinutes ?? 30,
+        cleaningBreakMinutes: shift.cleaningBreakMinutes ?? 15,
+        shiftWorkingMinutes: parseFloat(draft.shiftWorkingMinutes) || 465,
+        totalWorkingMinutesRef: shift.totalWorkingMinutesRef ?? 1305,
         isActive: shift.isActive,
         sortOrder: shift.sortOrder,
       });
@@ -788,13 +798,15 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                         </span>
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <button
-                          onClick={() => handleDeleteMachine(m.id, m.name)}
-                          className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
-                          title="Delete machine"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {isAdmin && (
+                          <button
+                            onClick={() => handleDeleteMachine(m.id, m.name)}
+                            className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
+                            title="Delete machine"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -853,13 +865,15 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                   </div>
                 </div>
 
-                <button
-                  onClick={() => handleDeleteOperator(op)}
-                  className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
-                  title="Remove operator"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => handleDeleteOperator(op)}
+                    className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
+                    title="Remove operator"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -953,13 +967,15 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                     </td>
                     <td className="px-3 py-2 text-slate-600">{it.operation}</td>
                     <td className="px-3 py-2 text-right">
-                      <button
-                        onClick={() => handleDeleteItem(it.id, it.itemName)}
-                        className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
-                        title="Delete component"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteItem(it.id, it.itemName)}
+                          className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
+                          title="Delete component"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1168,14 +1184,16 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                           >
                             Edit
                           </button>
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={() => handleDeleteCycleTime(ct.id)}
-                            className="text-red-600 hover:underline font-medium disabled:opacity-50"
-                          >
-                            Delete
-                          </button>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              disabled={isSubmitting}
+                              onClick={() => handleDeleteCycleTime(ct.id)}
+                              className="text-red-600 hover:underline font-medium disabled:opacity-50"
+                            >
+                              Delete
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1197,7 +1215,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 Production Lines & Daily Working Minutes
               </h3>
               <p className="text-xs text-slate-500">
-                Default factory schedule is 22.5 hours (1350 minutes). Updating
+                Default factory schedule is 21.75 hours (1305 minutes — 24h minus 135m breaks). Updating
                 working minutes applies to new shifts while keeping historical
                 logs locked.
               </p>
@@ -1210,7 +1228,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                     <th className="py-2 px-3 font-semibold">Line ID</th>
                     <th className="py-2 px-3 font-semibold">Line Name</th>
                     <th className="py-2 px-3 font-semibold">
-                      Daily Working Minutes (Default: 1350m)
+                      Daily Working Minutes (Default: 1305m)
                     </th>
                     <th className="py-2 px-3 font-semibold text-right">
                       Actions
@@ -1236,6 +1254,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                             type="number"
                             min="1"
                             step="1"
+                            disabled={!isAdmin}
                             value={currentMinsStr}
                             onChange={(e) =>
                               setLineEdits((prev) => ({
@@ -1243,29 +1262,35 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                                 [line.id]: e.target.value,
                               }))
                             }
-                            className="w-28 border border-slate-300 rounded px-2 py-1 text-xs font-mono"
+                            className={`w-28 border border-slate-300 rounded px-2 py-1 text-xs font-mono ${
+                              !isAdmin ? "bg-slate-100 text-slate-500 cursor-not-allowed" : ""
+                            }`}
                           />
                           <span className="ml-2 text-slate-500">
                             mins ({(numericMins / 60).toFixed(2)} hrs)
                           </span>
                         </td>
                         <td className="py-2 px-3 text-right space-x-2">
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={() => handleUpdateLineMinutes(line)}
-                            className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white px-3 py-1 rounded text-xs font-medium"
-                          >
-                            Update Line
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={() => handleDeleteLine(line)}
-                            className="text-rose-600 hover:text-rose-800 px-2 py-1 rounded text-xs font-medium"
-                          >
-                            Delete
-                          </button>
+                          {isAdmin && (
+                            <>
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() => handleUpdateLineMinutes(line)}
+                                className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white px-3 py-1 rounded text-xs font-medium"
+                              >
+                                Update Line
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() => handleDeleteLine(line)}
+                                className="text-rose-600 hover:text-rose-800 px-2 py-1 rounded text-xs font-medium"
+                              >
+                                Delete
+                              </button>
+                            </>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1332,7 +1357,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                 Shifts & Shift Working Minutes
               </h3>
               <p className="text-xs text-slate-500">
-                Configure shift start/end timings and shift working minutes (e.g. 450m per shift).
+                Configure shift start/end timings and shift working minutes (e.g. 465m / 375m per shift).
               </p>
             </div>
 
@@ -1376,53 +1401,66 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                         <td className="py-2 px-3">
                           <input
                             type="time"
+                            disabled={!isAdmin}
                             value={current.startTime.slice(0, 5)}
                             onChange={(e) =>
                               updateDraft({ startTime: `${e.target.value}:00` })
                             }
-                            className="border border-slate-300 rounded px-2 py-1 text-xs font-mono"
+                            className={`border border-slate-300 rounded px-2 py-1 text-xs font-mono ${
+                              !isAdmin ? "bg-slate-100 text-slate-500 cursor-not-allowed" : ""
+                            }`}
                           />
                         </td>
                         <td className="py-2 px-3">
                           <input
                             type="time"
+                            disabled={!isAdmin}
                             value={current.endTime.slice(0, 5)}
                             onChange={(e) =>
                               updateDraft({ endTime: `${e.target.value}:00` })
                             }
-                            className="border border-slate-300 rounded px-2 py-1 text-xs font-mono"
+                            className={`border border-slate-300 rounded px-2 py-1 text-xs font-mono ${
+                              !isAdmin ? "bg-slate-100 text-slate-500 cursor-not-allowed" : ""
+                            }`}
                           />
                         </td>
                         <td className="py-2 px-3">
                           <input
                             type="number"
+                            disabled={!isAdmin}
                             value={current.shiftWorkingMinutes}
                             onChange={(e) =>
                               updateDraft({
                                 shiftWorkingMinutes: e.target.value,
                               })
                             }
-                            className="w-24 border border-slate-300 rounded px-2 py-1 text-xs font-mono"
+                            className={`w-24 border border-slate-300 rounded px-2 py-1 text-xs font-mono ${
+                              !isAdmin ? "bg-slate-100 text-slate-500 cursor-not-allowed" : ""
+                            }`}
                           />
                           <span className="ml-1.5 text-slate-500">mins</span>
                         </td>
                         <td className="py-2 px-3 text-right space-x-2">
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={() => handleUpdateShift(shift)}
-                            className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white px-3 py-1 rounded text-xs font-medium"
-                          >
-                            Save Shift
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={() => handleDeleteShift(shift)}
-                            className="text-rose-600 hover:text-rose-800 px-2 py-1 rounded text-xs font-medium"
-                          >
-                            Delete
-                          </button>
+                          {isAdmin && (
+                            <>
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() => handleUpdateShift(shift)}
+                                className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white px-3 py-1 rounded text-xs font-medium"
+                              >
+                                Save Shift
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={() => handleDeleteShift(shift)}
+                                className="text-rose-600 hover:text-rose-800 px-2 py-1 rounded text-xs font-medium"
+                              >
+                                Delete
+                              </button>
+                            </>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1432,79 +1470,81 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
             </div>
 
             {/* Add New Shift Form */}
-            <form
-              onSubmit={handleAddShift}
-              className="pt-3 border-t border-slate-200 flex flex-wrap items-end gap-3"
-            >
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Shift Code
-                </label>
-                <input
-                  type="text"
-                  value={newShiftCode}
-                  onChange={(e) => setNewShiftCode(e.target.value)}
-                  placeholder="e.g. Shift D"
-                  className="w-28 border border-slate-300 rounded px-2.5 py-1.5 text-xs"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Display Name (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={newShiftDisplay}
-                  onChange={(e) => setNewShiftDisplay(e.target.value)}
-                  placeholder="e.g. Shift D (General)"
-                  className="w-44 border border-slate-300 rounded px-2.5 py-1.5 text-xs"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Start Time
-                </label>
-                <input
-                  type="time"
-                  value={newShiftStart}
-                  onChange={(e) => setNewShiftStart(e.target.value)}
-                  className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  End Time
-                </label>
-                <input
-                  type="time"
-                  value={newShiftEnd}
-                  onChange={(e) => setNewShiftEnd(e.target.value)}
-                  className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Shift Working Mins
-                </label>
-                <input
-                  type="number"
-                  value={newShiftMins}
-                  onChange={(e) => setNewShiftMins(e.target.value)}
-                  className="w-24 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
-                  required
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={isSubmitting || !newShiftCode.trim()}
-                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-4 py-1.5 rounded text-xs font-semibold"
+            {isAdmin && (
+              <form
+                onSubmit={handleAddShift}
+                className="pt-3 border-t border-slate-200 flex flex-wrap items-end gap-3"
               >
-                + Add Shift
-              </button>
-            </form>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Shift Code
+                  </label>
+                  <input
+                    type="text"
+                    value={newShiftCode}
+                    onChange={(e) => setNewShiftCode(e.target.value)}
+                    placeholder="e.g. Shift D"
+                    className="w-28 border border-slate-300 rounded px-2.5 py-1.5 text-xs"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Display Name (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={newShiftDisplay}
+                    onChange={(e) => setNewShiftDisplay(e.target.value)}
+                    placeholder="e.g. Shift D (General)"
+                    className="w-44 border border-slate-300 rounded px-2.5 py-1.5 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Start Time
+                  </label>
+                  <input
+                    type="time"
+                    value={newShiftStart}
+                    onChange={(e) => setNewShiftStart(e.target.value)}
+                    className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    End Time
+                  </label>
+                  <input
+                    type="time"
+                    value={newShiftEnd}
+                    onChange={(e) => setNewShiftEnd(e.target.value)}
+                    className="border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Shift Working Mins
+                  </label>
+                  <input
+                    type="number"
+                    value={newShiftMins}
+                    onChange={(e) => setNewShiftMins(e.target.value)}
+                    className="w-24 border border-slate-300 rounded px-2.5 py-1.5 text-xs font-mono"
+                    required
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isSubmitting || !newShiftCode.trim()}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-4 py-1.5 rounded text-xs font-semibold"
+                >
+                  + Add Shift
+                </button>
+              </form>
+            )}
           </div>
         </div>
       )}

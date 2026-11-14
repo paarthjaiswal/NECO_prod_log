@@ -6,7 +6,7 @@ import { MachineShiftRow } from "@/types";
  * includes cycle time, total working minutes, breakdown category minutes & percentages.
  */
 export function formatRowForExport(row: MachineShiftRow): Record<string, string | number> {
-  const totalWorking = Number(row.totalWorkingMinutes) || 1350;
+  const totalWorking = Number(row.totalWorkingMinutes) || 1305;
   const noDisc = Number(row.breakdown?.noDisc) || 0;
   const change = Number(row.breakdown?.change) || 0;
   const power = Number(row.breakdown?.power) || 0;
@@ -72,7 +72,8 @@ export function exportShiftToExcel(
   rows: MachineShiftRow[],
   dateArg?: string,
   shiftArg?: string,
-  lineArg?: string
+  lineArg?: string,
+  customFilename?: string
 ): void {
   if (rows && rows.length > 0) {
     try {
@@ -85,7 +86,7 @@ export function exportShiftToExcel(
       const date = dateArg || sampleRow?.date || new Date().toISOString().split("T")[0];
       const line = lineArg || sampleRow?.line || "Line 1";
       const cleanLine = line.replace(/\s+/g, "_");
-      const filename = `shift_log_${date}_${cleanLine}.xlsx`;
+      const filename = customFilename || `shift_log_${date}_${cleanLine}.xlsx`;
 
       XLSX.writeFile(wb, filename);
       return;
@@ -96,7 +97,7 @@ export function exportShiftToExcel(
 
   const sampleRow = rows?.[0];
   const date = dateArg || sampleRow?.date || new Date().toISOString().split("T")[0];
-  const shift = shiftArg || sampleRow?.shift || "Shift A (6AM-2PM)";
+  const shift = shiftArg || sampleRow?.shift || "Shift A (7AM-3:30PM)";
   const line = lineArg || sampleRow?.line || "Line 1";
 
   const params = new URLSearchParams({
@@ -115,7 +116,8 @@ export function exportShiftToExcel(
 export function exportHistoricalToCSV(
   rows?: MachineShiftRow[],
   dateFrom?: string,
-  dateTo?: string
+  dateTo?: string,
+  customFilename?: string
 ): void {
   if (rows && rows.length > 0) {
     try {
@@ -138,8 +140,12 @@ export function exportHistoricalToCSV(
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       const today = new Date().toISOString().split("T")[0];
+      const defaultFilename =
+        dateFrom && dateTo
+          ? `neco_production_logs_${dateFrom}_to_${dateTo}.csv`
+          : `neco_production_logs_${today}.csv`;
       link.href = url;
-      link.download = `neco_production_logs_${today}.csv`;
+      link.download = customFilename || defaultFilename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

@@ -10,6 +10,11 @@ import {
   Info,
   Zap,
   Lock,
+  UserPlus,
+  PackagePlus,
+  X,
+  Plus,
+  Pencil,
 } from 'lucide-react';
 import {
   MachineShiftRow,
@@ -26,6 +31,12 @@ import {
   calculateDowntimePct,
   calculateShiftTimeBalance,
 } from '@/services/storageService';
+import {
+  upsertMachineItemCycleTime,
+  addOperatorMaster,
+  upsertItemMaster,
+  upsertMachineMaster,
+} from '@/actions/shiftActions';
 
 type BreakdownKey = 'noDisc' | 'change' | 'power' | 'operator';
 
@@ -79,47 +90,105 @@ const NAV_COLS = [
 
 interface DailyShiftSheetProps {
   rows: MachineShiftRow[];
-  masterData: MasterDataState;
   onRowsChange: (updatedRows: MachineShiftRow[]) => void;
-  onSave: (rowsToSave: MachineShiftRow[]) => void | Promise<void>;
-  isSaving: boolean;
-  selectedDate: string;
-  selectedShift: ShiftType;
-  selectedLine: string;
-  hasUnsavedDraft: boolean;
+  masterData: MasterDataState;
+  onRefreshMasterData: () => Promise<void>;
+  currentDate: string;
+  currentShift: ShiftType;
+  currentLine: string;
+  isShiftLocked: boolean;
+  isAdmin: boolean;
+  onSaveShift: (rowsToSave: MachineShiftRow[]) => Promise<void>;
+  // Backwards compatibility props
+  onSave?: (rowsToSave: MachineShiftRow[]) => void | Promise<void>;
+  isSaving?: boolean;
+  selectedDate?: string;
+  selectedShift?: ShiftType;
+  selectedLine?: string;
+  hasUnsavedDraft?: boolean;
   onDiscardDraft?: () => void;
   onExportExcel?: () => void;
   onOpenMachineInKiosk?: (machineId: string) => void;
-  isAdmin?: boolean;
-  isShiftLocked?: boolean;
+  isReadOnly?: boolean;
   shiftLock?: ShiftLockInfo;
 }
 
 export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   rows,
-  masterData,
   onRowsChange,
-  onSave,
-  isSaving,
-  selectedDate,
-  selectedShift,
-  selectedLine,
-  hasUnsavedDraft,
+  masterData,
+  onRefreshMasterData,
+  currentDate: propCurrentDate,
+  selectedDate: propSelectedDate,
+  currentShift: propCurrentShift,
+  selectedShift: propSelectedShift,
+  currentLine: propCurrentLine,
+  selectedLine: propSelectedLine,
+  isShiftLocked: externalShiftLocked = false,
+  isAdmin = false,
+  onSaveShift: propOnSaveShift,
+  onSave: propOnSave,
+  isSaving = false,
+  hasUnsavedDraft = false,
   onDiscardDraft,
   onExportExcel,
   onOpenMachineInKiosk,
-  isAdmin = false,
-  isShiftLocked = false,
+  isReadOnly: propReadOnly,
   shiftLock,
 }) => {
-const operators = useMemo(() => masterData?.operators ?? [], [masterData?.operators]);
-const items = useMemo(() => masterData?.items ?? [], [masterData?.items]);
-const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycleTimes]);
+  const currentDate = propCurrentDate ?? propSelectedDate ?? "";
+  const selectedDate = currentDate;
+  const currentShift = propCurrentShift ?? propSelectedShift ?? ("Shift A (7AM-3:30PM)" as ShiftType);
+  const selectedShift = currentShift;
+  const currentLine = propCurrentLine ?? propSelectedLine ?? "Line 1";
+  const selectedLine = currentLine;
+  const isReadOnly = propReadOnly !== undefined ? propReadOnly : externalShiftLocked;
+  const isShiftLocked = isReadOnly;
+  const onSaveShift = propOnSaveShift ?? propOnSave ?? (async () => {});
+  const onSave = onSaveShift;
+  const operators = useMemo(() => masterData?.operators ?? [], [masterData?.operators]);
+  const items = useMemo(() => masterData?.items ?? [], [masterData?.items]);
+  const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycleTimes]);
 
-  // Fetched from public.shifts in Supabase (matches displayName or shiftCode)
-  const activeShiftObj = masterData?.shifts?.find(
-    (s) => s.displayName === selectedShift || s.shiftCode === selectedShift
-  );
+  // Fetched dynamically from public.shifts in Supabase
+  const activeShiftObj = useMemo(() => {
+    return masterData?.shifts?.find(
+      (s) =>
+        s.displayName === selectedShift ||
+        s.shiftCode === selectedShift ||
+        (s.shiftCode && selectedShift.toLowerCase().startsWith(s.shiftCode.toLowerCase()))
+    );
+  }, [masterData?.shifts, selectedShift]);
+
+  const shiftDisplayLabel = useMemo(() => {
+    if (activeShiftObj?.startTime && activeShiftObj?.endTime) {
+      const formatTime = (t: string) => {
+        const parts = t.trim().split(":");
+        const h = parseInt(parts[0], 10);
+        if (isNaN(h)) return t;
+        const m = parseInt(parts[1] || "0", 10);
+        const ampm = h >= 12 ? "PM" : "AM";
+        const h12 = h % 12 === 0 ? 12 : h % 12;
+        const mStr = m > 0 ? `:${String(m).padStart(2, "0")}` : "";
+        return `${h12}${mStr} ${ampm}`;
+      };
+      const code = activeShiftObj.shiftCode || selectedShift.split(" ")[0] || "Shift";
+      return `${code} (${formatTime(activeShiftObj.startTime)} – ${formatTime(activeShiftObj.endTime)})`;
+    }
+
+    const lower = (selectedShift || "").toLowerCase();
+    if (lower.includes("shift a") || lower.includes("6am") || lower.includes("7am")) {
+      return "Shift A (7:00 AM – 3:30 PM)";
+    }
+    if (lower.includes("shift b") || lower.includes("2pm") || lower.includes("3:30pm") || lower.includes("15:30")) {
+      return "Shift B (3:30 PM – 12:00 AM)";
+    }
+    if (lower.includes("shift c") || lower.includes("10pm") || lower.includes("12am")) {
+      return "Shift C (12:00 AM – 7:00 AM)";
+    }
+    return selectedShift;
+  }, [activeShiftObj, selectedShift]);
+
   const shiftWorkingMinutes =
     activeShiftObj?.shiftWorkingMinutes ??
     rows[0]?.totalWorkingMinutes ??
@@ -259,6 +328,278 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
     },
     [isShiftLocked, rows, items, cycleTimes, shiftWorkingMinutes, updateRow]
   );
+
+  const handleFieldChange = <K extends keyof MachineShiftRow>(
+    index: number,
+    field: K,
+    value: MachineShiftRow[K]
+  ) => {
+    updateRow(index, { [field]: value });
+  };
+  const handleItemSelect = handleItemChange;
+
+  const handleCycleTimeBlurOrCommit = async (index: number, newCt: number) => {
+    const row = rows[index];
+    if (!row.machineId || !row.itemId || !row.operation || newCt <= 0) return;
+
+    const newStd = calculateDynamicStdOutput(newCt, shiftWorkingMinutes);
+    try {
+      await upsertMachineItemCycleTime({
+        machineId: row.machineId,
+        itemId: row.itemId,
+        operation: row.operation,
+        cycleTime: newCt,
+        stdOutput: newStd,
+      });
+      await onRefreshMasterData?.();
+    } catch (err) {
+      console.error("Failed to auto-save cycle time:", err);
+    }
+  };
+
+  // Inline "+ Add" & Machine Edit states
+  const [quickAddOperatorRowIdx, setQuickAddOperatorRowIdx] = useState<number | null>(null);
+  const [newOperatorName, setNewOperatorName] = useState("");
+
+  const [quickAddItemRowIdx, setQuickAddItemRowIdx] = useState<number | null>(null);
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemCode, setNewItemCode] = useState("");
+  const [newItemOperation, setNewItemOperation] = useState("");
+
+  const [quickAddOpRowIdx, setQuickAddOpRowIdx] = useState<number | null>(null);
+  const [newOperationName, setNewOperationName] = useState("");
+
+  const [showAddMachineBar, setShowAddMachineBar] = useState(false);
+  const [newMachineName, setNewMachineName] = useState("");
+  const [newMachineCode, setNewMachineCode] = useState("");
+  const [newMachineType, setNewMachineType] = useState("CNC");
+
+  const [editingMachineId, setEditingMachineId] = useState<string | null>(null);
+  const [editMachineName, setEditMachineName] = useState("");
+  const [editMachineCode, setEditMachineCode] = useState("");
+  const [editMachineType, setEditMachineType] = useState("CNC");
+
+  const [isInlineSaving, setIsInlineSaving] = useState(false);
+  const [quickAddError, setQuickAddError] = useState<string | null>(null);
+
+  // 1. Create Operator inline & assign to row
+  const handleQuickCreateOperator = async (rowIndex: number) => {
+    if (!newOperatorName.trim()) return;
+    setIsInlineSaving(true);
+    setQuickAddError(null);
+    try {
+      const res = await addOperatorMaster(newOperatorName);
+      await onRefreshMasterData();
+      const updated = [...rows];
+      updated[rowIndex] = { ...updated[rowIndex], operatorName: res.operator.name };
+      onRowsChange(updated);
+      setNewOperatorName("");
+      setQuickAddOperatorRowIdx(null);
+    } catch (err) {
+      console.error("Failed to create operator inline:", err);
+      setQuickAddError(err instanceof Error ? err.message : "Error creating operator");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 2. Create Item + Operation inline & assign to row
+  const handleQuickCreateItem = async (rowIndex: number) => {
+    if (!newItemName.trim() || !newItemCode.trim() || !newItemOperation.trim()) return;
+    setIsInlineSaving(true);
+    setQuickAddError(null);
+    try {
+      const res = await upsertItemMaster({
+        itemName: newItemName,
+        itemCode: newItemCode,
+        operation: newItemOperation,
+      });
+      await onRefreshMasterData();
+      const updated = [...rows];
+      const targetRow = updated[rowIndex];
+      const ct = Number(targetRow.cycleTime) || 0;
+      const shiftMins =
+        Number(targetRow.shiftWorkingMinutes ?? targetRow.totalWorkingMinutes) ||
+        shiftWorkingMinutes ||
+        465;
+
+      updated[rowIndex] = {
+        ...targetRow,
+        itemId: res.item.id,
+        itemName: res.item.itemName,
+        operation: res.item.operation,
+        stdOutput: ct > 0 ? Math.floor(shiftMins / ct) : targetRow.stdOutput,
+      };
+      onRowsChange(updated);
+      setNewItemName("");
+      setNewItemCode("");
+      setNewItemOperation("");
+      setQuickAddItemRowIdx(null);
+    } catch (err) {
+      console.error("Failed to create item inline:", err);
+      setQuickAddError(err instanceof Error ? err.message : "Error creating item");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 2B. Create/Add Operation inline & assign to row
+  const handleQuickCreateOperation = async (rowIndex: number) => {
+    const opName = newOperationName.trim();
+    if (!opName) return;
+    const currentRow = rows[rowIndex];
+    if (!currentRow?.itemId) {
+      alert("Please select an item first before adding an operation.");
+      return;
+    }
+
+    setIsInlineSaving(true);
+    setQuickAddError(null);
+    try {
+      const currentItem = items.find((i) => i.id === currentRow.itemId);
+      if (currentItem) {
+        const existingOps = (currentItem.operation || "")
+          .split(/[,/]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (!existingOps.includes(opName)) {
+          const updatedOps =
+            existingOps.length > 0
+              ? `${currentItem.operation}, ${opName}`
+              : opName;
+          await upsertItemMaster({
+            ...currentItem,
+            operation: updatedOps,
+          });
+        }
+      }
+
+      if (currentRow.machineId) {
+        await upsertMachineItemCycleTime({
+          machineId: currentRow.machineId,
+          itemId: currentRow.itemId,
+          operation: opName,
+          cycleTime: currentRow.cycleTime || 0,
+          stdOutput: currentRow.stdOutput || 0,
+        });
+      }
+
+      await onRefreshMasterData();
+      handleOperationChange(rowIndex, opName);
+      setQuickAddOpRowIdx(null);
+      setNewOperationName("");
+    } catch (err) {
+      console.error("Failed to add operation inline:", err);
+      setQuickAddError(err instanceof Error ? err.message : "Error adding operation");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 3. Add New Machine to current line & append row immediately
+  const handleQuickCreateMachine = async () => {
+    if (!newMachineName.trim() || !newMachineCode.trim()) return;
+    setIsInlineSaving(true);
+    try {
+      const res = await upsertMachineMaster({
+        name: newMachineName,
+        code: newMachineCode,
+        machineType: newMachineType,
+        productionLine: currentLine,
+        sortOrder: rows.length + 1,
+      });
+      await onRefreshMasterData();
+
+      const activeShiftObj = masterData.shifts?.find(
+        (s) => s.displayName === currentShift || s.shiftCode === currentShift
+      );
+      const shiftWorkingMinutesVal = activeShiftObj?.shiftWorkingMinutes ?? 465;
+      const lineObj = masterData.lines?.find(
+        (l) => l.name === currentLine || l.id === currentLine
+      );
+      const totalWorkingMinutes = lineObj?.dailyWorkingMinutes ?? 1305;
+
+      const newRow: MachineShiftRow = {
+        id: `${currentDate}_${currentShift}_${currentLine}_${res.machine.id}`,
+        date: currentDate,
+        shift: currentShift,
+        productionLine: currentLine,
+        line: currentLine,
+        srNo: rows.length + 1,
+        machineId: res.machine.id,
+        machineCode: res.machine.code,
+        machineName: res.machine.name,
+        operatorName: "",
+        itemId: "",
+        itemName: "",
+        operation: "",
+        cycleTime: 0,
+        stdOutput: 0,
+        actualOutput: 0,
+        rework: 0,
+        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+        remarks: "",
+        shiftWorkingMinutes: shiftWorkingMinutesVal,
+        totalWorkingMinutes,
+      };
+
+      onRowsChange([...rows, newRow]);
+      setNewMachineName("");
+      setNewMachineCode("");
+      setNewMachineType("CNC");
+      setShowAddMachineBar(false);
+    } catch (err) {
+      console.error("Failed to create machine inline:", err);
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 4. Inline Rename / Edit Machine
+  const handleSaveMachineEdit = async (machineId: string) => {
+    if (!editMachineName.trim() || !editMachineCode.trim()) return;
+    setIsInlineSaving(true);
+    try {
+      const res = await upsertMachineMaster({
+        id: machineId,
+        name: editMachineName,
+        code: editMachineCode,
+        machineType: editMachineType,
+        productionLine: currentLine,
+      });
+      await onRefreshMasterData();
+
+      const updated = rows.map((r) =>
+        r.machineId === machineId
+          ? { ...r, machineName: res.machine.name, machineCode: res.machine.code }
+          : r
+      );
+      onRowsChange(updated);
+      setEditingMachineId(null);
+    } catch (err) {
+      console.error("Failed to edit machine inline:", err);
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 5. Cycle Time Change Handler (Live stdOutput Recalculation)
+  const handleCycleTimeChange = (rowIndex: number, rawVal: string) => {
+    const newCt = Math.max(0, Number(rawVal) || 0);
+    const updated = [...rows];
+    const row = updated[rowIndex];
+    const shiftMins =
+      Number(row.shiftWorkingMinutes ?? row.totalWorkingMinutes) ||
+      shiftWorkingMinutes ||
+      465;
+
+    updated[rowIndex] = {
+      ...row,
+      cycleTime: newCt,
+      stdOutput: newCt > 0 ? Math.floor(shiftMins / newCt) : 0,
+    };
+    onRowsChange(updated);
+  };
 
   // Handle Breakdown Sub-column update
   const handleBreakdownChange = useCallback(
@@ -541,13 +882,12 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
   return (
     <div className="w-full space-y-2.5">
       {/* Shift Lock Banner */}
-      {isShiftLocked && (
+      {isReadOnly && (
         <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3 text-rose-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
           <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
             <Lock className="w-4 h-4 text-rose-400 shrink-0" />
             <span>
-              {shiftLock?.reason ||
-                "Shift Locked — The 30-minute post-shift editing window has closed. Data is now immutable."}
+              Past/Future Shift — Read-Only View (Unit Head login required to edit)
             </span>
             {shiftLock?.lockDeadlineText && (
               <span className="text-rose-300 font-mono text-[11px] bg-rose-900/60 px-2 py-0.5 rounded border border-rose-700/60">
@@ -588,7 +928,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
             <span className="text-emerald-400 font-bold uppercase">{selectedLine}</span>
             <span className="text-slate-600">·</span>
             <span className="text-slate-400">SHIFT:</span>
-            <span>{selectedShift}</span>
+            <span>{shiftDisplayLabel}</span>
             {shiftWorkingMinutes > 0 && (
               <>
                 <span className="text-slate-600">·</span>
@@ -624,6 +964,47 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {!isShiftLocked && (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowAddMachineBar((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded bg-slate-800 text-white hover:bg-slate-700"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add Machine
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuickAddOperatorRowIdx(0);
+                  setNewOperatorName('');
+                  setQuickAddError(null);
+                }}
+                className="px-2.5 py-1.5 text-xs text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded font-medium flex items-center gap-1.5 transition-colors"
+                title="Quick Add new Operator to Master Data"
+              >
+                <UserPlus className="w-3.5 h-3.5 text-blue-600" />
+                <span className="hidden sm:inline">+ Operator</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuickAddItemRowIdx(0);
+                  setNewItemCode('');
+                  setNewItemName('');
+                  setNewItemOperation('OP-10 Turning');
+                  setQuickAddError(null);
+                }}
+                className="px-2.5 py-1.5 text-xs text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded font-medium flex items-center gap-1.5 transition-colors"
+                title="Quick Add new Item & Operation to Master Data"
+              >
+                <PackagePlus className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="hidden sm:inline">+ Item</span>
+              </button>
+            </div>
+          )}
+
           {!isShiftLocked && (
             <button
               onClick={handleQuickFillEmpty}
@@ -670,14 +1051,7 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
             </div>
           )}
 
-          {isShiftLocked ? (
-            <div
-              className="px-4 py-1.5 text-xs font-bold rounded flex items-center gap-1.5 bg-slate-200 text-slate-600 border border-slate-300 cursor-not-allowed"
-              title={shiftLock?.reason || 'Shift is locked'}
-            >
-              <span>🔒 Shift Locked</span>
-            </div>
-          ) : (
+          {!isReadOnly && (
             <button
               type="button"
               onClick={handleSaveWithValidation}
@@ -858,6 +1232,55 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
         </div>
       )}
 
+      {/* Inline Quick Add Machine Bar */}
+      {showAddMachineBar && !isShiftLocked && (
+        <div className="flex flex-wrap items-center gap-2 p-2.5 bg-slate-100 border border-slate-300 rounded-md mb-2">
+          <span className="text-xs font-semibold text-slate-700">
+            New Machine ({currentLine}):
+          </span>
+          <input
+            type="text"
+            placeholder="Machine Name (e.g. MAKINO-130)"
+            value={newMachineName}
+            onChange={(e) => setNewMachineName(e.target.value)}
+            className="px-2 py-1 text-xs border border-slate-300 rounded bg-white"
+          />
+          <input
+            type="text"
+            placeholder="Code (e.g. MC-130)"
+            value={newMachineCode}
+            onChange={(e) => setNewMachineCode(e.target.value)}
+            className="px-2 py-1 text-xs border border-slate-300 rounded bg-white w-28"
+          />
+          <select
+            value={newMachineType}
+            onChange={(e) => setNewMachineType(e.target.value)}
+            className="px-2 py-1 text-xs border border-slate-300 rounded bg-white"
+          >
+            <option value="CNC">CNC</option>
+            <option value="VMC">VMC</option>
+            <option value="HMC">HMC</option>
+            <option value="SPM">SPM</option>
+            <option value="Conventional">Conventional</option>
+          </select>
+          <button
+            type="button"
+            disabled={isInlineSaving}
+            onClick={handleQuickCreateMachine}
+            className="px-2.5 py-1 text-xs font-semibold bg-emerald-600 text-white rounded hover:bg-emerald-700"
+          >
+            {isInlineSaving ? "Adding..." : "Save & Append Row"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowAddMachineBar(false)}
+            className="px-2 py-1 text-xs text-slate-600 hover:text-slate-900"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
       {/* Interactive Paper Log Sheet (Grouped Table) */}
       <div className="bg-white rounded-lg border border-slate-300 shadow-xs overflow-hidden">
         <div className="overflow-x-auto max-w-full">
@@ -933,7 +1356,8 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
                 const hasTarget = row.stdOutput > 0;
                 const efficiency = hasTarget ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
                 const isUnderperforming = hasTarget && row.actualOutput < row.stdOutput;
-                const isRowConfigured = !!row.operatorName && !!row.itemName;
+                const _isRowConfigured = !!row.operatorName && !!row.itemName;
+                void _isRowConfigured;
                 const rowOperations = row.itemId
                   ? getOperationsForItem(row.itemId, items, cycleTimes, row.machineId, row.machineName)
                   : [];
@@ -973,209 +1397,351 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
                     </td>
 
                     {/* 2. MACHINE */}
-                    <td className="px-3 py-2 font-semibold text-slate-900 border-r border-slate-200 whitespace-nowrap">
-                      <div className="flex items-center justify-between gap-1.5">
-                        <div className="flex items-center gap-1.5">
-                          <span>{row.machineName}</span>
-                          {isRowInvalid ? (
-                            <span
-                              className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                                timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
-                                  ? 'bg-rose-100 text-rose-800 border border-rose-300'
-                                  : 'bg-amber-100 text-amber-900 border border-amber-300'
-                              }`}
-                              title={timeBalance.errorMessage}
-                            >
-                              <AlertTriangle className="w-3 h-3 shrink-0" />
-                              <span>
-                                {timeBalance.missingCycleTime
-                                  ? 'No Cycle Time'
-                                  : timeBalance.isProductionExceeded
-                                  ? 'Exceeds Shift'
-                                  : timeBalance.isOver
-                                  ? 'Over Time'
-                                  : 'Missing Time'}
-                              </span>
-                            </span>
-                          ) : isRowActive && timeBalance.isBalanced ? (
-                            <span
-                              className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300"
-                              title={`Balanced: Productive (${timeBalance.productionMinutes}m) + BD (${timeBalance.loggedBreakdownMinutes}m) = ${timeBalance.shiftMinutes}m`}
-                            >
-                              <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                              <span>OK</span>
-                            </span>
-                          ) : isRowConfigured ? (
-                            <span
-                              className="w-1.5 h-1.5 rounded-full bg-slate-400"
-                              title="Configured"
+                    <td className="px-2 py-1.5 border-r border-slate-200 font-medium text-slate-800">
+                      {editingMachineId === row.machineId ? (
+                        <div className="flex flex-col gap-1 min-w-[150px]">
+                          <input
+                            type="text"
+                            value={editMachineName}
+                            onChange={(e) => setEditMachineName(e.target.value)}
+                            className="px-1.5 py-0.5 text-xs border border-blue-400 rounded bg-white"
+                            placeholder="Name"
+                          />
+                          <div className="flex gap-1">
+                            <input
+                              type="text"
+                              value={editMachineCode}
+                              onChange={(e) => setEditMachineCode(e.target.value)}
+                              className="px-1.5 py-0.5 text-[11px] border border-slate-300 rounded bg-white w-16"
+                              placeholder="Code"
                             />
-                          ) : null}
+                            <select
+                              value={editMachineType}
+                              onChange={(e) => setEditMachineType(e.target.value)}
+                              className="px-1 py-0.5 text-[11px] border border-slate-300 rounded bg-white"
+                            >
+                              <option value="CNC">CNC</option>
+                              <option value="VMC">VMC</option>
+                              <option value="HMC">HMC</option>
+                              <option value="SPM">SPM</option>
+                              <option value="Conventional">Conv.</option>
+                            </select>
+                          </div>
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              disabled={isInlineSaving}
+                              onClick={() => handleSaveMachineEdit(row.machineId)}
+                              className="px-1.5 py-0.5 text-[10px] font-semibold bg-blue-600 text-white rounded"
+                            >
+                              Save
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingMachineId(null)}
+                              className="px-1.5 py-0.5 text-[10px] bg-slate-200 text-slate-700 rounded"
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         </div>
-                      </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-1 group">
+                          <div>
+                            <div className="text-xs font-semibold leading-tight">{row.machineName}</div>
+                            <div className="text-[10px] text-slate-400">{row.machineCode}</div>
+                          </div>
+                          {!isShiftLocked && (
+                            <button
+                              type="button"
+                              title="Edit machine name/code/type"
+                              onClick={() => {
+                                const mMeta = masterData.machines?.find((m) => m.id === row.machineId);
+                                setEditingMachineId(row.machineId);
+                                setEditMachineName(row.machineName);
+                                setEditMachineCode(row.machineCode || mMeta?.code || "");
+                                setEditMachineType(mMeta?.type || "CNC");
+                              }}
+                              className="opacity-30 group-hover:opacity-100 p-1 text-slate-500 hover:text-blue-600 rounded"
+                            >
+                              <Pencil className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </td>
 
                     {/* 3. NAME OF OPERATOR */}
                     <td className="px-1.5 py-1 border-r border-slate-200">
-                      <select
-                        value={row.operatorName}
-                        disabled={isShiftLocked}
-                        onChange={(e) => updateRow(index, { operatorName: e.target.value })}
-                        className={`w-full bg-transparent px-1.5 py-1 rounded border border-transparent ${
-                          isShiftLocked
-                            ? 'cursor-not-allowed opacity-75'
-                            : 'hover:border-slate-300 focus:border-slate-800 focus:bg-white cursor-pointer'
-                        } text-xs font-medium text-slate-900 focus:outline-none`}
-                      >
-                        <option value="">— Select Operator —</option>
-                        {operators.map((op) => (
-                          <option key={op} value={op}>
-                            {op}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {/* 4. ITEM */}
-                    <td className="px-1.5 py-1 border-r border-slate-200">
-                      <select
-                        value={row.itemId}
-                        disabled={isShiftLocked}
-                        onChange={(e) => handleItemChange(index, e.target.value)}
-                        className={`w-full bg-transparent px-1.5 py-1 rounded border border-transparent ${
-                          isShiftLocked
-                            ? 'cursor-not-allowed opacity-75'
-                            : 'hover:border-slate-300 focus:border-slate-800 focus:bg-white cursor-pointer'
-                        } text-xs text-slate-900 font-medium focus:outline-none`}
-                      >
-                        <option value="">— Select Item —</option>
-                        {items.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {`${item.itemName} (${item.itemCode})`}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {/* 5. OPERATION */}
-                    <td className="px-1.5 py-1 border-r border-slate-200">
-                      {!row.itemId ? (
-                        <span className="block px-2 py-1 text-xs text-slate-400 italic">
-                          — Select Item First —
-                        </span>
-                      ) : rowOperations.length > 1 ? (
+                      {quickAddOperatorRowIdx === index ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            autoFocus
+                            placeholder="Operator name..."
+                            value={newOperatorName}
+                            onChange={(e) => setNewOperatorName(e.target.value)}
+                            onKeyDown={(e) => e.key === "Enter" && handleQuickCreateOperator(index)}
+                            className="w-28 px-1.5 py-0.5 text-xs border border-blue-400 rounded"
+                          />
+                          <button
+                            type="button"
+                            disabled={isInlineSaving}
+                            onClick={() => handleQuickCreateOperator(index)}
+                            className="px-1.5 py-0.5 text-[10px] font-semibold bg-blue-600 text-white rounded"
+                          >
+                            Add
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setQuickAddOperatorRowIdx(null)}
+                            className="px-1 py-0.5 text-[10px] text-slate-500"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
                         <select
-                          value={row.operation}
                           disabled={isShiftLocked}
-                          onChange={(e) => handleOperationChange(index, e.target.value)}
-                          className={`w-full bg-transparent px-1.5 py-1 rounded border border-transparent ${
-                            isShiftLocked
-                              ? 'cursor-not-allowed opacity-75'
-                              : 'hover:border-slate-300 focus:border-slate-800 focus:bg-white cursor-pointer'
-                          } text-xs text-slate-900 font-medium focus:outline-none`}
+                          value={row.operatorName || ""}
+                          onChange={(e) => {
+                            if (e.target.value === "__ADD_NEW__") {
+                              setNewOperatorName("");
+                              setQuickAddOperatorRowIdx(index);
+                              return;
+                            }
+                            handleFieldChange(index, "operatorName", e.target.value);
+                          }}
+                          className="w-full text-xs bg-transparent border border-slate-200 rounded px-1.5 py-1"
                         >
-                          <option value="">— Select Operation —</option>
-                          {rowOperations.map((op) => (
+                          <option value="">-- Select --</option>
+                          {operators.map((op) => (
                             <option key={op} value={op}>
                               {op}
                             </option>
                           ))}
-                          {row.operation && !rowOperations.includes(row.operation) && (
-                            <option key={row.operation} value={row.operation}>
-                              {row.operation}
+                          {!isShiftLocked && (
+                            <option value="__ADD_NEW__" className="font-semibold text-blue-600">
+                              + Add New Operator...
                             </option>
                           )}
                         </select>
-                      ) : (
-                        <input
-                          type="text"
-                          value={row.operation}
-                          disabled={isShiftLocked}
-                          readOnly={isShiftLocked}
-                          onChange={(e) => handleOperationChange(index, e.target.value)}
-                          placeholder="e.g. OP-10 Turning"
-                          className={`w-full bg-transparent px-2 py-1 rounded border border-transparent ${
-                            isShiftLocked
-                              ? 'cursor-not-allowed opacity-75'
-                              : 'hover:border-slate-300 focus:border-slate-800 focus:bg-white'
-                          } text-xs text-slate-800 font-medium focus:outline-none`}
-                        />
                       )}
                     </td>
 
-                    {/* 5B. CYCLE TIME (Locked for Non-Admins & When Shift is Locked) */}
-                    <td className="px-1 py-1 border-r border-slate-200 text-center">
+                    {/* 4. ITEM */}
+                    <td className="px-1.5 py-1 border-r border-slate-200">
+                      {quickAddItemRowIdx === index ? (
+                        <div className="flex flex-col gap-1 p-1.5 bg-blue-50 border border-blue-300 rounded min-w-[210px]">
+                          <input
+                            type="text"
+                            autoFocus
+                            placeholder="Item Name (e.g. Brake Disc)"
+                            value={newItemName}
+                            onChange={(e) => setNewItemName(e.target.value)}
+                            className="px-1.5 py-0.5 text-xs border border-slate-300 rounded bg-white"
+                          />
+                          <div className="flex gap-1">
+                            <input
+                              type="text"
+                              placeholder="Part Code (ND-101)"
+                              value={newItemCode}
+                              onChange={(e) => setNewItemCode(e.target.value)}
+                              className="w-1/2 px-1.5 py-0.5 text-xs border border-slate-300 rounded bg-white"
+                            />
+                            <input
+                              type="text"
+                              placeholder="Operation (OP-10)"
+                              value={newItemOperation}
+                              onChange={(e) => setNewItemOperation(e.target.value)}
+                              className="w-1/2 px-1.5 py-0.5 text-xs border border-slate-300 rounded bg-white"
+                            />
+                          </div>
+                          <div className="flex justify-end gap-1 mt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => setQuickAddItemRowIdx(null)}
+                              className="px-2 py-0.5 text-[10px] bg-slate-200 rounded"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isInlineSaving}
+                              onClick={() => handleQuickCreateItem(index)}
+                              className="px-2 py-0.5 text-[10px] font-semibold bg-blue-600 text-white rounded"
+                            >
+                              {isInlineSaving ? "Saving..." : "Save & Select"}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <select
+                          disabled={isShiftLocked}
+                          value={row.itemId || ""}
+                          onChange={(e) => {
+                            if (e.target.value === "__ADD_NEW__") {
+                              setNewItemName("");
+                              setNewItemCode("");
+                              setNewItemOperation(row.operation || "OP-10 Turning");
+                              setQuickAddItemRowIdx(index);
+                              return;
+                            }
+                            if (e.target.value === "__ADD_NEW_OP__") {
+                              setNewOperationName("");
+                              setQuickAddOpRowIdx(index);
+                              return;
+                            }
+                            handleItemSelect(index, e.target.value);
+                          }}
+                          className="w-full text-xs bg-transparent border border-slate-200 rounded px-1.5 py-1"
+                        >
+                          <option value="">-- Select Item --</option>
+                          {items.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.itemName} ({item.itemCode}) — {item.operation}
+                            </option>
+                          ))}
+                          {!isShiftLocked && (
+                            <>
+                              <option value="__ADD_NEW__" className="font-semibold text-blue-600">
+                                + Add New Item...
+                              </option>
+                              {row.itemId && (
+                                <option value="__ADD_NEW_OP__" className="font-semibold text-emerald-600">
+                                  + Add New Operation for {row.itemName || "Selected Item"}...
+                                </option>
+                              )}
+                            </>
+                          )}
+                        </select>
+                      )}
+                    </td>
+
+                    {/* 5. OPERATION */}
+                    <td className="px-1.5 py-1 border-r border-slate-200">
+                      {quickAddOpRowIdx === index ? (
+                        <div className="flex flex-col gap-1 p-1.5 bg-emerald-50 border border-emerald-300 rounded min-w-[190px]">
+                          <input
+                            type="text"
+                            autoFocus
+                            placeholder="Operation (e.g. OP-20 Boring)"
+                            value={newOperationName}
+                            onChange={(e) => setNewOperationName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleQuickCreateOperation(index);
+                              }
+                              if (e.key === "Escape") setQuickAddOpRowIdx(null);
+                            }}
+                            className="px-1.5 py-0.5 text-xs border border-slate-300 rounded bg-white focus:outline-none focus:border-emerald-600"
+                          />
+                          <div className="flex justify-end gap-1 mt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => setQuickAddOpRowIdx(null)}
+                              className="px-2 py-0.5 text-[10px] bg-slate-200 rounded hover:bg-slate-300"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isInlineSaving || !newOperationName.trim()}
+                              onClick={() => handleQuickCreateOperation(index)}
+                              className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                              {isInlineSaving ? "Saving..." : "Save & Select"}
+                            </button>
+                          </div>
+                        </div>
+                      ) : !row.itemId ? (
+                        <span className="block px-2 py-1 text-xs text-slate-400 italic">
+                          — Select Item First —
+                        </span>
+                      ) : (
+                        <div className="flex items-center gap-1 w-full">
+                          <select
+                            value={row.operation || ""}
+                            disabled={isShiftLocked}
+                            onChange={(e) => {
+                              if (e.target.value === "__ADD_NEW_OP__") {
+                                setNewOperationName("");
+                                setQuickAddOpRowIdx(index);
+                                return;
+                              }
+                              handleOperationChange(index, e.target.value);
+                            }}
+                            className={`w-full bg-transparent px-1.5 py-1 rounded border border-transparent ${
+                              isShiftLocked
+                                ? "cursor-not-allowed opacity-75"
+                                : "hover:border-slate-300 focus:border-slate-800 focus:bg-white cursor-pointer"
+                            } text-xs text-slate-900 font-medium focus:outline-none`}
+                          >
+                            <option value="">— Select Operation —</option>
+                            {rowOperations.map((op) => (
+                              <option key={op} value={op}>
+                                {op}
+                              </option>
+                            ))}
+                            {row.operation && !rowOperations.includes(row.operation) && (
+                              <option key={row.operation} value={row.operation}>
+                                {row.operation}
+                              </option>
+                            )}
+                            {!isShiftLocked && (
+                              <option value="__ADD_NEW_OP__" className="font-semibold text-emerald-600">
+                                + Add New Operation...
+                              </option>
+                            )}
+                          </select>
+                          {!isShiftLocked && (
+                            <button
+                              type="button"
+                              title="Add new operation for this item"
+                              onClick={() => {
+                                setNewOperationName("");
+                                setQuickAddOpRowIdx(index);
+                              }}
+                              className="p-1 text-slate-400 hover:text-emerald-600 transition-colors shrink-0"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+
+                    {/* 5B. CYCLE TIME */}
+                    <td className="px-1.5 py-1 border-r border-slate-200 text-center">
                       <input
                         type="number"
-                        min="0"
                         step="0.01"
-                        disabled={!isAdmin || isShiftLocked}
-                        readOnly={!isAdmin || isShiftLocked}
-                        data-grid-cell={`${index}-cycleTime`}
-                        value={row.cycleTime > 0 ? row.cycleTime : ''}
-                        placeholder="—"
-                        title={
-                          !isAdmin
-                            ? 'Cycle Time is configured in Master Data (Unit Head access required to edit manually)'
-                            : isShiftLocked
-                            ? 'Shift is locked (Read-Only)'
-                            : timeBalance.missingCycleTime
-                            ? `ERROR: Actual Output is ${row.actualOutput} pcs, but Cycle Time is 0. Enter cycle time or select configured item.`
-                            : row.cycleTime > 0
-                            ? `Cycle time: ${row.cycleTime}s`
-                            : 'No cycle time configured for this Machine + Item + Operation in Master Data'
-                        }
-                        onFocus={(e) => e.target.select()}
-                        onKeyDown={(e) => handleGridKeyDown(e, index, 'cycleTime')}
-                        onChange={(e) => {
-                          if (!isAdmin || isShiftLocked) return;
-                          const newCt = parseFloat(e.target.value) || 0;
-                          const newStd =
-                            newCt > 0
-                              ? calculateDynamicStdOutput(newCt, shiftWorkingMinutes)
-                              : row.stdOutput;
-                          updateRow(index, { cycleTime: newCt, stdOutput: newStd });
-                        }}
-                        className={`w-16 mx-auto text-center font-mono text-xs px-1 py-1 rounded border ${
-                          timeBalance.missingCycleTime
-                            ? 'bg-rose-100 text-rose-950 font-bold border-rose-500 ring-2 ring-rose-300 animate-pulse'
-                            : row.cycleTime > 0
-                            ? 'bg-blue-50/60 text-blue-900 font-bold border-blue-200'
-                            : 'bg-transparent text-slate-400 border-transparent hover:border-slate-300'
-                        } ${
-                          !isAdmin || isShiftLocked
-                            ? 'cursor-not-allowed opacity-85'
-                            : 'focus:border-slate-800 focus:bg-white'
-                        } focus:outline-none`}
+                        min="0"
+                        disabled={isShiftLocked}
+                        value={row.cycleTime || ""}
+                        onChange={(e) => handleCycleTimeChange(index, e.target.value)}
+                        onBlur={(e) => handleCycleTimeBlurOrCommit(index, Number(e.target.value) || 0)}
+                        className="w-16 text-right text-xs px-1.5 py-1 border border-slate-200 rounded bg-white disabled:bg-slate-100"
                       />
                     </td>
 
-                    {/* 6. STD O/PUT (Locked for Non-Admins & When Shift is Locked) */}
+                    {/* 6. STD O/PUT */}
                     <td className="px-1 py-1 border-r border-slate-200 text-center">
                       <input
                         type="number"
                         min="0"
-                        disabled={!isAdmin || isShiftLocked}
-                        readOnly={!isAdmin || isShiftLocked}
-                        data-grid-cell={`${index}-stdOutput`}
-                        value={row.stdOutput || ''}
-                        title={
-                          !isAdmin
-                            ? 'Std Output is auto-calculated from Cycle Time (Unit Head access required to edit manually)'
-                            : isShiftLocked
-                            ? 'Shift is locked (Read-Only)'
-                            : undefined
-                        }
-                        onFocus={(e) => e.target.select()}
-                        onKeyDown={(e) => handleGridKeyDown(e, index, 'stdOutput')}
+                        readOnly={!isAdmin || isReadOnly}
+                        value={row.stdOutput || ""}
                         onChange={(e) => {
-                          if (!isAdmin || isShiftLocked) return;
+                          if (!isAdmin) return;
                           updateRow(index, { stdOutput: Number(e.target.value) || 0 });
                         }}
-                        className={`w-16 mx-auto text-center font-mono font-semibold text-slate-700 bg-transparent px-1 py-1 rounded border border-transparent ${
-                          !isAdmin || isShiftLocked
-                            ? 'cursor-not-allowed opacity-85'
-                            : 'hover:border-slate-300 focus:border-slate-800 focus:bg-white'
+                        title={!isAdmin ? "Auto-calculated from Shift Minutes ÷ Cycle Time (Unit Head only)" : undefined}
+                        className={`w-16 mx-auto text-center font-mono font-semibold px-1 py-1 rounded border ${
+                          !isAdmin
+                            ? "bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed"
+                            : "text-slate-700 bg-transparent border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white"
                         } focus:outline-none`}
                       />
                     </td>
@@ -1526,6 +2092,192 @@ const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycl
           </div>
         </div>
       </div>
+
+      {/* Compact Inline Modal / Popover for Quick Creating Operators & Items */}
+      {(quickAddOperatorRowIdx !== null || quickAddItemRowIdx !== null) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {quickAddOperatorRowIdx !== null ? (
+                  <UserPlus className="w-4 h-4 text-emerald-400" />
+                ) : (
+                  <PackagePlus className="w-4 h-4 text-emerald-400" />
+                )}
+                <h3 className="text-sm font-bold tracking-tight">
+                  {quickAddOperatorRowIdx !== null
+                    ? 'Add New Operator'
+                    : 'Add New Item & Operation'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (isInlineSaving) return;
+                  setQuickAddOperatorRowIdx(null);
+                  setQuickAddItemRowIdx(null);
+                  setNewOperatorName('');
+                  setNewItemCode('');
+                  setNewItemName('');
+                  setNewItemOperation('');
+                }}
+                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Form Body */}
+            {quickAddOperatorRowIdx !== null ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (quickAddOperatorRowIdx !== null) {
+                    handleQuickCreateOperator(quickAddOperatorRowIdx);
+                  }
+                }}
+                className="p-5 space-y-4"
+              >
+                {quickAddError && (
+                  <div className="p-2.5 text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-md font-medium">
+                    {quickAddError}
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Operator Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    autoFocus
+                    required
+                    value={newOperatorName}
+                    onChange={(e) => setNewOperatorName(e.target.value)}
+                    placeholder="e.g. Ramesh Kumar"
+                    className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md focus:border-slate-800 focus:outline-none"
+                  />
+                  {quickAddOperatorRowIdx !== null && rows[quickAddOperatorRowIdx] && (
+                    <p className="mt-1.5 text-[11px] text-slate-500">
+                      Will be assigned immediately to machine{' '}
+                      <strong>{rows[quickAddOperatorRowIdx].machineName}</strong>.
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    disabled={isInlineSaving}
+                    onClick={() => {
+                      setQuickAddOperatorRowIdx(null);
+                      setNewOperatorName('');
+                    }}
+                    className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isInlineSaving || !newOperatorName.trim()}
+                    className="px-4 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 rounded-md shadow-xs transition-colors"
+                  >
+                    {isInlineSaving ? 'Adding...' : 'Add & Assign'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (quickAddItemRowIdx !== null) {
+                    handleQuickCreateItem(quickAddItemRowIdx);
+                  }
+                }}
+                className="p-5 space-y-3.5"
+              >
+                {quickAddError && (
+                  <div className="p-2.5 text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-md font-medium">
+                    {quickAddError}
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Item Code / Part No. *
+                  </label>
+                  <input
+                    type="text"
+                    autoFocus
+                    required
+                    value={newItemCode}
+                    onChange={(e) => setNewItemCode(e.target.value)}
+                    placeholder="e.g. DRG-101"
+                    className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md font-mono focus:border-slate-800 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Item / Component Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newItemName}
+                    onChange={(e) => setNewItemName(e.target.value)}
+                    placeholder="e.g. Differential Housing"
+                    className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md focus:border-slate-800 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Operation Description *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newItemOperation}
+                    onChange={(e) => setNewItemOperation(e.target.value)}
+                    placeholder="e.g. OP-10 Turning"
+                    className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md focus:border-slate-800 focus:outline-none"
+                  />
+                  {quickAddItemRowIdx !== null && rows[quickAddItemRowIdx] && (
+                    <p className="mt-1.5 text-[11px] text-slate-500">
+                      Will be assigned immediately to machine{' '}
+                      <strong>{rows[quickAddItemRowIdx].machineName}</strong>.
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    disabled={isInlineSaving}
+                    onClick={() => {
+                      setQuickAddItemRowIdx(null);
+                      setNewItemCode('');
+                      setNewItemName('');
+                      setNewItemOperation('');
+                    }}
+                    className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      isInlineSaving ||
+                      !newItemCode.trim() ||
+                      !newItemName.trim() ||
+                      !newItemOperation.trim()
+                    }
+                    className="px-4 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 rounded-md shadow-xs transition-colors"
+                  >
+                    {isInlineSaving ? 'Adding...' : 'Add & Assign'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
