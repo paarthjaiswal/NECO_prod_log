@@ -29,6 +29,8 @@ import {
   calculateShiftTimeBalance,
   calculateDowntimePct,
   getOperationsForItem,
+  getUniqueItems,
+  getCanonicalItemId,
   resolveMachineItemTarget,
 } from '@/services/storageService';
 import {
@@ -76,6 +78,7 @@ export function OperatorKiosk({
   const isShiftLocked = isReadOnly !== undefined ? isReadOnly : externalShiftLocked;
   const { machines, operators, items } = masterData;
   const cycleTimes = useMemo(() => masterData.cycleTimes ?? [], [masterData.cycleTimes]);
+  const uniqueItems = useMemo(() => getUniqueItems(items ?? []), [items]);
 
   // Inline "+ Add" & Machine Edit states
   const [showAddOperatorModal, setShowAddOperatorModal] = useState(false);
@@ -1526,17 +1529,33 @@ export function OperatorKiosk({
                 )}
               </div>
               <select
-                value={draft.itemId}
+                value={getCanonicalItemId(draft.itemId, items)}
                 disabled={isShiftLocked}
                 onChange={(e) => handleItemSelect(e.target.value)}
                 className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 <option value="">— Select Item from Master —</option>
-                {items.map((it) => (
-                  <option key={it.id} value={it.id}>
-                    {it.itemName} ({it.itemCode})
-                  </option>
-                ))}
+                {uniqueItems.map((it) => {
+                  const label =
+                    it.itemCode &&
+                    it.itemCode.trim().toLowerCase() !==
+                      it.itemName.trim().toLowerCase()
+                      ? `${it.itemName} (${it.itemCode})`
+                      : it.itemName;
+                  return (
+                    <option key={it.id} value={it.id}>
+                      {label}
+                    </option>
+                  );
+                })}
+                {draft.itemId &&
+                  !uniqueItems.some(
+                    (u) => u.id === getCanonicalItemId(draft.itemId, items)
+                  ) && (
+                    <option value={draft.itemId}>
+                      {draft.itemName || draft.itemId}
+                    </option>
+                  )}
               </select>
             </div>
           </div>

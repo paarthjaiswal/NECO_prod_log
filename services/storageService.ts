@@ -51,6 +51,96 @@ export function calculateEfficiency(
 }
 
 /**
+ * Deduplicates ItemMaster array by normalized itemName and/or itemCode
+ * so each unique component/part appears only once in dropdown menus.
+ */
+export function getUniqueItems(items: ItemMaster[]): ItemMaster[] {
+  if (!items || items.length === 0) return [];
+  const seen = new Set<string>();
+  const unique: ItemMaster[] = [];
+
+  for (const item of items) {
+    if (!item) continue;
+    const nameKey = (item.itemName || "").trim().toLowerCase();
+    const codeKey = (item.itemCode || "").trim().toLowerCase();
+    const key = codeKey ? `${codeKey}:::${nameKey}` : nameKey;
+    if (!key) continue;
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+
+  return unique;
+}
+
+/**
+ * Finds all sibling IDs in `items` that share the same normalized itemName or itemCode as `itemId`.
+ */
+export function getSiblingItemIds(
+  itemId: string,
+  items: ItemMaster[]
+): string[] {
+  if (!itemId || !items || items.length === 0) return [];
+  const cleanId = itemId.trim().toLowerCase();
+
+  const baseItem = items.find(
+    (it) =>
+      it &&
+      ((it.id && it.id.trim().toLowerCase() === cleanId) ||
+        (it.itemCode && it.itemCode.trim().toLowerCase() === cleanId) ||
+        (it.itemName && it.itemName.trim().toLowerCase() === cleanId))
+  );
+
+  if (!baseItem) return [itemId];
+
+  const baseName = (baseItem.itemName || "").trim().toLowerCase();
+  const baseCode = (baseItem.itemCode || "").trim().toLowerCase();
+
+  const siblingIds = new Set<string>();
+  if (baseItem.id) siblingIds.add(baseItem.id);
+
+  for (const it of items) {
+    if (!it) continue;
+    const itName = (it.itemName || "").trim().toLowerCase();
+    const itCode = (it.itemCode || "").trim().toLowerCase();
+
+    const matchesName = Boolean(baseName && itName && itName === baseName);
+    const matchesCode = Boolean(baseCode && itCode && itCode === baseCode);
+
+    if (matchesName || matchesCode) {
+      if (it.id) siblingIds.add(it.id);
+    }
+  }
+
+  return Array.from(siblingIds);
+}
+
+/**
+ * Given any itemId (or sibling itemId), returns the canonical ID from uniqueItems.
+ */
+export function getCanonicalItemId(
+  itemId: string,
+  items: ItemMaster[]
+): string {
+  if (!itemId || !items || items.length === 0) return itemId;
+  const cleanId = itemId.trim().toLowerCase();
+  const uniqueList = getUniqueItems(items);
+  const foundInUnique = uniqueList.find(
+    (it) => it.id && it.id.trim().toLowerCase() === cleanId
+  );
+  if (foundInUnique) return foundInUnique.id;
+
+  const siblingIds = getSiblingItemIds(itemId, items);
+  const siblingSet = new Set(siblingIds.map((s) => s.toLowerCase()));
+  const canonical = uniqueList.find(
+    (it) => it.id && siblingSet.has(it.id.trim().toLowerCase())
+  );
+  return canonical?.id || itemId;
+}
+
+/**
  * Extracts all available operations for a given Item.
  * Supports comma/slash-separated operations (e.g., "OP-10, OP-20"),
  * multiple rows with the same itemCode/itemName, and operations saved in cycleTimes.
@@ -62,32 +152,53 @@ export function getOperationsForItem(
   machineId?: string,
   machineName?: string
 ): string[] {
+  if (!itemId) return [];
+  const siblingIds = getSiblingItemIds(itemId, items);
+  const siblingIdSet = new Set(siblingIds.map((id) => id.toLowerCase()));
+
   const cleanItemId = (itemId || "").trim().toLowerCase();
   const selectedItem = items.find((i) => {
     if (!i) return false;
     return (
-      (i.id && i.id.trim().toLowerCase() === cleanItemId) ||
+      (i.id && siblingIdSet.has(i.id.trim().toLowerCase())) ||
       (i.itemCode && i.itemCode.trim().toLowerCase() === cleanItemId) ||
       (i.itemName && i.itemName.trim().toLowerCase() === cleanItemId)
     );
   });
-  if (!selectedItem) return [];
+  if (!selectedItem && siblingIds.length === 0) return [];
 
-  const itemKeys = new Set<string>();
-  if (selectedItem.id) itemKeys.add(selectedItem.id.trim().toLowerCase());
-  if (selectedItem.itemCode) itemKeys.add(selectedItem.itemCode.trim().toLowerCase());
-  if (selectedItem.itemName) itemKeys.add(selectedItem.itemName.trim().toLowerCase());
+  const itemKeys = new Set<string>(siblingIdSet);
+  if (cleanItemId) itemKeys.add(cleanItemId);
+
+  const matchingItems = items.filter((i) => {
+    if (!i) return false;
+    if (i.id && siblingIdSet.has(i.id.trim().toLowerCase())) return true;
+    if (selectedItem) {
+      if (
+        i.itemCode &&
+        selectedItem.itemCode &&
+        i.itemCode.trim().toLowerCase() === selectedItem.itemCode.trim().toLowerCase()
+      )
+        return true;
+      if (
+        i.itemName &&
+        selectedItem.itemName &&
+        i.itemName.trim().toLowerCase() === selectedItem.itemName.trim().toLowerCase()
+      )
+        return true;
+    }
+    return false;
+  });
+
+  matchingItems.forEach((it) => {
+    if (it.id) itemKeys.add(it.id.trim().toLowerCase());
+    if (it.itemCode) itemKeys.add(it.itemCode.trim().toLowerCase());
+    if (it.itemName) itemKeys.add(it.itemName.trim().toLowerCase());
+  });
 
   const machineKeys = new Set<string>();
   if (machineId && machineId.trim()) machineKeys.add(machineId.trim().toLowerCase());
   if (machineName && machineName.trim()) machineKeys.add(machineName.trim().toLowerCase());
-
-  const matchingItems = items.filter(
-    (i) =>
-      i.id === selectedItem.id ||
-      (i.itemCode && i.itemCode === selectedItem.itemCode) ||
-      i.itemName.toLowerCase() === selectedItem.itemName.toLowerCase()
-  );
 
   const opsSet = new Set<string>();
 
@@ -275,23 +386,44 @@ export function findMatchingCycleTime(
   if (!cycleTimes || cycleTimes.length === 0) return undefined;
 
   const cleanItemId = (itemIdentifier || "").trim().toLowerCase();
+  const siblingIds = getSiblingItemIds(itemIdentifier, items);
+  const itemKeys = new Set<string>(siblingIds.map((id) => id.toLowerCase()));
+  if (cleanItemId) itemKeys.add(cleanItemId);
+
   const item = items.find((it) => {
     if (!it) return false;
     return (
-      (it.id && it.id.trim().toLowerCase() === cleanItemId) ||
+      (it.id && itemKeys.has(it.id.trim().toLowerCase())) ||
       (it.itemCode && it.itemCode.trim().toLowerCase() === cleanItemId) ||
       (it.itemName && it.itemName.trim().toLowerCase() === cleanItemId)
     );
   });
 
-  // All acceptable keys for this item
-  const itemKeys = new Set<string>();
-  if (cleanItemId) itemKeys.add(cleanItemId);
-  if (item) {
-    if (item.id) itemKeys.add(item.id.trim().toLowerCase());
-    if (item.itemCode) itemKeys.add(item.itemCode.trim().toLowerCase());
-    if (item.itemName) itemKeys.add(item.itemName.trim().toLowerCase());
-  }
+  const matchingItems = items.filter((it) => {
+    if (!it) return false;
+    if (it.id && itemKeys.has(it.id.trim().toLowerCase())) return true;
+    if (item) {
+      if (
+        it.itemCode &&
+        item.itemCode &&
+        it.itemCode.trim().toLowerCase() === item.itemCode.trim().toLowerCase()
+      )
+        return true;
+      if (
+        it.itemName &&
+        item.itemName &&
+        it.itemName.trim().toLowerCase() === item.itemName.trim().toLowerCase()
+      )
+        return true;
+    }
+    return false;
+  });
+
+  matchingItems.forEach((it) => {
+    if (it.id) itemKeys.add(it.id.trim().toLowerCase());
+    if (it.itemCode) itemKeys.add(it.itemCode.trim().toLowerCase());
+    if (it.itemName) itemKeys.add(it.itemName.trim().toLowerCase());
+  });
 
   // All acceptable keys for this machine
   const cleanMachId = (machineIdentifier || "").trim().toLowerCase();

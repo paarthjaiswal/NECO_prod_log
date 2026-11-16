@@ -27,6 +27,8 @@ import {
   calculateTotalBreakdown,
   resolveMachineItemTarget,
   getOperationsForItem,
+  getUniqueItems,
+  getCanonicalItemId,
   calculateDynamicStdOutput,
   calculateDowntimePct,
   calculateShiftTimeBalance,
@@ -175,6 +177,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const onSave = onSaveShift;
   const operators = useMemo(() => masterData?.operators ?? [], [masterData?.operators]);
   const items = useMemo(() => masterData?.items ?? [], [masterData?.items]);
+  const uniqueItems = useMemo(() => getUniqueItems(items), [items]);
   const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycleTimes]);
 
   // Memoized operations lookup map to prevent 16x regex/array filtering on every keystroke
@@ -1652,7 +1655,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       ) : (
                         <select
                           disabled={isShiftLocked}
-                          value={row.itemId || ""}
+                          value={getCanonicalItemId(row.itemId, items)}
                           onChange={(e) => {
                             if (e.target.value === "__ADD_NEW__") {
                               setNewItemName("");
@@ -1671,11 +1674,28 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           className="w-full text-xs bg-transparent border border-slate-200 rounded px-1.5 py-1"
                         >
                           <option value="">-- Select Item --</option>
-                          {items.map((item) => (
-                            <option key={item.id} value={item.id}>
-                              {item.itemName} ({item.itemCode}) — {item.operation}
-                            </option>
-                          ))}
+                          {uniqueItems.map((item) => {
+                            const label =
+                              item.itemCode &&
+                              item.itemCode.trim().toLowerCase() !==
+                                item.itemName.trim().toLowerCase()
+                                ? `${item.itemName} (${item.itemCode})`
+                                : item.itemName;
+                            return (
+                              <option key={item.id} value={item.id}>
+                                {label}
+                              </option>
+                            );
+                          })}
+                          {row.itemId &&
+                            !uniqueItems.some(
+                              (u) =>
+                                u.id === getCanonicalItemId(row.itemId, items)
+                            ) && (
+                              <option value={row.itemId}>
+                                {row.itemName || row.itemId}
+                              </option>
+                            )}
                           {!isShiftLocked && (
                             <>
                               <option value="__ADD_NEW__" className="font-semibold text-blue-600">

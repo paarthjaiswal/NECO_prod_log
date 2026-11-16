@@ -35,6 +35,11 @@ import {
   upsertShiftMaster,
   deleteShiftMaster,
 } from "@/actions/shiftActions";
+import {
+  getUniqueItems,
+  getCanonicalItemId,
+  getSiblingItemIds,
+} from "@/services/storageService";
 
 interface MasterDataSettingsProps {
   masterData: MasterDataState;
@@ -226,29 +231,40 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   // Stored as string so typing '54' never becomes '054'
   const [ctCycleTime, setCtCycleTime] = useState<string>("");
 
+  const uniqueItems = useMemo(
+    () => getUniqueItems(masterData.items ?? []),
+    [masterData.items]
+  );
+
   // Extract all operations for the selected item (supports comma-separated or multiple rows with same itemCode/itemName)
   const availableOperations = useMemo(() => {
-    const selectedItem = masterData.items.find((i) => i.id === ctItemId);
-    if (!selectedItem) return [];
+    if (!ctItemId) return [];
+    const siblingIds = getSiblingItemIds(ctItemId, masterData.items ?? []);
+    const siblingSet = new Set(siblingIds.map((s) => s.toLowerCase()));
 
-    const matchingItems = masterData.items.filter(
-      (i) =>
-        i.id === selectedItem.id ||
-        (i.itemCode && i.itemCode === selectedItem.itemCode) ||
-        i.itemName.toLowerCase() === selectedItem.itemName.toLowerCase()
-    );
+    const matchingItems = (masterData.items ?? []).filter((i) => {
+      if (!i) return false;
+      return i.id && siblingSet.has(i.id.toLowerCase());
+    });
 
     const opsSet = new Set<string>();
     matchingItems.forEach((item) => {
-      item.operation
+      (item.operation || "")
         .split(/[,/]/)
         .map((op) => op.trim())
         .filter(Boolean)
         .forEach((op) => opsSet.add(op));
     });
 
+    // Also include operations configured in machine_item_cycle_times for this item
+    (masterData.cycleTimes ?? [])
+      .filter((ct) => ct.itemId && siblingSet.has(ct.itemId.toLowerCase()))
+      .forEach((ct) => {
+        if (ct.operation?.trim()) opsSet.add(ct.operation.trim());
+      });
+
     return Array.from(opsSet);
-  }, [ctItemId, masterData.items]);
+  }, [ctItemId, masterData.items, masterData.cycleTimes]);
 
   // Auto-fills Operation and existing Cycle Time when Machine, Item, or Operation changes
   const handleSelectCycleTimeTriple = (
@@ -259,23 +275,25 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
     setCtMachineId(machineId);
     setCtItemId(itemId);
 
-    const selectedItem = masterData.items.find((i) => i.id === itemId);
-    if (!selectedItem) {
+    const siblingIds = getSiblingItemIds(itemId, masterData.items ?? []);
+    const siblingSet = new Set(siblingIds.map((s) => s.toLowerCase()));
+
+    const selectedItem = (masterData.items ?? []).find(
+      (i) => i.id && (i.id === itemId || siblingSet.has(i.id.toLowerCase()))
+    );
+    if (!selectedItem && siblingIds.length === 0) {
       setCtOperation("");
       setCtCycleTime("");
       return;
     }
 
     // Determine operation list for this item
-    const matchingItems = masterData.items.filter(
-      (i) =>
-        i.id === selectedItem.id ||
-        (i.itemCode && i.itemCode === selectedItem.itemCode) ||
-        i.itemName.toLowerCase() === selectedItem.itemName.toLowerCase()
+    const matchingItems = (masterData.items ?? []).filter(
+      (i) => i.id && siblingSet.has(i.id.toLowerCase())
     );
     const opsList: string[] = [];
     matchingItems.forEach((item) => {
-      item.operation
+      (item.operation || "")
         .split(/[,/]/)
         .map((op) => op.trim())
         .filter(Boolean)
@@ -284,13 +302,21 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         });
     });
 
-    const chosenOp = explicitOperation ?? opsList[0] ?? selectedItem.operation ?? "";
+    (masterData.cycleTimes ?? [])
+      .filter((ct) => ct.itemId && siblingSet.has(ct.itemId.toLowerCase()))
+      .forEach((ct) => {
+        if (ct.operation?.trim() && !opsList.includes(ct.operation.trim())) {
+          opsList.push(ct.operation.trim());
+        }
+      });
+
+    const chosenOp = explicitOperation ?? opsList[0] ?? selectedItem?.operation ?? "";
     setCtOperation(chosenOp);
 
     const existingCt = (masterData.cycleTimes ?? []).find(
       (ct) =>
         ct.machineId === machineId &&
-        ct.itemId === itemId &&
+        (ct.itemId === itemId || siblingSet.has((ct.itemId || "").toLowerCase())) &&
         ct.operation.toLowerCase() === chosenOp.toLowerCase()
     );
 
@@ -1030,7 +1056,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                   Part / Item
                 </label>
                 <select
-                  value={ctItemId}
+                  value={getCanonicalItemId(ctItemId, masterData.items ?? [])}
                   onChange={(e) =>
                     handleSelectCycleTimeTriple(ctMachineId, e.target.value)
                   }
@@ -1038,11 +1064,26 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                   required
                 >
                   <option value="">Select Item...</option>
-                  {masterData.items.map((item) => (
+                  {uniqueItems.map((item) => (
                     <option key={item.id} value={item.id}>
-                      {item.itemCode} — {item.itemName}
+                      {item.itemCode &&
+                      item.itemCode.trim().toLowerCase() !==
+                        item.itemName.trim().toLowerCase()
+                        ? `${item.itemCode} — ${item.itemName}`
+                        : item.itemName}
                     </option>
                   ))}
+                  {ctItemId &&
+                    !uniqueItems.some(
+                      (u) =>
+                        u.id ===
+                        getCanonicalItemId(ctItemId, masterData.items ?? [])
+                    ) && (
+                      <option value={ctItemId}>
+                        {masterData.items.find((i) => i.id === ctItemId)
+                          ?.itemName || ctItemId}
+                      </option>
+                    )}
                 </select>
               </div>
 
@@ -1176,7 +1217,12 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                             type="button"
                             onClick={() => {
                               setCtMachineId(ct.machineId);
-                              setCtItemId(ct.itemId);
+                              setCtItemId(
+                                getCanonicalItemId(
+                                  ct.itemId,
+                                  masterData.items ?? []
+                                )
+                              );
                               setCtOperation(ct.operation);
                               setCtCycleTime(String(ct.cycleTime));
                             }}
