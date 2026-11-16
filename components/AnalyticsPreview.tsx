@@ -288,19 +288,22 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     const totalAct = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
     const totalRework = activeLogs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
 
-    const totalNoDisc = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.noDisc) || 0), 0);
-    const totalChange = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.change) || 0), 0);
-    const totalPower = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.power) || 0), 0);
-    const totalOperator = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.operator) || 0), 0);
-    const totalMachineBd = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.machineBreakdown) || 0), 0);
-    const totalFixProg = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.fixProgSettings) || 0), 0);
-    const totalBreakdown =
-      totalNoDisc +
-      totalChange +
-      totalPower +
-      totalOperator +
-      totalMachineBd +
-      totalFixProg;
+    const totalNoDisc = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.noDisc) || 0), 0).toFixed(2));
+    const totalChange = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.change) || 0), 0).toFixed(2));
+    const totalPower = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.power) || 0), 0).toFixed(2));
+    const totalOperator = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.operator) || 0), 0).toFixed(2));
+    const totalMachineBd = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.machineBreakdown) || 0), 0).toFixed(2));
+    const totalFixProg = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.fixProgSettings) || 0), 0).toFixed(2));
+    const totalBreakdown = Number(
+      (
+        totalNoDisc +
+        totalChange +
+        totalPower +
+        totalOperator +
+        totalMachineBd +
+        totalFixProg
+      ).toFixed(2)
+    );
 
     const plantEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
     const reworkRate = totalAct > 0 ? ((totalRework / totalAct) * 100).toFixed(1) : '0.0';
@@ -437,7 +440,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       const runningEffs = [aEff, bEff, cEff].filter((v): v is number => v !== null);
       const spread = runningEffs.length >= 2 ? Math.max(...runningEffs) - Math.min(...runningEffs) : null;
 
-      const totalBd = lineLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0);
+      const totalBd = Number(lineLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2));
 
       grandStd += std;
       grandAct += act;
@@ -447,7 +450,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       grandBAct += bAct;
       grandCStd += cStd;
       grandCAct += cAct;
-      grandBd += totalBd;
+      grandBd = Number((grandBd + totalBd).toFixed(2));
 
       return {
         lineName,
@@ -595,7 +598,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       const std = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
       const act = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
       const rework = machLogs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-      const downtime = machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0);
+      const downtime = Number(machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2));
       const efficiency = std > 0 ? Math.round((act / std) * 100) : null;
 
       const filterShift = (prefix: string) =>

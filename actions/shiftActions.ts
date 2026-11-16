@@ -221,14 +221,17 @@ function resolveCleanShiftDisplayName(
 
 function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
   const totalWorking = Number(dbRow.total_working_minutes ?? 1305);
-  const noDisc = Number(dbRow.bd_no_disc ?? 0);
-  const change = Number(dbRow.bd_change ?? 0);
-  const power = Number(dbRow.bd_power ?? 0);
-  const operator = Number(dbRow.bd_operator ?? 0);
-  const machineBreakdown = Number(dbRow.bd_machine ?? 0);
-  const fixProgSettings = Number(dbRow.bd_fix_prog ?? 0);
+  const noDisc = Number(Number(dbRow.bd_no_disc ?? 0).toFixed(2));
+  const change = Number(Number(dbRow.bd_change ?? 0).toFixed(2));
+  const power = Number(Number(dbRow.bd_power ?? 0).toFixed(2));
+  const operator = Number(Number(dbRow.bd_operator ?? 0).toFixed(2));
+  const machineBreakdown = Number(Number(dbRow.bd_machine ?? 0).toFixed(2));
+  const fixProgSettings = Number(Number(dbRow.bd_fix_prog ?? 0).toFixed(2));
   const totalBd = Number(
-    dbRow.total_bd_minutes ?? (noDisc + change + power + operator + machineBreakdown + fixProgSettings)
+    (
+      Number(dbRow.total_bd_minutes) ||
+      (noDisc + change + power + operator + machineBreakdown + fixProgSettings)
+    ).toFixed(2)
   );
   const rawShift = dbRow.shift ?? "Shift A";
   const shiftCode = extractShiftCode(rawShift);
@@ -246,7 +249,7 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
     itemId: dbRow.item_id ?? "",
     itemName: dbRow.item_name ?? "",
     operation: dbRow.operation ?? "",
-    cycleTime: Number(dbRow.cycle_time ?? 0),
+    cycleTime: Number(Number(dbRow.cycle_time ?? 0).toFixed(2)),
     totalWorkingMinutes: totalWorking,
     stdOutput: Number(dbRow.std_output ?? 0),
     actualOutput: Number(dbRow.actual_output ?? 0),
@@ -297,17 +300,17 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     item_id: uiRow.itemId?.trim() ?? "",
     item_name: uiRow.itemName?.trim() ?? "",
     operation: uiRow.operation?.trim() ?? "",
-    cycle_time: Number(uiRow.cycleTime) || 0,
+    cycle_time: Number(Math.max(0, Number(uiRow.cycleTime) || 0).toFixed(2)),
     total_working_minutes: Math.round(Number(uiRow.totalWorkingMinutes) || 1305),
     std_output: Math.round(Number(uiRow.stdOutput) || 0),
     actual_output: Math.round(Number(uiRow.actualOutput) || 0),
     rework: Math.round(Number(uiRow.rework) || 0),
-    bd_no_disc: Math.max(0, Math.round(Number(uiRow.breakdown?.noDisc) || 0)),
-    bd_change: Math.max(0, Math.round(Number(uiRow.breakdown?.change) || 0)),
-    bd_power: Math.max(0, Math.round(Number(uiRow.breakdown?.power) || 0)),
-    bd_operator: Math.max(0, Math.round(Number(uiRow.breakdown?.operator) || 0)),
-    bd_machine: Math.max(0, Math.round(Number(uiRow.breakdown?.machineBreakdown) || 0)),
-    bd_fix_prog: Math.max(0, Math.round(Number(uiRow.breakdown?.fixProgSettings) || 0)),
+    bd_no_disc: Number(Math.max(0, Number(uiRow.breakdown?.noDisc) || 0).toFixed(2)),
+    bd_change: Number(Math.max(0, Number(uiRow.breakdown?.change) || 0).toFixed(2)),
+    bd_power: Number(Math.max(0, Number(uiRow.breakdown?.power) || 0).toFixed(2)),
+    bd_operator: Number(Math.max(0, Number(uiRow.breakdown?.operator) || 0).toFixed(2)),
+    bd_machine: Number(Math.max(0, Number(uiRow.breakdown?.machineBreakdown) || 0).toFixed(2)),
+    bd_fix_prog: Number(Math.max(0, Number(uiRow.breakdown?.fixProgSettings) || 0).toFixed(2)),
     remarks: uiRow.remarks?.trim() ?? "",
     updated_at: new Date().toISOString(),
   };

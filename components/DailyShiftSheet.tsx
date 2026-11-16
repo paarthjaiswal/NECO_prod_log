@@ -265,6 +265,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     field: BreakdownKey;
   }>({ rowIndex: 0, field: 'noDisc' });
 
+  // Tracks active text being typed in a breakdown cell so mid-entry decimals like "12." are not swallowed
+  const [editingBdCell, setEditingBdCell] = useState<{
+    rowIndex: number;
+    field: BreakdownKey;
+    text: string;
+  } | null>(null);
+
   // State for Line-Wide Bulk Breakdown Applier (e.g., Power Cut across all machines)
   const [bulkBdField, setBulkBdField] = useState<BreakdownKey>('power');
   const [bulkBdMinutes, setBulkBdMinutes] = useState<string>('');
@@ -676,7 +683,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         machineBreakdown: 0,
         fixProgSettings: 0,
       };
-      const safeVal = isNaN(val) ? 0 : Math.max(0, val);
+      const safeVal = isNaN(val) ? 0 : Number(Math.max(0, val).toFixed(2));
       updateRow(index, {
         breakdown: {
           ...current,
@@ -696,7 +703,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
     const currentVal = Number(targetRow.breakdown?.[active.field] ?? 0);
     const nextVal =
-      mode === 'set' ? Math.max(0, deltaOrExact) : Math.max(0, currentVal + deltaOrExact);
+      mode === 'set'
+        ? Number(Math.max(0, deltaOrExact).toFixed(2))
+        : Number(Math.max(0, currentVal + deltaOrExact).toFixed(2));
 
     handleBreakdownChange(active.rowIndex, active.field, nextVal);
   };
@@ -716,15 +725,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       (activeBdCell?.rowIndex === rowIndex ? activeBdCell.field : 'noDisc');
 
     const currentVal = Number(row.breakdown?.[targetField] ?? 0);
-    handleBreakdownChange(rowIndex, targetField, currentVal + balance.unaccountedMinutes);
+    const nextVal = Number((currentVal + balance.unaccountedMinutes).toFixed(2));
+    handleBreakdownChange(rowIndex, targetField, nextVal);
     setActiveBdCell({ rowIndex, field: targetField });
   };
 
   // Apply bulk breakdown minutes across all machines on the line (e.g., Power Cut)
   const handleApplyBulkLineBd = () => {
     if (isShiftLocked) return;
-    const minsToAdd = parseInt(bulkBdMinutes, 10);
-    if (!minsToAdd || minsToAdd <= 0) return;
+    const minsToAdd = parseFloat(bulkBdMinutes);
+    if (isNaN(minsToAdd) || minsToAdd <= 0) return;
 
     patchRows((row) => {
       const currentBd = row.breakdown || {
@@ -738,7 +748,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       return {
         breakdown: {
           ...currentBd,
-          [bulkBdField]: Math.max(0, Number(currentBd[bulkBdField] || 0) + minsToAdd),
+          [bulkBdField]: Number(Math.max(0, Number(currentBd[bulkBdField] || 0) + minsToAdd).toFixed(2)),
         },
       };
     });
@@ -900,13 +910,15 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const totalStd = rows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
   const totalAct = rows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
   const totalRework = rows.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-  const totalNoDisc = rows.reduce((acc, r) => acc + (Number(r.breakdown?.noDisc) || 0), 0);
-  const totalChange = rows.reduce((acc, r) => acc + (Number(r.breakdown?.change) || 0), 0);
-  const totalPower = rows.reduce((acc, r) => acc + (Number(r.breakdown?.power) || 0), 0);
-  const totalOperator = rows.reduce((acc, r) => acc + (Number(r.breakdown?.operator) || 0), 0);
-  const totalMachineBd = rows.reduce((acc, r) => acc + (Number(r.breakdown?.machineBreakdown) || 0), 0);
-  const totalFixProg = rows.reduce((acc, r) => acc + (Number(r.breakdown?.fixProgSettings) || 0), 0);
-  const grandBreakdown = totalNoDisc + totalChange + totalPower + totalOperator + totalMachineBd + totalFixProg;
+  const totalNoDisc = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.noDisc) || 0), 0).toFixed(2));
+  const totalChange = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.change) || 0), 0).toFixed(2));
+  const totalPower = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.power) || 0), 0).toFixed(2));
+  const totalOperator = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.operator) || 0), 0).toFixed(2));
+  const totalMachineBd = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.machineBreakdown) || 0), 0).toFixed(2));
+  const totalFixProg = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.fixProgSettings) || 0), 0).toFixed(2));
+  const grandBreakdown = Number(
+    (totalNoDisc + totalChange + totalPower + totalOperator + totalMachineBd + totalFixProg).toFixed(2)
+  );
   const overallEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
   const activeMachineCount = rows.filter((r) => (Number(r.stdOutput) || 0) > 0).length;
 
@@ -1286,8 +1298,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             </select>
             <input
               type="number"
-              min="1"
-              step="5"
+              min="0"
+              step="0.01"
               placeholder="Mins"
               value={bulkBdMinutes}
               onChange={(e) => setBulkBdMinutes(e.target.value)}
@@ -1922,11 +1934,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       />
                     </td>
 
-                    {/* 9. BREAKDOWN SUB-COLUMNS (NO/DISC, CHANGE, POWER, OPERATOR) */}
+                    {/* 9. BREAKDOWN SUB-COLUMNS (NO/DISC, CHANGE, POWER, OPERATOR, BREAK DOWN, FIX/PROG) */}
                     {BD_KEYS.map((bdKey) => {
                       const val = Number(row.breakdown?.[bdKey] ?? 0);
                       const isFocused =
                         activeBdCell?.rowIndex === index && activeBdCell?.field === bdKey;
+                      const isEditing =
+                        editingBdCell?.rowIndex === index && editingBdCell?.field === bdKey;
 
                       return (
                         <td
@@ -1938,22 +1952,45 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           <input
                             type="number"
                             min="0"
-                            step="5"
+                            step="0.01"
                             disabled={isShiftLocked}
                             readOnly={isShiftLocked}
                             data-grid-cell={`${index}-${bdKey}`}
-                            value={val > 0 ? val : ''}
+                            value={
+                              isEditing
+                                ? editingBdCell.text
+                                : val > 0
+                                ? val
+                                : ''
+                            }
                             placeholder="0"
                             onFocus={(e) => {
                               e.target.select();
                               setActiveBdCell({ rowIndex: index, field: bdKey });
+                              setEditingBdCell({
+                                rowIndex: index,
+                                field: bdKey,
+                                text: val > 0 ? String(val) : '',
+                              });
+                            }}
+                            onBlur={() => {
+                              setEditingBdCell(null);
                             }}
                             onClick={(e) => (e.target as HTMLInputElement).select()}
                             onKeyDown={(e) => handleGridKeyDown(e, index, bdKey)}
                             onChange={(e) => {
                               const raw = e.target.value;
-                              const parsed = raw === '' ? 0 : parseInt(raw, 10);
-                              handleBreakdownChange(index, bdKey, isNaN(parsed) ? 0 : Math.max(0, parsed));
+                              setEditingBdCell({
+                                rowIndex: index,
+                                field: bdKey,
+                                text: raw,
+                              });
+                              const parsed = parseFloat(raw);
+                              handleBreakdownChange(
+                                index,
+                                bdKey,
+                                raw === '' || isNaN(parsed) ? 0 : Number(Math.max(0, parsed).toFixed(2))
+                              );
                             }}
                             className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border transition-colors focus:outline-none ${
                               isShiftLocked

@@ -122,6 +122,8 @@ export function OperatorKiosk({
   const [draft, setDraft] = useState<MachineShiftRow | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState(false);
+  const [editingBdField, setEditingBdField] = useState<string | null>(null);
+  const [editingBdText, setEditingBdText] = useState<string>('');
 
   // Fetched from public.shifts in Supabase (matches displayName or shiftCode)
   const activeShiftObj = masterData.shifts?.find(
@@ -561,7 +563,7 @@ export function OperatorKiosk({
     if (isShiftLocked || !draft) return;
     setValidationError(null);
     const currentVal = Number(draft.breakdown?.[field]) || 0;
-    const nextVal = Math.max(0, currentVal + delta);
+    const nextVal = Number(Math.max(0, currentVal + delta).toFixed(2));
     setDraft({
       ...draft,
       breakdown: {
@@ -584,11 +586,12 @@ export function OperatorKiosk({
     if (isShiftLocked || !draft || unaccountedMins <= 0) return;
     setValidationError(null);
     const currentVal = Number(draft.breakdown?.[field]) || 0;
+    const nextVal = Number(Math.max(0, currentVal + unaccountedMins).toFixed(2));
     setDraft({
       ...draft,
       breakdown: {
         ...draft.breakdown,
-        [field]: Math.max(0, currentVal + unaccountedMins),
+        [field]: nextVal,
       },
     });
   };
@@ -2116,21 +2119,40 @@ export function OperatorKiosk({
                       <input
                         type="number"
                         min="0"
+                        step="0.01"
                         disabled={isShiftLocked}
                         readOnly={isShiftLocked}
-                        value={val > 0 ? val : ''}
+                        value={
+                          editingBdField === card.key
+                            ? editingBdText
+                            : val > 0
+                            ? val
+                            : ''
+                        }
                         placeholder="0"
-                        onFocus={(e) => e.target.select()}
+                        onFocus={(e) => {
+                          e.target.select();
+                          setEditingBdField(card.key);
+                          setEditingBdText(val > 0 ? String(val) : '');
+                        }}
+                        onBlur={() => {
+                          setEditingBdField(null);
+                        }}
                         onClick={(e) => (e.target as HTMLInputElement).select()}
                         onChange={(e) => {
                           setValidationError(null);
                           const raw = e.target.value;
-                          const parsed = raw === '' ? 0 : parseInt(raw, 10);
+                          setEditingBdField(card.key);
+                          setEditingBdText(raw);
+                          const parsed = parseFloat(raw);
                           setDraft({
                             ...draft,
                             breakdown: {
                               ...draft.breakdown,
-                              [card.key]: isNaN(parsed) ? 0 : Math.max(0, parsed),
+                              [card.key]:
+                                raw === '' || isNaN(parsed)
+                                  ? 0
+                                  : Number(Math.max(0, parsed).toFixed(2)),
                             },
                           });
                         }}

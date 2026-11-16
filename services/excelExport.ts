@@ -9,14 +9,15 @@ import { INITIAL_MACHINES, PRODUCTION_LINES } from "@/data/initialData";
  */
 export function formatRowForExport(row: MachineShiftRow): Record<string, string | number> {
   const totalWorking = Number(row.totalWorkingMinutes) || 1305;
-  const noDisc = Number(row.breakdown?.noDisc) || 0;
-  const change = Number(row.breakdown?.change) || 0;
-  const power = Number(row.breakdown?.power) || 0;
-  const operator = Number(row.breakdown?.operator) || 0;
-  const machineBreakdown = Number(row.breakdown?.machineBreakdown) || 0;
-  const fixProgSettings = Number(row.breakdown?.fixProgSettings) || 0;
-  const totalBd =
-    noDisc + change + power + operator + machineBreakdown + fixProgSettings;
+  const noDisc = Number((Number(row.breakdown?.noDisc) || 0).toFixed(2));
+  const change = Number((Number(row.breakdown?.change) || 0).toFixed(2));
+  const power = Number((Number(row.breakdown?.power) || 0).toFixed(2));
+  const operator = Number((Number(row.breakdown?.operator) || 0).toFixed(2));
+  const machineBreakdown = Number((Number(row.breakdown?.machineBreakdown) || 0).toFixed(2));
+  const fixProgSettings = Number((Number(row.breakdown?.fixProgSettings) || 0).toFixed(2));
+  const totalBd = Number(
+    (noDisc + change + power + operator + machineBreakdown + fixProgSettings).toFixed(2)
+  );
 
   const eff =
     Number(row.stdOutput) > 0
@@ -155,7 +156,7 @@ function buildLineEfficiencyData(
     const spread =
       activeEffs.length >= 2 ? Math.max(...activeEffs) - Math.min(...activeEffs) : 0;
 
-    const totalBd = lineRows.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0);
+    const totalBd = Number(lineRows.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2));
 
     grandStd += lineStd;
     grandAct += lineAct;
@@ -244,7 +245,7 @@ function buildMachineEfficiencyData(
     const std = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
     const act = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
     const rework = machLogs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-    const downtime = machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0);
+    const downtime = Number(machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2));
     const eff = std > 0 ? Math.round((act / std) * 100) : 0;
 
     const filterShift = (prefix: string) =>

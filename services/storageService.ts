@@ -18,14 +18,15 @@ export function calculateTotalBreakdown(
   const b = "breakdown" in input ? input.breakdown : input;
   if (!b) return 0;
 
-  return (
+  const total =
     (Number(b.noDisc) || 0) +
     (Number(b.change) || 0) +
     (Number(b.power) || 0) +
     (Number(b.operator) || 0) +
     (Number(b.machineBreakdown) || 0) +
-    (Number(b.fixProgSettings) || 0)
-  );
+    (Number(b.fixProgSettings) || 0);
+
+  return Number(total.toFixed(2));
 }
 
 /**
