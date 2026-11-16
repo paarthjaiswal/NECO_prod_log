@@ -241,23 +241,38 @@ export default function DashboardClient({
 
   const draftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
   const isFirstLoad = useRef(true);
+  const writeDraftTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const writeDraft = (rows: MachineShiftRow[]) => {
-    try {
-      localStorage.setItem(
-        draftKey,
-        JSON.stringify({
-          date: selectedDate,
-          shift: selectedShift,
-          line: selectedLine,
-          rows,
-          updatedAt: new Date().toISOString(),
-        })
-      );
-    } catch {
-      // Ignore storage errors (quota / restricted kiosk browsers)
+    if (writeDraftTimerRef.current) {
+      clearTimeout(writeDraftTimerRef.current);
     }
+    writeDraftTimerRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(
+          draftKey,
+          JSON.stringify({
+            date: selectedDate,
+            shift: selectedShift,
+            line: selectedLine,
+            rows,
+            updatedAt: new Date().toISOString(),
+          })
+        );
+      } catch {
+        // Ignore storage errors (quota / restricted kiosk browsers)
+      }
+    }, 300);
   };
+
+  // Clean up debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (writeDraftTimerRef.current) {
+        clearTimeout(writeDraftTimerRef.current);
+      }
+    };
+  }, []);
 
   // Restore matching local draft, otherwise fetch fresh rows from Supabase, when filters change
   useEffect(() => {
@@ -590,6 +605,8 @@ export default function DashboardClient({
             selectedMachineId={kioskMachineId}
             onSelectMachineId={setKioskMachineId}
             onSaveMachine={handleSaveSingleKioskRow}
+            onRefreshMasterData={handleRefreshMasterData}
+            onRowsChange={handleRowsChange}
             isSaving={isPending}
             isAdmin={isAdmin}
             isReadOnly={isShiftLocked}

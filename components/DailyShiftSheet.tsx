@@ -150,6 +150,20 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const items = useMemo(() => masterData?.items ?? [], [masterData?.items]);
   const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycleTimes]);
 
+  // Memoized operations lookup map to prevent 16x regex/array filtering on every keystroke
+  const getOperations = useMemo(() => {
+    const map = new Map<string, string[]>();
+    return (itemId: string, machineId?: string, machineName?: string) => {
+      const key = `${itemId}::${machineId || ''}::${machineName || ''}`;
+      let cached = map.get(key);
+      if (!cached) {
+        cached = getOperationsForItem(itemId, items, cycleTimes, machineId, machineName);
+        map.set(key, cached);
+      }
+      return cached;
+    };
+  }, [items, cycleTimes]);
+
   // Fetched dynamically from public.shifts in Supabase
   const activeShiftObj = useMemo(() => {
     return masterData?.shifts?.find(
@@ -1378,7 +1392,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 const _isRowConfigured = !!row.operatorName && !!row.itemName;
                 void _isRowConfigured;
                 const rowOperations = row.itemId
-                  ? getOperationsForItem(row.itemId, items, cycleTimes, row.machineId, row.machineName)
+                  ? getOperations(row.itemId, row.machineId, row.machineName)
                   : [];
                 const rowWorkingMinutes = row.totalWorkingMinutes || shiftWorkingMinutes;
                 const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);

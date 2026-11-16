@@ -1223,7 +1223,8 @@ export async function getAnalyticsLogs(
     .from("shift_logs")
     .select("*")
     .order("log_date", { ascending: false })
-    .order("sr_no", { ascending: true });
+    .order("sr_no", { ascending: true })
+    .limit(10000);
 
   if (startDate) {
     query = query.gte("log_date", startDate);
@@ -1286,7 +1287,8 @@ export async function getItemProductionRollups(
   const { data, error } = await supabase
     .from("shift_logs")
     .select("item_id, item_name, log_date, actual_output, std_output, rework")
-    .or("actual_output.gt.0,std_output.gt.0");
+    .or("actual_output.gt.0,std_output.gt.0")
+    .limit(25000);
 
   if (error) {
     console.error("Failed to fetch item rollups from shift_logs:", error);

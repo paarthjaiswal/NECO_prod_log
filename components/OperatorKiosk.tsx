@@ -11,6 +11,11 @@ import {
   Plus,
   Minus,
   Lock,
+  UserPlus,
+  PackagePlus,
+  Edit2,
+  X,
+  Check,
 } from 'lucide-react';
 import {
   MachineShiftRow,
@@ -26,6 +31,12 @@ import {
   getOperationsForItem,
   resolveMachineItemTarget,
 } from '@/services/storageService';
+import {
+  addOperatorMaster,
+  upsertItemMaster,
+  upsertMachineMaster,
+  upsertMachineItemCycleTime,
+} from '@/actions/shiftActions';
 
 interface OperatorKioskProps {
   masterData: MasterDataState;
@@ -34,6 +45,8 @@ interface OperatorKioskProps {
   selectedShift: ShiftType;
   selectedLine: string;
   onSaveMachine: (updatedRow: MachineShiftRow) => void;
+  onRefreshMasterData?: () => Promise<void>;
+  onRowsChange?: (rows: MachineShiftRow[]) => void;
   isSaving?: boolean;
   selectedMachineId?: string | null;
   onSelectMachineId?: (machineId: string | null) => void;
@@ -50,6 +63,8 @@ export function OperatorKiosk({
   selectedShift,
   selectedLine,
   onSaveMachine,
+  onRefreshMasterData,
+  onRowsChange,
   isSaving = false,
   selectedMachineId: externalMachineId,
   onSelectMachineId: externalOnSelectMachineId,
@@ -61,6 +76,31 @@ export function OperatorKiosk({
   const isShiftLocked = isReadOnly !== undefined ? isReadOnly : externalShiftLocked;
   const { machines, operators, items } = masterData;
   const cycleTimes = useMemo(() => masterData.cycleTimes ?? [], [masterData.cycleTimes]);
+
+  // Inline "+ Add" & Machine Edit states
+  const [showAddOperatorModal, setShowAddOperatorModal] = useState(false);
+  const [newOperatorName, setNewOperatorName] = useState("");
+
+  const [showAddItemModal, setShowAddItemModal] = useState(false);
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemCode, setNewItemCode] = useState("");
+  const [newItemOperation, setNewItemOperation] = useState("");
+
+  const [showAddOpInput, setShowAddOpInput] = useState(false);
+  const [newOperationName, setNewOperationName] = useState("");
+
+  const [showAddMachineBar, setShowAddMachineBar] = useState(false);
+  const [newMachineName, setNewMachineName] = useState("");
+  const [newMachineCode, setNewMachineCode] = useState("");
+  const [newMachineType, setNewMachineType] = useState("CNC");
+
+  const [isEditingMachine, setIsEditingMachine] = useState(false);
+  const [editMachineName, setEditMachineName] = useState("");
+  const [editMachineCode, setEditMachineCode] = useState("");
+  const [editMachineType, setEditMachineType] = useState("CNC");
+
+  const [isInlineSaving, setIsInlineSaving] = useState(false);
+  const [quickAddError, setQuickAddError] = useState<string | null>(null);
 
   // Internal state fallback if DashboardClient doesn't pass selectedMachineId
   const [internalMachineId, setInternalMachineId] = useState<string | null>(null);
@@ -262,6 +302,222 @@ export function OperatorKiosk({
     });
   };
 
+  // 2A. Create Operator inline & assign to active draft
+  const handleQuickCreateOperator = async () => {
+    if (!newOperatorName.trim()) return;
+    setIsInlineSaving(true);
+    setQuickAddError(null);
+    try {
+      const res = await addOperatorMaster(newOperatorName);
+      if (onRefreshMasterData) await onRefreshMasterData();
+
+      if (draft) {
+        setDraft((prev) => (prev ? { ...prev, operatorName: res.operator.name } : null));
+        if (onRowsChange) {
+          const updated = rows.map((r) =>
+            r.machineId === draft.machineId ? { ...r, operatorName: res.operator.name } : r
+          );
+          onRowsChange(updated);
+        }
+      }
+      setNewOperatorName("");
+      setShowAddOperatorModal(false);
+    } catch (err) {
+      console.error("Failed to create operator:", err);
+      setQuickAddError(err instanceof Error ? err.message : "Error creating operator");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 2B. Create Item + Operation inline & assign to active draft
+  const handleQuickCreateItem = async () => {
+    if (!newItemName.trim() || !newItemCode.trim() || !newItemOperation.trim()) return;
+    setIsInlineSaving(true);
+    setQuickAddError(null);
+    try {
+      const res = await upsertItemMaster({
+        itemName: newItemName,
+        itemCode: newItemCode,
+        operation: newItemOperation,
+      });
+      if (onRefreshMasterData) await onRefreshMasterData();
+
+      if (draft) {
+        const ct = Number(draft.cycleTime) || 0;
+        const shiftMins =
+          Number(draft.shiftWorkingMinutes ?? draft.totalWorkingMinutes) ||
+          shiftWorkingMinutes ||
+          465;
+        const std = ct > 0 ? Math.floor(shiftMins / ct) : draft.stdOutput;
+
+        const updatedDraft = {
+          ...draft,
+          itemId: res.item.id,
+          itemName: res.item.itemName,
+          operation: res.item.operation,
+          stdOutput: std,
+        };
+        setDraft(updatedDraft);
+
+        if (onRowsChange) {
+          const updated = rows.map((r) =>
+            r.machineId === draft.machineId ? { ...r, ...updatedDraft } : r
+          );
+          onRowsChange(updated);
+        }
+      }
+      setNewItemName("");
+      setNewItemCode("");
+      setNewItemOperation("");
+      setShowAddItemModal(false);
+    } catch (err) {
+      console.error("Failed to create item:", err);
+      setQuickAddError(err instanceof Error ? err.message : "Error creating item");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 2C. Create/Add Operation inline for current item
+  const handleQuickCreateOperation = async () => {
+    const opName = newOperationName.trim();
+    if (!opName || !draft?.itemId) return;
+
+    setIsInlineSaving(true);
+    setQuickAddError(null);
+    try {
+      const currentItem = items.find((i) => i.id === draft.itemId);
+      if (currentItem) {
+        const existingOps = (currentItem.operation || "")
+          .split(/[,/]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (!existingOps.includes(opName)) {
+          const updatedOps =
+            existingOps.length > 0 ? `${currentItem.operation}, ${opName}` : opName;
+          await upsertItemMaster({
+            ...currentItem,
+            operation: updatedOps,
+          });
+        }
+      }
+
+      if (draft.machineId) {
+        await upsertMachineItemCycleTime({
+          machineId: draft.machineId,
+          itemId: draft.itemId,
+          operation: opName,
+          cycleTime: draft.cycleTime || 0,
+          stdOutput: draft.stdOutput || 0,
+        });
+      }
+
+      if (onRefreshMasterData) await onRefreshMasterData();
+      handleOperationSelect(opName);
+      setShowAddOpInput(false);
+      setNewOperationName("");
+    } catch (err) {
+      console.error("Failed to add operation:", err);
+      setQuickAddError(err instanceof Error ? err.message : "Error adding operation");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 2D. Add New Machine to current line
+  const handleQuickCreateMachine = async () => {
+    if (!newMachineName.trim() || !newMachineCode.trim()) return;
+    setIsInlineSaving(true);
+    try {
+      const res = await upsertMachineMaster({
+        name: newMachineName,
+        code: newMachineCode,
+        machineType: newMachineType,
+        productionLine: selectedLine,
+        sortOrder: lineMachines.length + 1,
+      });
+      if (onRefreshMasterData) await onRefreshMasterData();
+
+      if (onRowsChange) {
+        const newRow: MachineShiftRow = {
+          id: `${selectedDate}_${selectedShift}_${selectedLine}_${res.machine.id}`,
+          date: selectedDate,
+          shift: selectedShift,
+          productionLine: selectedLine,
+          line: selectedLine,
+          srNo: rows.length + 1,
+          machineId: res.machine.id,
+          machineCode: res.machine.code,
+          machineName: res.machine.name,
+          operatorName: "",
+          itemId: "",
+          itemName: "",
+          operation: "",
+          cycleTime: 0,
+          totalWorkingMinutes: shiftWorkingMinutes || 465,
+          stdOutput: 0,
+          actualOutput: 0,
+          rework: 0,
+          breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+          remarks: "",
+        };
+        onRowsChange([...rows, newRow]);
+      }
+
+      setNewMachineName("");
+      setNewMachineCode("");
+      setShowAddMachineBar(false);
+    } catch (err) {
+      console.error("Failed to create machine:", err);
+      alert(err instanceof Error ? err.message : "Failed to add machine");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
+  // 2E. Update Machine Name & Code inline
+  const handleUpdateMachineDetails = async () => {
+    if (!draft || !editMachineName.trim() || !editMachineCode.trim()) return;
+    setIsInlineSaving(true);
+    try {
+      const res = await upsertMachineMaster({
+        id: draft.machineId,
+        name: editMachineName.trim(),
+        code: editMachineCode.trim(),
+        machineType: editMachineType,
+        productionLine: selectedLine,
+      });
+      if (onRefreshMasterData) await onRefreshMasterData();
+
+      setDraft((prev) =>
+        prev
+          ? {
+              ...prev,
+              machineName: res.machine.name,
+              machineCode: res.machine.code,
+            }
+          : null
+      );
+
+      if (onRowsChange) {
+        const updated = rows.map((r) =>
+          r.machineId === draft.machineId
+            ? { ...r, machineName: res.machine.name, machineCode: res.machine.code }
+            : r
+        );
+        onRowsChange(updated);
+      }
+
+      setIsEditingMachine(false);
+    } catch (err) {
+      console.error("Failed to update machine:", err);
+      alert(err instanceof Error ? err.message : "Failed to update machine");
+    } finally {
+      setIsInlineSaving(false);
+    }
+  };
+
   const handleAdjustActual = (delta: number) => {
     if (isShiftLocked || !draft) return;
     setValidationError(null);
@@ -376,6 +632,187 @@ export function OperatorKiosk({
     }
   };
 
+  const renderQuickAddModals = () => {
+    if (!showAddOperatorModal && !showAddItemModal) return null;
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+        <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          {/* Header */}
+          <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {showAddOperatorModal ? (
+                <UserPlus className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <PackagePlus className="w-4 h-4 text-emerald-400" />
+              )}
+              <h3 className="text-sm font-bold tracking-tight">
+                {showAddOperatorModal ? 'Add New Operator' : 'Add New Item & Operation'}
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (isInlineSaving) return;
+                setShowAddOperatorModal(false);
+                setShowAddItemModal(false);
+                setNewOperatorName('');
+                setNewItemCode('');
+                setNewItemName('');
+                setNewItemOperation('');
+              }}
+              className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Form Body */}
+          {showAddOperatorModal ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleQuickCreateOperator();
+              }}
+              className="p-5 space-y-4"
+            >
+              {quickAddError && (
+                <div className="p-2.5 text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-md font-medium">
+                  {quickAddError}
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Operator Full Name *
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  required
+                  value={newOperatorName}
+                  onChange={(e) => setNewOperatorName(e.target.value)}
+                  placeholder="e.g. Ramesh Kumar"
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md focus:border-slate-800 focus:outline-none"
+                />
+                {draft && (
+                  <p className="mt-1.5 text-[11px] text-slate-500">
+                    Will be assigned immediately to machine <strong>{draft.machineName}</strong>.
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isInlineSaving}
+                  onClick={() => {
+                    setShowAddOperatorModal(false);
+                    setNewOperatorName('');
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isInlineSaving || !newOperatorName.trim()}
+                  className="px-4 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 rounded-md shadow-xs transition-colors"
+                >
+                  {isInlineSaving ? 'Adding...' : 'Add & Assign'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleQuickCreateItem();
+              }}
+              className="p-5 space-y-3.5"
+            >
+              {quickAddError && (
+                <div className="p-2.5 text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-md font-medium">
+                  {quickAddError}
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Item Code / Part No. *
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  required
+                  value={newItemCode}
+                  onChange={(e) => setNewItemCode(e.target.value)}
+                  placeholder="e.g. DRG-101"
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md font-mono focus:border-slate-800 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Item / Component Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newItemName}
+                  onChange={(e) => setNewItemName(e.target.value)}
+                  placeholder="e.g. Differential Housing"
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md focus:border-slate-800 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Operation Description *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newItemOperation}
+                  onChange={(e) => setNewItemOperation(e.target.value)}
+                  placeholder="e.g. OP-10 Turning"
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-md focus:border-slate-800 focus:outline-none"
+                />
+                {draft && (
+                  <p className="mt-1.5 text-[11px] text-slate-500">
+                    Will be assigned immediately to machine <strong>{draft.machineName}</strong>.
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isInlineSaving}
+                  onClick={() => {
+                    setShowAddItemModal(false);
+                    setNewItemCode('');
+                    setNewItemName('');
+                    setNewItemOperation('');
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    isInlineSaving ||
+                    !newItemName.trim() ||
+                    !newItemCode.trim() ||
+                    !newItemOperation.trim()
+                  }
+                  className="px-4 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 rounded-md shadow-xs transition-colors"
+                >
+                  {isInlineSaving ? 'Adding...' : 'Add & Select'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   // ============================================================================
   // VIEW 1: 16-MACHINE VISUAL GRID (When no machine is selected)
   // ============================================================================
@@ -455,6 +892,99 @@ export function OperatorKiosk({
             </span>
           </div>
         </div>
+
+        {/* Top Quick Actions Bar for Machines, Operators & Items */}
+        {!isShiftLocked && (
+          <div className="flex flex-wrap items-center justify-between gap-2.5 p-2.5 bg-white border border-slate-200 rounded-lg shadow-2xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAddMachineBar((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded bg-slate-900 text-white hover:bg-slate-800 shadow-2xs transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Add Machine</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddOperatorModal(true);
+                  setNewOperatorName('');
+                  setQuickAddError(null);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors"
+              >
+                <UserPlus className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Add Operator</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddItemModal(true);
+                  setNewItemCode('');
+                  setNewItemName('');
+                  setNewItemOperation('OP-10 Turning');
+                  setQuickAddError(null);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors"
+              >
+                <PackagePlus className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Add Item</span>
+              </button>
+            </div>
+            <span className="text-[11px] text-slate-500 font-medium hidden sm:inline">
+              Instant Master Sync — New records auto-select on save
+            </span>
+          </div>
+        )}
+
+        {/* Inline Add Machine Bar */}
+        {showAddMachineBar && !isShiftLocked && (
+          <div className="flex flex-wrap items-center gap-2 p-3 bg-slate-50 border border-slate-300 rounded-lg shadow-2xs animate-in fade-in duration-150">
+            <span className="text-xs font-bold text-slate-700">
+              New Machine ({selectedLine}):
+            </span>
+            <input
+              type="text"
+              placeholder="Machine Name (e.g. MAKINO-130)"
+              value={newMachineName}
+              onChange={(e) => setNewMachineName(e.target.value)}
+              className="px-2.5 py-1 text-xs border border-slate-300 rounded bg-white focus:outline-none focus:border-slate-800"
+            />
+            <input
+              type="text"
+              placeholder="Code (e.g. MC-130)"
+              value={newMachineCode}
+              onChange={(e) => setNewMachineCode(e.target.value)}
+              className="px-2.5 py-1 text-xs border border-slate-300 rounded bg-white w-28 focus:outline-none focus:border-slate-800 font-mono"
+            />
+            <select
+              value={newMachineType}
+              onChange={(e) => setNewMachineType(e.target.value)}
+              className="px-2 py-1 text-xs border border-slate-300 rounded bg-white text-slate-800"
+            >
+              <option value="CNC">CNC</option>
+              <option value="VMC">VMC</option>
+              <option value="SPM">SPM</option>
+              <option value="LATHE">LATHE</option>
+            </select>
+            <button
+              type="button"
+              disabled={isInlineSaving || !newMachineName.trim() || !newMachineCode.trim()}
+              onClick={handleQuickCreateMachine}
+              className="px-3.5 py-1 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded transition-colors shadow-2xs"
+            >
+              {isInlineSaving ? 'Saving...' : 'Create Machine'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAddMachineBar(false)}
+              className="px-2.5 py-1 text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 rounded transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
 
         {/* Machine Visual Grid for current line */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-2.5 sm:gap-4">
@@ -584,6 +1114,7 @@ export function OperatorKiosk({
             );
           })}
         </div>
+        {renderQuickAddModals()}
       </div>
     );
   }
@@ -737,9 +1268,73 @@ export function OperatorKiosk({
               )}
             </div>
             <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 mt-0.5">
-              <h2 className="text-xl font-extrabold text-white tracking-tight">
-                {draft.machineName}
-              </h2>
+              {isEditingMachine ? (
+                <div className="flex flex-wrap items-center gap-1.5 bg-slate-800 p-1.5 rounded border border-slate-700">
+                  <input
+                    type="text"
+                    value={editMachineName}
+                    onChange={(e) => setEditMachineName(e.target.value)}
+                    className="px-2 py-1 text-xs bg-slate-900 border border-slate-600 rounded text-white font-bold"
+                    placeholder="Machine Name"
+                  />
+                  <input
+                    type="text"
+                    value={editMachineCode}
+                    onChange={(e) => setEditMachineCode(e.target.value)}
+                    className="px-2 py-1 text-xs bg-slate-900 border border-slate-600 rounded text-white font-mono w-24"
+                    placeholder="Code"
+                  />
+                  <select
+                    value={editMachineType}
+                    onChange={(e) => setEditMachineType(e.target.value)}
+                    className="px-2 py-1 text-xs bg-slate-900 border border-slate-600 rounded text-white"
+                  >
+                    <option value="CNC">CNC</option>
+                    <option value="VMC">VMC</option>
+                    <option value="SPM">SPM</option>
+                    <option value="LATHE">LATHE</option>
+                  </select>
+                  <button
+                    type="button"
+                    disabled={isInlineSaving}
+                    onClick={handleUpdateMachineDetails}
+                    className="p-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white"
+                    title="Save machine changes"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingMachine(false)}
+                    className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300"
+                    title="Cancel"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <h2 className="text-xl font-extrabold text-white tracking-tight">
+                    {draft.machineName}
+                  </h2>
+                  {!isShiftLocked && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const m = machines.find((mac) => mac.id === draft.machineId);
+                        setEditMachineName(draft.machineName);
+                        setEditMachineCode(m?.code || '');
+                        setEditMachineType(m?.type || 'CNC');
+                        setIsEditingMachine(true);
+                      }}
+                      className="p-1 text-slate-400 hover:text-emerald-400 transition-colors"
+                      title="Edit machine details"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
               {hasEnteredOutputOrBd && (
                 timeBalance.isBalanced ? (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-xs font-mono font-bold">
@@ -823,9 +1418,25 @@ export function OperatorKiosk({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* Operator Selection */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Name of Operator <span className="text-rose-600">*</span>
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Name of Operator <span className="text-rose-600">*</span>
+                </label>
+                {!isShiftLocked && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddOperatorModal(true);
+                      setNewOperatorName('');
+                      setQuickAddError(null);
+                    }}
+                    className="text-xs text-emerald-700 hover:text-emerald-800 font-semibold flex items-center gap-1 hover:underline transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Add Operator</span>
+                  </button>
+                )}
+              </div>
               <select
                 value={draft.operatorName}
                 disabled={isShiftLocked}
@@ -845,9 +1456,27 @@ export function OperatorKiosk({
 
             {/* Item Selection */}
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Machining Item / Component <span className="text-rose-600">*</span>
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Machining Item / Component <span className="text-rose-600">*</span>
+                </label>
+                {!isShiftLocked && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddItemModal(true);
+                      setNewItemCode('');
+                      setNewItemName('');
+                      setNewItemOperation('OP-10 Turning');
+                      setQuickAddError(null);
+                    }}
+                    className="text-xs text-emerald-700 hover:text-emerald-800 font-semibold flex items-center gap-1 hover:underline transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Add Item</span>
+                  </button>
+                )}
+              </div>
               <select
                 value={draft.itemId}
                 disabled={isShiftLocked}
@@ -867,40 +1496,121 @@ export function OperatorKiosk({
           {/* Operation, Cycle Time & Std Output (4-Column Grid) */}
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-1">
             <div className="sm:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Operation Name
-              </label>
-              {!draft.itemId ? (
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Operation Name
+                </label>
+                {!isShiftLocked && draft.itemId && !showAddOpInput && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddOpInput(true);
+                      setNewOperationName('');
+                      setQuickAddError(null);
+                    }}
+                    className="text-xs text-emerald-700 hover:text-emerald-800 font-semibold flex items-center gap-1 hover:underline transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Add Operation</span>
+                  </button>
+                )}
+              </div>
+
+              {showAddOpInput ? (
+                <div className="p-2.5 bg-slate-100 border border-slate-300 rounded-md space-y-2 animate-in fade-in duration-100">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-700">
+                      New Operation for {draft.itemName}:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddOpInput(false)}
+                      className="text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="e.g. OP-20 Drilling & Tapping"
+                    value={newOperationName}
+                    onChange={(e) => setNewOperationName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleQuickCreateOperation();
+                      }
+                      if (e.key === 'Escape') setShowAddOpInput(false);
+                    }}
+                    className="w-full text-xs px-2.5 py-1.5 border border-slate-300 rounded bg-white focus:outline-none focus:border-slate-800"
+                  />
+                  <div className="flex justify-end gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddOpInput(false)}
+                      className="px-2.5 py-1 text-xs text-slate-600 bg-slate-200 hover:bg-slate-300 rounded transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isInlineSaving || !newOperationName.trim()}
+                      onClick={handleQuickCreateOperation}
+                      className="px-3 py-1 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded transition-colors shadow-2xs"
+                    >
+                      {isInlineSaving ? 'Saving...' : 'Save & Select'}
+                    </button>
+                  </div>
+                </div>
+              ) : !draft.itemId ? (
                 <div className="w-full bg-slate-100 border border-slate-200 rounded-md px-3 py-2 text-sm text-slate-400 italic">
                   — Select Item First —
                 </div>
-              ) : draftOperations.length > 1 ? (
-                <select
-                  value={draft.operation}
-                  disabled={isShiftLocked}
-                  onChange={(e) => handleOperationSelect(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  <option value="">— Select Operation —</option>
-                  {draftOperations.map((op) => (
-                    <option key={op} value={op}>
-                      {op}
-                    </option>
-                  ))}
-                  {draft.operation && !draftOperations.includes(draft.operation) && (
-                    <option value={draft.operation}>{draft.operation}</option>
-                  )}
-                </select>
               ) : (
-                <input
-                  type="text"
-                  value={draft.operation}
-                  disabled={isShiftLocked}
-                  readOnly={isShiftLocked}
-                  onChange={(e) => handleOperationSelect(e.target.value)}
-                  placeholder="e.g. OP-10 Rough Turning"
-                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
-                />
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={draft.operation}
+                    disabled={isShiftLocked}
+                    onChange={(e) => {
+                      if (e.target.value === '__ADD_NEW_OP__') {
+                        setShowAddOpInput(true);
+                        setNewOperationName('');
+                        return;
+                      }
+                      handleOperationSelect(e.target.value);
+                    }}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    <option value="">— Select Operation —</option>
+                    {draftOperations.map((op) => (
+                      <option key={op} value={op}>
+                        {op}
+                      </option>
+                    ))}
+                    {draft.operation && !draftOperations.includes(draft.operation) && (
+                      <option value={draft.operation}>{draft.operation}</option>
+                    )}
+                    {!isShiftLocked && (
+                      <option value="__ADD_NEW_OP__" className="font-semibold text-emerald-600">
+                        + Add New Operation...
+                      </option>
+                    )}
+                  </select>
+                  {!isShiftLocked && (
+                    <button
+                      type="button"
+                      title="Add new operation for this item"
+                      onClick={() => {
+                        setShowAddOpInput(true);
+                        setNewOperationName('');
+                      }}
+                      className="p-2 border border-slate-300 rounded-md bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-emerald-600 transition-colors shrink-0"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
@@ -1490,6 +2200,7 @@ export function OperatorKiosk({
           </div>
         </div>
       </form>
+      {renderQuickAddModals()}
     </div>
   );
 }
