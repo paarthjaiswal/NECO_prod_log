@@ -33,6 +33,7 @@ import {
   calculateDowntimePct,
   calculateShiftTimeBalance,
   calculateMachineGroupTimeBalance,
+  calculateSplitRowSuggestedStd,
   recalculateMachineGroupStdOutputs,
   MachineGroupTimeBalance,
 } from '@/services/storageService';
@@ -472,12 +473,17 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         currentRow.machineName
       );
 
+      const isSplitMachine = rows.filter((r) => r.machineId === currentRow.machineId).length > 1;
+      const targetStd = isSplitMachine
+        ? calculateSplitRowSuggestedStd(rows, currentRow.id, target.cycleTime, shiftWorkingMinutes)
+        : target.stdOutput;
+
       updateRow(index, {
         itemId,
         itemName: target.itemName,
         operation: target.operation,
         cycleTime: target.cycleTime,
-        stdOutput: target.stdOutput,
+        stdOutput: targetStd,
         totalWorkingMinutes: shiftWorkingMinutes,
       });
     },
@@ -504,10 +510,15 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         currentRow.machineName
       );
 
+      const isSplitMachine = rows.filter((r) => r.machineId === currentRow.machineId).length > 1;
+      const targetStd = isSplitMachine
+        ? calculateSplitRowSuggestedStd(rows, currentRow.id, target.cycleTime, shiftWorkingMinutes)
+        : target.stdOutput;
+
       updateRow(index, {
         operation: operationName,
         cycleTime: target.cycleTime,
-        stdOutput: target.stdOutput,
+        stdOutput: targetStd,
         totalWorkingMinutes: shiftWorkingMinutes,
       });
     },
@@ -778,9 +789,18 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       shiftWorkingMinutes ||
       465;
 
-    const updated = rows.map((r, i) => (i === rowIndex ? { ...r, cycleTime: newCt } : r));
-    const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, shiftMins);
-    onRowsChange(recomputed);
+    const machRuns = rows.filter((r) => r.machineId === row.machineId);
+    if (machRuns.length > 1) {
+      const suggestedStd = calculateSplitRowSuggestedStd(rows, row.id, newCt, shiftMins);
+      const updated = rows.map((r, i) =>
+        i === rowIndex ? { ...r, cycleTime: newCt, stdOutput: suggestedStd } : r
+      );
+      onRowsChange(updated);
+    } else {
+      const updated = rows.map((r, i) => (i === rowIndex ? { ...r, cycleTime: newCt } : r));
+      const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, shiftMins);
+      onRowsChange(recomputed);
+    }
   };
 
   // Handle Breakdown Sub-column update
@@ -1617,8 +1637,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
                 const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
                 const timeBalance = machineBalances.get(row.machineId) || calculateMachineGroupTimeBalance(rows, row.machineId, rowShiftMins);
-                const runProdMins = timeBalance.rowProductionMinutes?.[row.id] ?? Number(((row.actualOutput || 0) * (row.cycleTime || 0)).toFixed(2));
-                const runBdMins = timeBalance.rowBreakdownMinutes?.[row.id] ?? calculateTotalBreakdown(row.breakdown);
+                const isSplitMachine = rows.filter((r) => r.machineId === row.machineId).length > 1;
+                const rowSummary = timeBalance.rowBreakdownSummary?.[row.id] ?? {
+                  prodMins: timeBalance.rowProductionMinutes?.[row.id] ?? Number(((row.actualOutput || 0) * (row.cycleTime || 0)).toFixed(2)),
+                  bdMins: timeBalance.rowBreakdownMinutes?.[row.id] ?? calculateTotalBreakdown(row.breakdown),
+                  rowTotalMins: Number(((timeBalance.rowProductionMinutes?.[row.id] ?? Number(((row.actualOutput || 0) * (row.cycleTime || 0)).toFixed(2))) + (timeBalance.rowBreakdownMinutes?.[row.id] ?? calculateTotalBreakdown(row.breakdown))).toFixed(2)),
+                };
+                const runProdMins = rowSummary.prodMins;
+                const runBdMins = rowSummary.bdMins;
                 const isMachineActive = activeMachineIds.has(row.machineId);
                 const isRowInvalid = isMachineActive && !timeBalance.isBalanced;
 
@@ -2047,24 +2073,42 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       <input
                         type="number"
                         min="0"
-                        readOnly={!isAdmin || isReadOnly}
+                        readOnly={isReadOnly || (!isAdmin && !isSplitMachine)}
+                        disabled={isShiftLocked || (!isAdmin && !isSplitMachine)}
                         value={row.stdOutput || ""}
                         placeholder="0"
                         onFocus={(e) => e.target.select()}
                         onClick={(e) => (e.target as HTMLInputElement).select()}
                         onChange={(e) => {
-                          if (!isAdmin) return;
+                          if (!isAdmin && !isSplitMachine) return;
                           const raw = e.target.value;
                           const parsed = raw === '' ? 0 : parseInt(raw, 10);
                           updateRow(index, { stdOutput: isNaN(parsed) ? 0 : Math.max(0, parsed) });
                         }}
-                        title={!isAdmin ? "Auto-calculated from Shift Minutes ÷ Cycle Time (Unit Head only)" : undefined}
+                        title={
+                          isShiftLocked
+                            ? "Shift is locked (Read-Only)"
+                            : isSplitMachine
+                            ? "Split Run Std Output Target (editable)"
+                            : !isAdmin
+                            ? "Auto-calculated from Shift Minutes ÷ Cycle Time (Unit Head only)"
+                            : undefined
+                        }
                         className={`w-16 mx-auto text-center font-mono font-semibold px-1 py-1 rounded border ${
-                          !isAdmin
+                          isShiftLocked
+                            ? "bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed"
+                            : isSplitMachine
+                            ? "bg-white text-slate-900 border-slate-300 hover:border-slate-400 focus:border-blue-600 focus:bg-white font-bold"
+                            : !isAdmin
                             ? "bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed"
                             : "text-slate-700 bg-transparent border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white"
                         } focus:outline-none`}
                       />
+                      {isSplitMachine && row.stdOutput > 0 && row.cycleTime > 0 && (
+                        <div className="text-[10px] text-slate-400 font-mono text-center">
+                          ({Number((row.stdOutput * row.cycleTime).toFixed(1))}m)
+                        </div>
+                      )}
                     </td>
 
                     {/* 7. ACT. O/PUT */}
@@ -2229,14 +2273,27 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         <span className="text-slate-400 font-normal">0</span>
                       ) : (
                         <div className="leading-tight space-y-0.5">
-                          <div className="font-bold text-slate-900 flex items-center justify-center gap-1">
-                            <span>{runBdMins}m BD</span>
-                            <span className="text-slate-400 text-[10px]">|</span>
-                            <span className="text-slate-600 font-normal text-[10px]">{runProdMins}m prod</span>
-                          </div>
-                          <div className="text-[10px] text-slate-500 font-normal">
-                            Mach Total: {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
-                          </div>
+                          {isSplitMachine ? (
+                            <>
+                              <div className="font-bold text-slate-900 text-[11px] whitespace-nowrap">
+                                Prod: {rowSummary.prodMins}m + BD: {rowSummary.bdMins}m = {rowSummary.rowTotalMins}m
+                              </div>
+                              <div className="text-[10px] text-slate-500 font-normal">
+                                Mach Total: {timeBalance.productionMinutes}m Prod + {timeBalance.loggedBreakdownMinutes}m BD = {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="font-bold text-slate-900 flex items-center justify-center gap-1">
+                                <span>{runBdMins}m BD</span>
+                                <span className="text-slate-400 text-[10px]">|</span>
+                                <span className="text-slate-600 font-normal text-[10px]">{runProdMins}m prod</span>
+                              </div>
+                              <div className="text-[10px] text-slate-500 font-normal">
+                                Mach Total: {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+                              </div>
+                            </>
+                          )}
                           {timeBalance.missingCycleTime ? (
                             <span
                               className="inline-block px-1.5 py-0.5 rounded bg-rose-200 text-rose-950 font-extrabold text-[10px] border border-rose-400 shadow-2xs"

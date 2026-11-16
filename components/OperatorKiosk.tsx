@@ -28,6 +28,7 @@ import {
   calculateTotalBreakdown,
   calculateShiftTimeBalance,
   calculateMachineGroupTimeBalance,
+  calculateSplitRowSuggestedStd,
   recalculateMachineGroupStdOutputs,
   calculateDowntimePct,
   getOperationsForItem,
@@ -485,12 +486,22 @@ export function OperatorKiosk({
       draft.machineName
     );
 
+    const isSplit = currentMachineRuns.length > 1;
+    const targetStd = isSplit
+      ? calculateSplitRowSuggestedStd(
+          rows,
+          draft.id,
+          target.cycleTime,
+          shiftWorkingMinutes || draft.totalWorkingMinutes
+        )
+      : target.stdOutput;
+
     updateDraft({
       itemId,
       itemName: target.itemName,
       operation: target.operation,
       cycleTime: target.cycleTime,
-      stdOutput: target.stdOutput,
+      stdOutput: targetStd,
       totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
     });
   };
@@ -515,10 +526,20 @@ export function OperatorKiosk({
       draft.machineName
     );
 
+    const isSplit = currentMachineRuns.length > 1;
+    const targetStd = isSplit
+      ? calculateSplitRowSuggestedStd(
+          rows,
+          draft.id,
+          target.cycleTime,
+          shiftWorkingMinutes || draft.totalWorkingMinutes
+        )
+      : target.stdOutput;
+
     updateDraft({
       operation: operationName,
       cycleTime: target.cycleTime,
-      stdOutput: target.stdOutput,
+      stdOutput: targetStd,
       totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
     });
   };
@@ -1761,12 +1782,26 @@ export function OperatorKiosk({
           )}
         </div>
 
-        {/* Machine Group Balance Status */}
-        <div className="flex items-center gap-2 text-xs font-mono">
-          <span className="text-slate-500">Mach Total:</span>
-          <strong className="text-slate-900">
-            {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
-          </strong>
+        {/* Machine Group Balance Status & Run Subtotal */}
+        <div className="flex items-center gap-3 text-xs font-mono flex-wrap">
+          {currentMachineRuns.length > 1 && (
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-100 border border-slate-200 text-slate-700">
+              <span className="font-bold text-slate-900">Run #{draft.runNo || 1}:</span>
+              <span>
+                {Number(((draft.actualOutput || 0) * (draft.cycleTime || 0)).toFixed(1))}m prod +{' '}
+                {calculateTotalBreakdown(draft.breakdown)}m BD ={' '}
+                <strong className="text-slate-900">
+                  {Number((((draft.actualOutput || 0) * (draft.cycleTime || 0)) + calculateTotalBreakdown(draft.breakdown)).toFixed(1))}m
+                </strong>
+              </span>
+            </div>
+          )}
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500">Mach Total:</span>
+            <strong className="text-slate-900">
+              {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+            </strong>
+          </div>
           {timeBalance.isBalanced ? (
             <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[11px] border border-emerald-300 flex items-center gap-1">
               <CheckCircle2 className="w-3 h-3 text-emerald-600" />
@@ -2061,9 +2096,28 @@ export function OperatorKiosk({
                   onChange={(e) => {
                     if (isShiftLocked) return;
                     const newCt = Math.max(0, Number(e.target.value) || 0);
-                    updateDraft({
-                      cycleTime: newCt,
-                    });
+                    if (currentMachineRuns.length > 1) {
+                      const suggestedStd = calculateSplitRowSuggestedStd(
+                        rows,
+                        draft.id,
+                        newCt,
+                        shiftWorkingMinutes || draft.totalWorkingMinutes
+                      );
+                      updateDraft({
+                        cycleTime: newCt,
+                        stdOutput: suggestedStd,
+                      });
+                    } else {
+                      updateDraft({
+                        cycleTime: newCt,
+                        stdOutput:
+                          newCt > 0
+                            ? Math.floor(
+                                (shiftWorkingMinutes || draft.totalWorkingMinutes) / newCt
+                              )
+                            : 0,
+                      });
+                    }
                   }}
                   className={`w-full text-sm font-semibold px-3 py-2 border rounded-md bg-white disabled:bg-slate-100 ${
                     timeBalance.missingCycleTime
@@ -2077,7 +2131,7 @@ export function OperatorKiosk({
               </div>
             </div>
 
-            {/* Std Output Target (Auto-calculated; Locked for Non-Admins) */}
+            {/* Std Output Target (Auto-calculated; Locked for Non-Admins unless machine is split) */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Std Output (Shift)
@@ -2086,28 +2140,39 @@ export function OperatorKiosk({
                 <input
                   type="number"
                   min="0"
-                  disabled={!isAdmin || isShiftLocked}
-                  readOnly={!isAdmin || isShiftLocked}
+                  disabled={isShiftLocked || (!isAdmin && currentMachineRuns.length <= 1)}
+                  readOnly={isShiftLocked || (!isAdmin && currentMachineRuns.length <= 1)}
                   title={
-                    !isAdmin
-                      ? 'Std Output is auto-calculated from Cycle Time (Unit Head override required to edit manually)'
-                      : isShiftLocked
+                    isShiftLocked
                       ? 'Shift is locked'
+                      : currentMachineRuns.length > 1
+                      ? 'Split Run Std Output Target (editable)'
+                      : !isAdmin
+                      ? 'Std Output is auto-calculated from Cycle Time (Unit Head override required to edit manually)'
                       : undefined
                   }
                   value={draft.stdOutput || ''}
                   placeholder="0"
                   onFocus={(e) => e.target.select()}
                   onChange={(e) => {
-                    if (!isAdmin || isShiftLocked) return;
+                    if (isShiftLocked || (!isAdmin && currentMachineRuns.length <= 1)) return;
                     updateDraft({
-                      stdOutput: Number(e.target.value) || 0,
+                      stdOutput: Math.max(0, parseInt(e.target.value, 10) || 0),
                     });
                   }}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm font-mono font-bold text-slate-900 text-center focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-75 disabled:cursor-not-allowed"
+                  className={`w-full rounded-md px-3 py-2 text-sm font-mono font-bold text-slate-900 text-center border focus:outline-none ${
+                    isShiftLocked || (!isAdmin && currentMachineRuns.length <= 1)
+                      ? 'bg-slate-50 border-slate-300 disabled:opacity-75 disabled:cursor-not-allowed'
+                      : 'bg-white border-slate-300 focus:border-slate-800'
+                  }`}
                 />
                 <span className="ml-2 text-xs font-medium text-slate-500">pcs</span>
               </div>
+              {currentMachineRuns.length > 1 && draft.stdOutput > 0 && draft.cycleTime > 0 && (
+                <div className="text-[10px] text-slate-400 font-mono mt-0.5 text-right">
+                  Target: {Number((draft.stdOutput * draft.cycleTime).toFixed(1))}m
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -1480,4 +1480,8 @@ export async function getItemProductionRollups(
 /**
  * Alias for getItemProductionRollups matching user specifications.
  */
-export const getItemProductionSummary = getItemProductionRollups;
+export async function getItemProductionSummary(
+  todayDateIst?: string
+): Promise<ItemProductionRollup[]> {
+  return getItemProductionRollups(todayDateIst);
+}

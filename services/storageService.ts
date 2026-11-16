@@ -369,6 +369,14 @@ export interface MachineGroupTimeBalance extends ShiftTimeBalance {
   runCount: number;
   rowProductionMinutes: Record<string, number>;
   rowBreakdownMinutes: Record<string, number>;
+  rowBreakdownSummary?: Record<
+    string,
+    {
+      prodMins: number;
+      bdMins: number;
+      rowTotalMins: number;
+    }
+  >;
 }
 
 /**
@@ -389,6 +397,14 @@ export function calculateMachineGroupTimeBalance(
 
   const rowProductionMinutes: Record<string, number> = {};
   const rowBreakdownMinutes: Record<string, number> = {};
+  const rowBreakdownSummary: Record<
+    string,
+    {
+      prodMins: number;
+      bdMins: number;
+      rowTotalMins: number;
+    }
+  > = {};
 
   if (machineRows.length === 0) {
     return {
@@ -396,6 +412,7 @@ export function calculateMachineGroupTimeBalance(
       runCount: 0,
       rowProductionMinutes: {},
       rowBreakdownMinutes: {},
+      rowBreakdownSummary: {},
       shiftMinutes: shiftMins,
       productionMinutes: 0,
       requiredBreakdownMinutes: 0,
@@ -422,12 +439,14 @@ export function calculateMachineGroupTimeBalance(
     machineRows.forEach((r) => {
       rowProductionMinutes[r.id] = 0;
       rowBreakdownMinutes[r.id] = 0;
+      rowBreakdownSummary[r.id] = { prodMins: 0, bdMins: 0, rowTotalMins: 0 };
     });
     return {
       machineId,
       runCount: machineRows.length,
       rowProductionMinutes,
       rowBreakdownMinutes,
+      rowBreakdownSummary,
       shiftMinutes: shiftMins,
       productionMinutes: 0,
       requiredBreakdownMinutes: 0,
@@ -456,8 +475,10 @@ export function calculateMachineGroupTimeBalance(
     }
 
     const prod = Number((act * ct).toFixed(2));
+    const rowTotal = Number((prod + bd).toFixed(2));
     rowProductionMinutes[r.id] = prod;
     rowBreakdownMinutes[r.id] = bd;
+    rowBreakdownSummary[r.id] = { prodMins: prod, bdMins: bd, rowTotalMins: rowTotal };
 
     totalProd = Number((totalProd + prod).toFixed(2));
     totalBd = Number((totalBd + bd).toFixed(2));
@@ -493,6 +514,7 @@ export function calculateMachineGroupTimeBalance(
     runCount: machineRows.length,
     rowProductionMinutes,
     rowBreakdownMinutes,
+    rowBreakdownSummary,
     shiftMinutes: shiftMins,
     productionMinutes,
     requiredBreakdownMinutes,
@@ -509,11 +531,46 @@ export function calculateMachineGroupTimeBalance(
 }
 
 /**
+ * Calculates the suggested stdOutput for a specific split row given a new cycle time
+ * by allocating remaining unallocated target minutes from other split runs.
+ */
+export function calculateSplitRowSuggestedStd(
+  allRows: MachineShiftRow[],
+  targetRowId: string,
+  newCycleTime: number,
+  shiftWorkingMinutes: number
+): number {
+  if (newCycleTime <= 0) return 0;
+  const targetRow = allRows.find((r) => r.id === targetRowId);
+  if (!targetRow) return 0;
+
+  const machineRows = allRows.filter((r) => r.machineId === targetRow.machineId);
+  if (machineRows.length <= 1) {
+    return Math.floor(shiftWorkingMinutes / newCycleTime);
+  }
+
+  const otherRuns = machineRows.filter((r) => r.id !== targetRowId);
+  const otherTargetMins = otherRuns.reduce((sum, r) => {
+    const std = Number(r.stdOutput) || 0;
+    const ct = Number(r.cycleTime) || 0;
+    if (std > 0 && ct > 0) {
+      return Number((sum + std * ct).toFixed(2));
+    }
+    return sum;
+  }, 0);
+
+  const remainingMins = Math.max(0, Number((shiftWorkingMinutes - otherTargetMins).toFixed(2)));
+  return Math.floor(remainingMins / newCycleTime);
+}
+
+/**
  * Proportionally distributes shift working minutes and computes stdOutput for each run
  * of a machine group.
  * - Single run: standard shiftWorkingMinutes / cycleTime
- * - Multiple runs: allocates each run's used minutes (productive time + logged BD),
- *   plus any remaining unallocated shift minutes on the last run, and sets stdOutput proportionally.
+ * - Multiple split runs:
+ *   - Unlocks stdOutput so users can enter exact split targets.
+ *   - NEVER overwrites user-entered stdOutput (> 0) on split rows when actualOutput or breakdown changes!
+ *   - If stdOutput === 0 and cycleTime > 0, suggests stdOutput from remaining unallocated target minutes.
  */
 export function recalculateMachineGroupStdOutputs(
   allRows: MachineShiftRow[],
@@ -537,31 +594,35 @@ export function recalculateMachineGroupStdOutputs(
     return allRows.map((r) => (r.id === single.id ? { ...r, stdOutput: std } : r));
   }
 
-  // Multiple split runs
-  const runAccounted: { id: string; prodMins: number; bdMins: number; total: number }[] = [];
-  let groupAccounted = 0;
+  // Multiple split runs:
+  // 1. Preserve each split row's existing stdOutput if already set (> 0)
+  // 2. Sum allocated target minutes of runs that already have a positive stdOutput
+  const allocatedTargetMins = machineRows.reduce((sum, r) => {
+    const std = Number(r.stdOutput) || 0;
+    const ct = Number(r.cycleTime) || 0;
+    if (std > 0 && ct > 0) {
+      return Number((sum + std * ct).toFixed(2));
+    }
+    return sum;
+  }, 0);
 
-  for (const run of machineRows) {
-    const act = Number(run.actualOutput) || 0;
-    const ct = Number(run.cycleTime) || 0;
-    const prodMins = Number((act * ct).toFixed(2));
-    const bdMins = calculateTotalBreakdown(run.breakdown);
-    const total = Number((prodMins + bdMins).toFixed(2));
-    runAccounted.push({ id: run.id, prodMins, bdMins, total });
-    groupAccounted = Number((groupAccounted + total).toFixed(2));
-  }
-
-  const unallocated = Math.max(0, Number((shiftMins - groupAccounted).toFixed(2)));
+  let remainingTargetMins = Math.max(0, Number((shiftMins - allocatedTargetMins).toFixed(2)));
 
   const updatedStdMap = new Map<string, number>();
-  machineRows.forEach((run, idx) => {
-    const isLastRun = idx === machineRows.length - 1;
-    const acc = runAccounted[idx];
-    const allocatedMins = Number((acc.total + (isLastRun ? unallocated : 0)).toFixed(2));
+  for (const run of machineRows) {
+    const currentStd = Number(run.stdOutput) || 0;
     const ct = Number(run.cycleTime) || 0;
-    const std = ct > 0 ? Math.floor(allocatedMins / ct) : 0;
-    updatedStdMap.set(run.id, std);
-  });
+    if (currentStd > 0) {
+      // Keep existing target - do NOT overwrite based on actual or breakdown!
+      updatedStdMap.set(run.id, currentStd);
+    } else if (ct > 0 && remainingTargetMins > 0) {
+      const suggested = Math.floor(remainingTargetMins / ct);
+      updatedStdMap.set(run.id, suggested);
+      remainingTargetMins = Math.max(0, Number((remainingTargetMins - suggested * ct).toFixed(2)));
+    } else {
+      updatedStdMap.set(run.id, 0);
+    }
+  }
 
   return allRows.map((r) => {
     if (r.machineId === machineId && updatedStdMap.has(r.id)) {
