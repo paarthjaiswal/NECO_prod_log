@@ -195,6 +195,9 @@ export default function DashboardClient({
       return;
     }
 
+    // Synchronously set optimistic lock state from client-evaluated shiftLock
+    setIsShiftLocked(!shiftLock.isEditable);
+
     let isMounted = true;
     checkShiftEditWindow(selectedDate, selectedShift, 30)
       .then((windowResult) => {
@@ -487,7 +490,11 @@ export default function DashboardClient({
   const handleExportExcel = () => {
     exportShiftToExcel(
       currentShiftRows,
-      `${selectedDate}_${selectedLine}`
+      `${selectedDate}_${selectedLine}`,
+      selectedShift,
+      selectedLine,
+      undefined,
+      masterData
     );
   };
 

@@ -266,17 +266,24 @@ export const Header: React.FC<HeaderProps> = ({
                 {availableShifts.map((shift) => {
                   const parts = shift.split(' ');
                   const label = parts.length >= 2 ? `${parts[0]} ${parts[1]}` : shift;
+                  const isSelected = selectedShift === shift;
+                  const isSelectedAndLocked = isSelected && isShiftLocked;
+
                   return (
                     <button
                       key={shift}
                       onClick={() => setSelectedShift(shift)}
-                      className={`px-2 py-0.5 rounded text-xs transition-colors whitespace-nowrap ${
-                        selectedShift === shift
+                      className={`px-2 py-0.5 rounded text-xs transition-colors whitespace-nowrap flex items-center gap-1 ${
+                        isSelectedAndLocked
+                          ? 'bg-rose-700 text-white font-semibold shadow-xs ring-1 ring-rose-500'
+                          : isSelected
                           ? 'bg-emerald-600 text-white font-semibold shadow-xs'
                           : 'text-slate-300 hover:text-white hover:bg-slate-800'
                       }`}
+                      title={isSelectedAndLocked ? 'Locked shift (read-only)' : undefined}
                     >
-                      {label}
+                      {isSelectedAndLocked && <span className="text-[10px]">🔒</span>}
+                      <span>{label}</span>
                     </button>
                   );
                 })}

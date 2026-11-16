@@ -9,12 +9,23 @@ import {
   FileSpreadsheet,
   Search,
   Calendar,
+  Layers,
+  Package,
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
-import { MachineMaster, MachineShiftRow, MasterDataState, ShiftType } from '@/types';
-import { INITIAL_MACHINES } from '@/data/initialData';
+import {
+  MachineMaster,
+  MachineShiftRow,
+  MasterDataState,
+  ShiftType,
+  ItemProductionRollup,
+} from '@/types';
+import { INITIAL_MACHINES, PRODUCTION_LINES } from '@/data/initialData';
 import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
 import { exportHistoricalToCSV, exportShiftToExcel } from '@/services/excelExport';
-import { getAnalyticsLogs } from '@/actions/shiftActions';
+import { getAnalyticsLogs, getItemProductionRollups } from '@/actions/shiftActions';
 
 interface AnalyticsPreviewProps {
   rows: MachineShiftRow[];
@@ -36,6 +47,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   // Start with current shift rows, then merge 30-day history from Supabase on mount
   const [historicalLogs, setHistoricalLogs] = useState<MachineShiftRow[]>([]);
+  const [itemRollups, setItemRollups] = useState<ItemProductionRollup[]>([]);
+  const [isLoadingRollups, setIsLoadingRollups] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -52,6 +65,26 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     };
   }, []);
 
+  // Fetch Item Production rollups (Today, MTD, Till Now) anchored to selectedDate
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoadingRollups(true);
+    getItemProductionRollups(selectedDate)
+      .then((data) => {
+        if (isMounted && data) {
+          setItemRollups(data);
+        }
+      })
+      .catch((err) => console.error('Failed to load item production rollups:', err))
+      .finally(() => {
+        if (isMounted) setIsLoadingRollups(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedDate]);
+
   // Merge current shift rows with historical logs (deduplicated by row.id)
   const allLogs = useMemo(() => {
     const logMap = new Map<string, MachineShiftRow>();
@@ -65,6 +98,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [shiftFilter, setShiftFilter] = useState<string>('all');
   const [lineFilter, setLineFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
+  const [showIdleMachines, setShowIdleMachines] = useState<boolean>(false);
   const [hoveredMachineId, setHoveredMachineId] = useState<string | null>(null);
 
   // Custom Date Range State (defaults to past 30 days up to today)
@@ -239,13 +274,14 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       dateRangeLabel,
       shiftFilter !== 'all' ? shiftFilter : undefined,
       lineFilter !== 'all' ? lineFilter : undefined,
-      filename
+      filename,
+      masterData,
+      itemRollups
     );
   };
 
-  // Aggregate KPIs
+  // Aggregate Primary KPIs (Partial-Line Rule: only stdOutput > 0)
   const kpis = useMemo(() => {
-    // Only calculate for logs that were actually scheduled (stdOutput > 0)
     const activeLogs = filteredLogs.filter((r) => Number(r.stdOutput) > 0);
 
     const totalStd = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
@@ -318,39 +354,281 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     };
   }, [filteredLogs]);
 
-  // Machine-wise metrics for the machines
+  // Section 1: Line Efficiency & Shift-Wise Comparison Matrix (Domain Rule: Partial-Line stdOutput > 0)
+  const lineComparisonData = useMemo(() => {
+    const lineList =
+      masterData?.lines && masterData.lines.length > 0
+        ? masterData.lines.filter((l) => l.isActive !== false).map((l) => l.name)
+        : PRODUCTION_LINES;
+
+    const allMachines = masterData?.machines && masterData.machines.length > 0
+      ? masterData.machines
+      : INITIAL_MACHINES;
+
+    let grandTotalMachines = 0;
+    const grandActiveSet = new Set<string>();
+    let grandStd = 0;
+    let grandAct = 0;
+    let grandAStd = 0;
+    let grandAAct = 0;
+    let grandBStd = 0;
+    let grandBAct = 0;
+    let grandCStd = 0;
+    let grandCAct = 0;
+    let grandBd = 0;
+
+    const lines = lineList.map((lineName) => {
+      const lineMachines = allMachines.filter((m) => (m.line || 'Line 1') === lineName);
+      const totalMachines = lineMachines.length;
+      grandTotalMachines += totalMachines;
+
+      const lineLogs = filteredLogs.filter((r) => (r.line || 'Line 1') === lineName);
+      // Strictly filter active rows where stdOutput > 0
+      const activeLogs = lineLogs.filter((r) => Number(r.stdOutput) > 0);
+
+      const activeMachineSet = new Set(activeLogs.map((r) => r.machineId || r.machineName));
+      activeLogs.forEach((r) => grandActiveSet.add(r.machineId || r.machineName));
+
+      const std = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const act = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const eff = std > 0 ? Math.round((act / std) * 100) : 0;
+
+      const filterShift = (prefix: string) =>
+        activeLogs.filter((r) => (r.shift || '').toLowerCase().includes(prefix.toLowerCase()));
+
+      const aLogs = filterShift('shift a');
+      const bLogs = filterShift('shift b');
+      const cLogs = filterShift('shift c');
+
+      const aStd = aLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const aAct = aLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const aEff = aStd > 0 ? Math.round((aAct / aStd) * 100) : null;
+
+      const bStd = bLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const bAct = bLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const bEff = bStd > 0 ? Math.round((bAct / bStd) * 100) : null;
+
+      const cStd = cLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const cAct = cLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const cEff = cStd > 0 ? Math.round((cAct / cStd) * 100) : null;
+
+      const runningEffs = [aEff, bEff, cEff].filter((v): v is number => v !== null);
+      const spread = runningEffs.length >= 2 ? Math.max(...runningEffs) - Math.min(...runningEffs) : null;
+
+      const totalBd = lineLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0);
+
+      grandStd += std;
+      grandAct += act;
+      grandAStd += aStd;
+      grandAAct += aAct;
+      grandBStd += bStd;
+      grandBAct += bAct;
+      grandCStd += cStd;
+      grandCAct += cAct;
+      grandBd += totalBd;
+
+      return {
+        lineName,
+        activeCount: activeMachineSet.size,
+        totalMachines,
+        std,
+        act,
+        variance: act - std,
+        eff,
+        aAct,
+        aStd,
+        aEff,
+        bAct,
+        bStd,
+        bEff,
+        cAct,
+        cStd,
+        cEff,
+        spread,
+        totalBd,
+      };
+    });
+
+    const grandEff = grandStd > 0 ? Math.round((grandAct / grandStd) * 100) : 0;
+    const grandAEff = grandAStd > 0 ? Math.round((grandAAct / grandAStd) * 100) : null;
+    const grandBEff = grandBStd > 0 ? Math.round((grandBAct / grandBStd) * 100) : null;
+    const grandCEff = grandCStd > 0 ? Math.round((grandCAct / grandCStd) * 100) : null;
+    const grandRunningEffs = [grandAEff, grandBEff, grandCEff].filter((v): v is number => v !== null);
+    const grandSpread =
+      grandRunningEffs.length >= 2 ? Math.max(...grandRunningEffs) - Math.min(...grandRunningEffs) : null;
+
+    const plantTotal = {
+      lineName: 'Total Plant (All Lines)',
+      activeCount: grandActiveSet.size,
+      totalMachines: grandTotalMachines,
+      std: grandStd,
+      act: grandAct,
+      variance: grandAct - grandStd,
+      eff: grandEff,
+      aAct: grandAAct,
+      aStd: grandAStd,
+      aEff: grandAEff,
+      bAct: grandBAct,
+      bStd: grandBStd,
+      bEff: grandBEff,
+      cAct: grandCAct,
+      cStd: grandCStd,
+      cEff: grandCEff,
+      spread: grandSpread,
+      totalBd: grandBd,
+    };
+
+    return { lines, plantTotal };
+  }, [masterData?.lines, masterData?.machines, filteredLogs]);
+
+  // Section 2: Item Production Rollups Summary (Period, Today, MTD, All-Time Till Now)
+  const itemSummaryRows = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        itemId: string;
+        itemCode: string;
+        itemName: string;
+        periodQty: number;
+        periodStd: number;
+        periodRework: number;
+        todayQty: number;
+        mtdQty: number;
+        tillNowQty: number;
+        tillNowStd: number;
+        tillNowRework: number;
+      }
+    >();
+
+    // Seed master definitions from itemRollups
+    for (const roll of itemRollups) {
+      const key = (roll.itemCode || roll.itemId || roll.itemName).trim().toLowerCase();
+      map.set(key, {
+        itemId: roll.itemId,
+        itemCode: roll.itemCode || '—',
+        itemName: roll.itemName,
+        periodQty: 0,
+        periodStd: 0,
+        periodRework: 0,
+        todayQty: roll.todayOutput,
+        mtdQty: roll.mtdOutput,
+        tillNowQty: roll.tillNowOutput,
+        tillNowStd: roll.tillNowStd,
+        tillNowRework: roll.tillNowRework,
+      });
+    }
+
+    // Accumulate period quantities from current filteredLogs
+    for (const log of filteredLogs) {
+      if (!log.itemId && !log.itemName) continue;
+      const key = (log.itemId || log.itemName).trim().toLowerCase();
+      if (!map.has(key)) {
+        map.set(key, {
+          itemId: log.itemId,
+          itemCode: log.itemId || '—',
+          itemName: log.itemName || 'Unknown Part',
+          periodQty: 0,
+          periodStd: 0,
+          periodRework: 0,
+          todayQty: 0,
+          mtdQty: 0,
+          tillNowQty: 0,
+          tillNowStd: 0,
+          tillNowRework: 0,
+        });
+      }
+      const entry = map.get(key)!;
+      entry.periodQty += Number(log.actualOutput) || 0;
+      entry.periodStd += Number(log.stdOutput) || 0;
+      entry.periodRework += Number(log.rework) || 0;
+    }
+
+    let list = Array.from(map.values());
+
+    if (itemSearchQuery.trim()) {
+      const q = itemSearchQuery.trim().toLowerCase();
+      list = list.filter(
+        (it) =>
+          it.itemName.toLowerCase().includes(q) ||
+          it.itemCode.toLowerCase().includes(q) ||
+          it.itemId.toLowerCase().includes(q)
+      );
+    }
+
+    return list.sort((a, b) => b.periodQty - a.periodQty || b.tillNowQty - a.tillNowQty);
+  }, [itemRollups, filteredLogs, itemSearchQuery]);
+
+  // Section 3: Machine-wise Detailed Efficiency Matrix
   const machineMetrics = useMemo(() => {
     const relevantMachines =
       lineFilter === 'all' ? machines : machines.filter((m) => (m.line || 'Line 1') === lineFilter);
 
     return relevantMachines.map((machine) => {
-      const logs = filteredLogs.filter(
-        (l) => (l.machineId === machine.id || l.machineName === machine.name) && l.stdOutput > 0
+      const machLogs = filteredLogs.filter(
+        (l) => l.machineId === machine.id || l.machineName === machine.name
       );
-      const std = logs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const act = logs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const rework = logs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-      const downtime = logs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0);
-      const efficiency = std > 0 ? Math.round((act / std) * 100) : 0;
-      const latestOperator = logs[logs.length - 1]?.operatorName || '—';
-      const latestItem = logs[logs.length - 1]?.itemName || '—';
+      const activeLogs = machLogs.filter((l) => Number(l.stdOutput) > 0);
+      const isOperating = activeLogs.length > 0;
+
+      const std = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const act = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const rework = machLogs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
+      const downtime = machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0);
+      const efficiency = std > 0 ? Math.round((act / std) * 100) : null;
+
+      const filterShift = (prefix: string) =>
+        activeLogs.filter((r) => (r.shift || '').toLowerCase().includes(prefix.toLowerCase()));
+
+      const aLogs = filterShift('shift a');
+      const bLogs = filterShift('shift b');
+      const cLogs = filterShift('shift c');
+
+      const aAct = aLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const aStd = aLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const aEff = aStd > 0 ? Math.round((aAct / aStd) * 100) : null;
+
+      const bAct = bLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const bStd = bLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const bEff = bStd > 0 ? Math.round((bAct / bStd) * 100) : null;
+
+      const cAct = cLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const cStd = cLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const cEff = cStd > 0 ? Math.round((cAct / cStd) * 100) : null;
+
+      const latestOperator = activeLogs[activeLogs.length - 1]?.operatorName || '—';
+      const latestItem = activeLogs[activeLogs.length - 1]?.itemName || '—';
 
       return {
         id: machine.id,
         name: machine.name,
         code: machine.code,
         line: machine.line || 'Line 1',
+        isOperating,
         std,
         act,
+        variance: act - std,
         rework,
         downtime,
         efficiency,
+        aAct,
+        aEff,
+        bAct,
+        bEff,
+        cAct,
+        cEff,
         latestOperator,
         latestItem,
-        hasData: logs.length > 0,
+        hasData: machLogs.length > 0,
       };
     });
   }, [machines, filteredLogs, lineFilter]);
+
+  // Filtered machine metrics for display based on showIdleMachines toggle
+  const visibleMachineMetrics = useMemo(() => {
+    if (showIdleMachines) return machineMetrics;
+    const active = machineMetrics.filter((m) => m.isOperating || m.hasData);
+    return active.length > 0 ? active : machineMetrics;
+  }, [machineMetrics, showIdleMachines]);
 
   // Sorted machine downtime for Pareto list
   const sortedByDowntime = useMemo(() => {
@@ -372,19 +650,19 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       <div className="bg-white rounded-lg border border-slate-200 p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <h2 className="text-base font-bold text-slate-900 tracking-tight">
               Production Intelligence & Power BI Telemetry
             </h2>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Aggregated shift metrics across the 16 CNC & machining units. Ready for plant executive review and Power BI ingestion.
+            Plant-wide efficiency matrix, item production totals, and telemetry for audit & executive review.
           </p>
         </div>
 
         {/* Action Controls */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Date Filter */}
+          {/* Quick Date Presets */}
           <div className="flex flex-wrap items-center gap-0.5 bg-slate-100 p-1 rounded border border-slate-200 text-xs max-w-full">
             <button
               onClick={() => setDateFilter('all')}
@@ -444,7 +722,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             )}
           </div>
 
-          {/* Inline Custom Date Range Picker (Active when Custom Range is selected) */}
+          {/* Inline Custom Date Range Picker */}
           {dateFilter === 'custom' && (
             <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded border border-slate-300 text-xs shadow-2xs">
               <div className="flex items-center gap-1">
@@ -508,7 +786,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             <option value="Line 3">Line 3 (Heavy SPM)</option>
           </select>
 
-          {/* Direct CSV / Excel Export for Power BI */}
+          {/* Direct CSV / Excel Export */}
           <button
             onClick={handleExportCSV}
             className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
@@ -521,9 +799,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           <button
             onClick={handleExportExcel}
             className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
+            title="Download 4-sheet multi-table Excel workbook"
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Export .xlsx</span>
+            <span>Export .xlsx (4 Sheets)</span>
           </button>
         </div>
       </div>
@@ -556,10 +835,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           </div>
         </div>
 
-        {/* KPI 2: Overall Plant Efficiency */}
+        {/* KPI 2: Overall Plant Efficiency (Partial-Line Weighted) */}
         <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-2">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
-            <span>Overall Plant Efficiency</span>
+            <span>Plant-Wide Efficiency</span>
             <TrendingUp className="w-4 h-4 text-emerald-600" />
           </div>
           <div className="flex items-baseline justify-between">
@@ -579,13 +858,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             </span>
           </div>
           <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
-            <span className="text-slate-500">Status:</span>
-            <span
-              className={`font-semibold ${
-                kpis.plantEfficiency >= 85 ? 'text-emerald-700' : 'text-amber-700'
-              }`}
-            >
-              {kpis.plantEfficiency >= 85 ? 'Target Met (Above SLA)' : 'Under Observation'}
+            <span className="text-slate-500">Operating Machines:</span>
+            <span className="font-semibold text-emerald-700 font-mono">
+              {lineComparisonData.plantTotal.activeCount} / {lineComparisonData.plantTotal.totalMachines} active
             </span>
           </div>
         </div>
@@ -628,259 +903,551 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
             <span className="text-slate-500">Working Time Loss:</span>
             <span className="font-mono font-bold text-amber-800">
-              {kpis.totalBdPctOfWorking}% of 1305m
+              {kpis.totalBdPctOfWorking}% of total
             </span>
           </div>
         </div>
       </div>
 
-      {/* Main Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Machine-wise Production Efficiency Bar Chart (2 columns) */}
-        <div className="lg:col-span-2 bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
-                <BarChart3 className="w-4 h-4 text-slate-700" />
-                <span>Machine-Wise Production vs Standard Target</span>
-              </h3>
-              <p className="text-xs text-slate-500">
-                Visualizing actual production volume against standard shift quota across all 16 client machines.
-              </p>
-            </div>
-            <div className="flex items-center gap-3 text-xs">
-              <span className="flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded bg-emerald-600 inline-block" />
-                <span className="text-slate-600 font-medium">Actual Output</span>
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded bg-slate-300 inline-block" />
-                <span className="text-slate-600 font-medium">Std Quota</span>
-              </span>
-            </div>
+      {/* SECTION 1: Line Efficiency & Shift-Wise Comparison Table */}
+      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
+              <Layers className="w-4 h-4 text-slate-700" />
+              <span>Line Efficiency & Shift-Wise Comparison</span>
+            </h3>
+            <p className="text-xs text-slate-500">
+              Evaluated strictly on active machines (Std Output &gt; 0). Idle machines never drag down line efficiency.
+            </p>
           </div>
+          <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span>≥ 85% Target</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-amber-500" />
+              <span>75-84% Moderate</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-rose-500" />
+              <span>&lt; 75% Critical</span>
+            </span>
+          </div>
+        </div>
 
-          {/* SVG & HTML Interactive Bar Chart */}
-          <div className="pt-2">
-            <div className="space-y-2 max-h-115 overflow-y-auto pr-2">
-              {machineMetrics.map((m, idx) => {
-                const maxScale = Math.max(220, ...machineMetrics.map((item) => Math.max(item.std, item.act)));
-                const actWidth = Math.min(100, (m.act / maxScale) * 100);
-                const _stdWidth = Math.min(100, (m.std / maxScale) * 100);
-
-                return (
-                  <div
-                    key={m.id}
-                    onMouseEnter={() => setHoveredMachineId(m.id)}
-                    onMouseLeave={() => setHoveredMachineId(null)}
-                    className={`p-2 rounded transition-colors text-xs border ${
-                      hoveredMachineId === m.id
-                        ? 'bg-slate-50 border-slate-400'
-                        : 'border-transparent hover:bg-slate-50/60'
+        <div className="overflow-x-auto border border-slate-200 rounded">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead className="bg-slate-900 text-slate-200 text-[11px] font-semibold uppercase">
+              <tr>
+                <th className="px-3 py-2 border-r border-slate-800">Production Line</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Operating Units</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Target (Std)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Actual (Pcs)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Line Eff %</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A (7AM-3:30PM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B (3:30PM-12AM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C (12AM-7AM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Shift Spread</th>
+                <th className="px-3 py-2 text-center">Downtime</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 font-mono">
+              {lineComparisonData.lines.map((line) => (
+                <tr key={line.lineName} className="hover:bg-slate-50">
+                  <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
+                    {line.lineName}
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-slate-700 whitespace-nowrap">
+                    <span className="font-semibold text-emerald-800">{line.activeCount}</span>
+                    <span className="text-slate-400"> / {line.totalMachines} active</span>
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-slate-600">{line.std}</td>
+                  <td className="px-2.5 py-2 text-center font-bold text-slate-900">{line.act}</td>
+                  <td className="px-2.5 py-2 text-center">
+                    {line.std > 0 ? (
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-extrabold ${
+                          line.eff >= 85
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : line.eff >= 75
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-rose-100 text-rose-800'
+                        }`}
+                      >
+                        {line.eff}%
+                      </span>
+                    ) : (
+                      <span className="text-slate-400 font-sans italic text-[11px]">No Target</span>
+                    )}
+                  </td>
+                  {/* Shift A */}
+                  <td className="px-2.5 py-2 text-center bg-slate-50/60">
+                    {line.aEff !== null ? (
+                      <div>
+                        <span className="font-bold text-slate-800">{line.aAct} pcs</span>
+                        <span className="text-slate-500 text-[10px] ml-1">({line.aEff}%)</span>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400 text-[11px]">Idle</span>
+                    )}
+                  </td>
+                  {/* Shift B */}
+                  <td className="px-2.5 py-2 text-center bg-slate-50/60">
+                    {line.bEff !== null ? (
+                      <div>
+                        <span className="font-bold text-slate-800">{line.bAct} pcs</span>
+                        <span className="text-slate-500 text-[10px] ml-1">({line.bEff}%)</span>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400 text-[11px]">Idle</span>
+                    )}
+                  </td>
+                  {/* Shift C */}
+                  <td className="px-2.5 py-2 text-center bg-slate-50/60">
+                    {line.cEff !== null ? (
+                      <div>
+                        <span className="font-bold text-slate-800">{line.cAct} pcs</span>
+                        <span className="text-slate-500 text-[10px] ml-1">({line.cEff}%)</span>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400 text-[11px]">Idle</span>
+                    )}
+                  </td>
+                  {/* Shift Spread */}
+                  <td className="px-2.5 py-2 text-center">
+                    {line.spread !== null ? (
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                          line.spread >= 15
+                            ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                            : line.spread >= 10
+                            ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                            : 'text-slate-600'
+                        }`}
+                        title={line.spread >= 10 ? 'High efficiency disparity between shifts' : undefined}
+                      >
+                        {line.spread}% spread
+                      </span>
+                    ) : (
+                      <span className="text-slate-400 text-[11px]">Single Shift</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-center text-amber-800 font-bold">{line.totalBd}m</td>
+                </tr>
+              ))}
+            </tbody>
+            {/* Plant Total Footer Row */}
+            <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
+              <tr>
+                <td className="px-3 py-2.5 font-sans uppercase tracking-tight text-xs">
+                  {lineComparisonData.plantTotal.lineName}
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-emerald-800">
+                  {lineComparisonData.plantTotal.activeCount} / {lineComparisonData.plantTotal.totalMachines} active
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-700">{lineComparisonData.plantTotal.std}</td>
+                <td className="px-2.5 py-2.5 text-center text-slate-950 font-black">{lineComparisonData.plantTotal.act}</td>
+                <td className="px-2.5 py-2.5 text-center">
+                  <span
+                    className={`px-2.5 py-1 rounded text-xs font-black ${
+                      lineComparisonData.plantTotal.eff >= 85
+                        ? 'bg-emerald-600 text-white'
+                        : lineComparisonData.plantTotal.eff >= 75
+                        ? 'bg-amber-500 text-slate-950'
+                        : 'bg-rose-600 text-white'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-1 font-medium">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-slate-500 text-[11px] w-6">#{idx + 1}</span>
-                        <strong className="text-slate-900">{m.name}</strong>
-                        <span className="text-[11px] text-slate-600 hidden sm:inline font-mono">
-                          ({m.code})
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2 font-mono">
-                        <span className="text-slate-600">
-                          {m.act} / {m.std} pcs
-                        </span>
-                        <span
-                          className={`font-bold px-1.5 py-0.2 rounded text-[11px] ${
-                            m.efficiency >= 90
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : m.efficiency >= 75
-                              ? 'bg-amber-100 text-amber-800'
-                              : m.std === 0
-                              ? 'text-slate-500'
-                              : 'bg-rose-100 text-rose-800'
-                          }`}
-                        >
-                          {m.std > 0 ? `${m.efficiency}%` : '—'}
-                        </span>
-                      </div>
-                    </div>
+                    {lineComparisonData.plantTotal.eff}%
+                  </span>
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-800">
+                  {lineComparisonData.plantTotal.aEff !== null ? (
+                    <span>{lineComparisonData.plantTotal.aAct} ({lineComparisonData.plantTotal.aEff}%)</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-800">
+                  {lineComparisonData.plantTotal.bEff !== null ? (
+                    <span>{lineComparisonData.plantTotal.bAct} ({lineComparisonData.plantTotal.bEff}%)</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-800">
+                  {lineComparisonData.plantTotal.cEff !== null ? (
+                    <span>{lineComparisonData.plantTotal.cAct} ({lineComparisonData.plantTotal.cEff}%)</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-2.5 py-2.5 text-center">
+                  {lineComparisonData.plantTotal.spread !== null ? (
+                    <span className="font-bold text-slate-800">{lineComparisonData.plantTotal.spread}%</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-3 py-2.5 text-center text-amber-800">{lineComparisonData.plantTotal.totalBd}m</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
 
-                    {/* Comparative Dual Bars */}
-                    <div className="space-y-1">
-                      {/* Actual Bar */}
-                      <div className="w-full bg-slate-100 h-2.5 rounded overflow-hidden relative">
-                        <div
-                          className={`h-full rounded transition-all duration-300 ${
-                            m.efficiency >= 90
-                              ? 'bg-emerald-600'
-                              : m.efficiency >= 75
-                              ? 'bg-amber-500'
-                              : 'bg-rose-500'
-                          }`}
-                          style={{ width: `${actWidth}%` }}
-                        />
-                      </div>
-                    </div>
+      {/* SECTION 2: Item Production Summary (Selected Period, Today, MTD, All-Time Till Now) */}
+      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
+              <Package className="w-4 h-4 text-slate-700" />
+              <span>Item Production Totals & Progress Summary</span>
+            </h3>
+            <p className="text-xs text-slate-500">
+              Aggregated actual production quantities: Selected Period, Today, Month-to-Date (MTD), and All-Time Till Now.
+            </p>
+          </div>
 
-                    {/* Expanded Tooltip Details on Hover */}
-                    {hoveredMachineId === m.id && (
-                      <div className="mt-2 pt-2 border-t border-slate-200 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2 bg-white p-2 rounded shadow-2xs">
-                        <span>Operator: <strong>{m.latestOperator}</strong></span>
-                        <span>Item: <strong>{m.latestItem}</strong></span>
-                        <span>Downtime: <strong className="text-amber-700">{m.downtime} mins</strong></span>
-                        <span>Rework: <strong className="text-rose-700">{m.rework} pcs</strong></span>
-                      </div>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search part code or name..."
+                value={itemSearchQuery}
+                onChange={(e) => setItemSearchQuery(e.target.value)}
+                className="pl-8 pr-3 py-1 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none w-52 sm:w-64"
+              />
+            </div>
+            {isLoadingRollups && (
+              <span className="text-[11px] text-slate-400 font-mono animate-pulse">Syncing...</span>
+            )}
+          </div>
+        </div>
+
+        <div className="overflow-x-auto max-h-80 border border-slate-200 rounded">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead className="bg-slate-900 text-slate-200 sticky top-0 z-10 text-[11px] font-semibold uppercase">
+              <tr>
+                <th className="px-3 py-2 border-r border-slate-800">Part Code</th>
+                <th className="px-3 py-2 border-r border-slate-800">Item Name</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/80">Selected Period (Pcs)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Today Qty</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">MTD Qty</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center font-bold text-amber-300">Total Till Now</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Till Now Target</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Till Now Rework</th>
+                <th className="px-3 py-2 text-center">Period Eff %</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 font-mono">
+              {itemSummaryRows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="text-center py-6 text-slate-500 font-sans">
+                    No matching item production records found.
+                  </td>
+                </tr>
+              ) : (
+                itemSummaryRows.map((it) => {
+                  const eff = it.periodStd > 0 ? Math.round((it.periodQty / it.periodStd) * 100) : null;
+                  return (
+                    <tr key={it.itemId || it.itemName} className="hover:bg-slate-50">
+                      <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap font-semibold">
+                        {it.itemCode}
+                      </td>
+                      <td className="px-3 py-1.5 font-sans font-bold text-slate-900 whitespace-nowrap">
+                        {it.itemName}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-center font-extrabold text-slate-900 bg-slate-50/70">
+                        {it.periodQty}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-center text-slate-700">{it.todayQty}</td>
+                      <td className="px-2.5 py-1.5 text-center text-slate-700">{it.mtdQty}</td>
+                      <td className="px-2.5 py-1.5 text-center font-black text-amber-800 bg-amber-50/40">
+                        {it.tillNowQty}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-center text-slate-600">{it.tillNowStd}</td>
+                      <td className="px-2.5 py-1.5 text-center text-rose-700">{it.tillNowRework}</td>
+                      <td className="px-3 py-1.5 text-center">
+                        {eff !== null ? (
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                              eff >= 85
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : eff >= 75
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-rose-100 text-rose-800'
+                            }`}
+                          >
+                            {eff}%
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* SECTION 3: Machine Efficiency Matrix (with Idle Filter) */}
+      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
+              <Activity className="w-4 h-4 text-slate-700" />
+              <span>Machine Efficiency Matrix & Shift Distribution</span>
+            </h3>
+            <p className="text-xs text-slate-500">
+              Machine-level performance across active shifts with partial-line status tracking.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showIdleMachines}
+                onChange={(e) => setShowIdleMachines(e.target.checked)}
+                className="rounded text-slate-900 focus:ring-slate-800"
+              />
+              <span className="font-medium">Show Idle / Unassigned Machines</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto max-h-96 border border-slate-200 rounded">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead className="bg-slate-900 text-slate-200 sticky top-0 z-10 text-[11px] font-semibold uppercase">
+              <tr>
+                <th className="px-3 py-2 border-r border-slate-800">Machine Name</th>
+                <th className="px-2 py-2 border-r border-slate-800">Code</th>
+                <th className="px-2.5 py-2 border-r border-slate-800">Line</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Status</th>
+                <th className="px-2 py-2 border-r border-slate-800 text-center">Std</th>
+                <th className="px-2 py-2 border-r border-slate-800 text-center">Actual</th>
+                <th className="px-2 py-2 border-r border-slate-800 text-center">Machine Eff %</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C</th>
+                <th className="px-2 py-2 border-r border-slate-800 text-center">Downtime</th>
+                <th className="px-2 py-2 text-center">Rework</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 font-mono">
+              {visibleMachineMetrics.map((m) => (
+                <tr key={m.id} className="hover:bg-slate-50">
+                  <td className="px-3 py-1.5 font-sans font-bold text-slate-900 whitespace-nowrap">
+                    {m.name}
+                  </td>
+                  <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{m.code}</td>
+                  <td className="px-2.5 py-1.5 font-sans text-slate-700 whitespace-nowrap">{m.line}</td>
+                  <td className="px-2.5 py-1.5 text-center">
+                    {m.isOperating ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                        Active
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500">
+                        Idle
+                      </span>
                     )}
-                  </div>
-                );
-              })}
+                  </td>
+                  <td className="px-2 py-1.5 text-center text-slate-600">{m.std}</td>
+                  <td className="px-2 py-1.5 text-center font-bold text-slate-900">{m.act}</td>
+                  <td className="px-2 py-1.5 text-center">
+                    {m.efficiency !== null ? (
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                          m.efficiency >= 85
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : m.efficiency >= 75
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-rose-100 text-rose-800'
+                        }`}
+                      >
+                        {m.efficiency}%
+                      </span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </td>
+                  <td className="px-2.5 py-1.5 text-center bg-slate-50/60">
+                    {m.aEff !== null ? (
+                      <span>{m.aAct} <strong className="text-[10px]">({m.aEff}%)</strong></span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </td>
+                  <td className="px-2.5 py-1.5 text-center bg-slate-50/60">
+                    {m.bEff !== null ? (
+                      <span>{m.bAct} <strong className="text-[10px]">({m.bEff}%)</strong></span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </td>
+                  <td className="px-2.5 py-1.5 text-center bg-slate-50/60">
+                    {m.cEff !== null ? (
+                      <span>{m.cAct} <strong className="text-[10px]">({m.cEff}%)</strong></span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1.5 text-center text-amber-700 font-bold">{m.downtime}m</td>
+                  <td className="px-2 py-1.5 text-center text-rose-700">{m.rework}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Breakdown Downtime Split & Pareto */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Machine Breakdown Categorization */}
+        <div className="lg:col-span-2 bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 tracking-tight">
+              Breakdown Downtime Categorization
+            </h3>
+            <p className="text-xs text-slate-500">
+              Split across the 4 factory logging categories (Total: {kpis.totalBreakdown} mins)
+            </p>
+          </div>
+
+          {/* Proportional Stacked Bar */}
+          <div className="w-full h-4 rounded overflow-hidden flex bg-slate-100 border border-slate-200">
+            <div
+              style={{ width: `${noDiscPct}%` }}
+              className="bg-amber-500 h-full"
+              title={`NO/DISC: ${kpis.breakdownSplit.noDisc}m (${noDiscPct}%)`}
+            />
+            <div
+              style={{ width: `${changePct}%` }}
+              className="bg-blue-500 h-full"
+              title={`CHANGE: ${kpis.breakdownSplit.change}m (${changePct}%)`}
+            />
+            <div
+              style={{ width: `${powerPct}%` }}
+              className="bg-rose-500 h-full"
+              title={`POWER: ${kpis.breakdownSplit.power}m (${powerPct}%)`}
+            />
+            <div
+              style={{ width: `${operatorPct}%` }}
+              className="bg-purple-500 h-full"
+              title={`OPERATOR: ${kpis.breakdownSplit.operator}m (${operatorPct}%)`}
+            />
+          </div>
+
+          {/* List breakdown with minutes and percentages */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-amber-500 inline-block" />
+                <div>
+                  <span className="font-bold text-slate-800">NO / DISC</span>
+                  <p className="text-[10px] text-slate-500">Material & casting shortage</p>
+                </div>
+              </div>
+              <div className="text-right font-mono">
+                <span className="font-bold text-slate-900">{kpis.breakdownSplit.noDisc} mins</span>
+                <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                  <span className="text-slate-600 font-semibold">{noDiscPct}% share</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.noDisc}% of total</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-blue-500 inline-block" />
+                <div>
+                  <span className="font-bold text-slate-800">CHANGE</span>
+                  <p className="text-[10px] text-slate-500">Tool change & insert setup</p>
+                </div>
+              </div>
+              <div className="text-right font-mono">
+                <span className="font-bold text-slate-900">{kpis.breakdownSplit.change} mins</span>
+                <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                  <span className="text-slate-600 font-semibold">{changePct}% share</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.change}% of total</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-rose-500 inline-block" />
+                <div>
+                  <span className="font-bold text-slate-800">POWER</span>
+                  <p className="text-[10px] text-slate-500">Grid trip & electrical breakdown</p>
+                </div>
+              </div>
+              <div className="text-right font-mono">
+                <span className="font-bold text-slate-900">{kpis.breakdownSplit.power} mins</span>
+                <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                  <span className="text-slate-600 font-semibold">{powerPct}% share</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.power}% of total</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-purple-500 inline-block" />
+                <div>
+                  <span className="font-bold text-slate-800">OPERATOR</span>
+                  <p className="text-[10px] text-slate-500">Worker delay & unattended</p>
+                </div>
+              </div>
+              <div className="text-right font-mono">
+                <span className="font-bold text-slate-900">{kpis.breakdownSplit.operator} mins</span>
+                <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                  <span className="text-slate-600 font-semibold">{operatorPct}% share</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.operator}% of total</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Breakdown Downtime Split & Pareto (1 column) */}
-        <div className="space-y-6">
-          {/* Exact 4 Reasons Breakdown Split */}
-          <div className="bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-4">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 tracking-tight">
-                Breakdown Downtime Categorization
-              </h3>
-              <p className="text-xs text-slate-500">
-                Split across the 4 factory logging categories (Total: {kpis.totalBreakdown} mins)
-              </p>
-            </div>
-
-            {/* Proportional Stacked Bar */}
-            <div className="w-full h-4 rounded overflow-hidden flex bg-slate-100 border border-slate-200">
-              <div
-                style={{ width: `${noDiscPct}%` }}
-                className="bg-amber-500 h-full"
-                title={`NO/DISC: ${kpis.breakdownSplit.noDisc}m (${noDiscPct}%)`}
-              />
-              <div
-                style={{ width: `${changePct}%` }}
-                className="bg-blue-500 h-full"
-                title={`CHANGE: ${kpis.breakdownSplit.change}m (${changePct}%)`}
-              />
-              <div
-                style={{ width: `${powerPct}%` }}
-                className="bg-rose-500 h-full"
-                title={`POWER: ${kpis.breakdownSplit.power}m (${powerPct}%)`}
-              />
-              <div
-                style={{ width: `${operatorPct}%` }}
-                className="bg-purple-500 h-full"
-                title={`OPERATOR: ${kpis.breakdownSplit.operator}m (${operatorPct}%)`}
-              />
-            </div>
-
-            {/* List breakdown with minutes and percentages */}
-            <div className="space-y-2.5 text-xs">
-              <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded bg-amber-500 inline-block" />
-                  <div>
-                    <span className="font-bold text-slate-800">NO / DISC</span>
-                    <p className="text-[10px] text-slate-500">Material & casting shortage</p>
-                  </div>
-                </div>
-                <div className="text-right font-mono">
-                  <span className="font-bold text-slate-900">{kpis.breakdownSplit.noDisc} mins</span>
-                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                    <span className="text-slate-600 font-semibold">{noDiscPct}% share</span>
-                    <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.noDisc}% of 1305m</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded bg-blue-500 inline-block" />
-                  <div>
-                    <span className="font-bold text-slate-800">CHANGE</span>
-                    <p className="text-[10px] text-slate-500">Tool change & insert setup</p>
-                  </div>
-                </div>
-                <div className="text-right font-mono">
-                  <span className="font-bold text-slate-900">{kpis.breakdownSplit.change} mins</span>
-                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                    <span className="text-slate-600 font-semibold">{changePct}% share</span>
-                    <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.change}% of 1305m</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded bg-rose-500 inline-block" />
-                  <div>
-                    <span className="font-bold text-slate-800">POWER</span>
-                    <p className="text-[10px] text-slate-500">Grid trip & electrical breakdown</p>
-                  </div>
-                </div>
-                <div className="text-right font-mono">
-                  <span className="font-bold text-slate-900">{kpis.breakdownSplit.power} mins</span>
-                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                    <span className="text-slate-600 font-semibold">{powerPct}% share</span>
-                    <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.power}% of 1305m</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded bg-purple-500 inline-block" />
-                  <div>
-                    <span className="font-bold text-slate-800">OPERATOR</span>
-                    <p className="text-[10px] text-slate-500">Worker delay & unattended machine</p>
-                  </div>
-                </div>
-                <div className="text-right font-mono">
-                  <span className="font-bold text-slate-900">{kpis.breakdownSplit.operator} mins</span>
-                  <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                    <span className="text-slate-600 font-semibold">{operatorPct}% share</span>
-                    <span className="text-slate-400">·</span>
-                    <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.operator}% of 1305m</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Pareto Ranking - Machines with Most Downtime */}
-          <div className="bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-3">
-            <h3 className="text-sm font-bold text-slate-900 tracking-tight">
-              Top Downtime Culprits (Pareto Ranking)
-            </h3>
-            {sortedByDowntime.length === 0 ? (
-              <p className="text-xs text-slate-500">Zero downtime recorded for current selection.</p>
-            ) : (
-              <div className="space-y-1.5 text-xs">
-                {sortedByDowntime.slice(0, 5).map((m, rank) => (
-                  <div
-                    key={m.id}
-                    className="flex items-center justify-between py-1.5 px-2 rounded bg-slate-50"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="w-4 h-4 rounded-full bg-slate-800 text-white font-mono text-[10px] flex items-center justify-center font-bold">
-                        {rank + 1}
-                      </span>
-                      <span className="font-semibold text-slate-800">{m.name}</span>
-                    </div>
-                    <span className="font-mono font-bold text-amber-700">
-                      {m.downtime} mins lost
+        {/* Pareto Ranking - Machines with Most Downtime */}
+        <div className="bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-3">
+          <h3 className="text-sm font-bold text-slate-900 tracking-tight">
+            Top Downtime Culprits (Pareto Ranking)
+          </h3>
+          {sortedByDowntime.length === 0 ? (
+            <p className="text-xs text-slate-500">Zero downtime recorded for current selection.</p>
+          ) : (
+            <div className="space-y-1.5 text-xs">
+              {sortedByDowntime.slice(0, 5).map((m, rank) => (
+                <div
+                  key={m.id}
+                  className="flex items-center justify-between py-1.5 px-2 rounded bg-slate-50"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="w-4 h-4 rounded-full bg-slate-800 text-white font-mono text-[10px] flex items-center justify-center font-bold">
+                      {rank + 1}
                     </span>
+                    <span className="font-semibold text-slate-800">{m.name}</span>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  <span className="font-mono font-bold text-amber-700">
+                    {m.downtime} mins lost
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -897,7 +1464,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Search Input */}
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input
@@ -911,9 +1477,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
             <button
               onClick={handleExportCSV}
-              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded flex items-center gap-1.5"
+              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded flex items-center gap-1.5 shadow-2xs"
             >
-              <Download className="w-3.5 h-3.5" />
+              <Download className="w-3.5 h-3.5 text-emerald-400" />
               <span>Export CSV</span>
             </button>
           </div>
@@ -961,7 +1527,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   return (
                     <tr key={row.id} className="hover:bg-slate-50">
                       <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{row.date}</td>
-                      <td className="px-2.5 py-1.5 text-slate-800 font-sans font-semibold whitespace-nowrap text-[11px]">{row.line || 'Line 1'}</td>
+                      <td className="px-2.5 py-1.5 text-slate-800 font-sans font-semibold whitespace-nowrap text-[11px]">
+                        {row.line || 'Line 1'}
+                      </td>
                       <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{row.shift.split(' ')[0]}</td>
                       <td className="px-3 py-1.5 font-bold font-sans text-slate-900 whitespace-nowrap">
                         {row.machineName}
@@ -1011,6 +1579,5 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     </div>
   );
 };
-
 
 export default AnalyticsPreview;

@@ -177,14 +177,33 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     }
 
     const lower = (selectedShift || "").toLowerCase();
-    if (lower.includes("shift a") || lower.includes("6am") || lower.includes("7am")) {
-      return "Shift A (7:00 AM – 3:30 PM)";
+    if (
+      lower.startsWith("shift c") ||
+      lower.includes("12am-7am") ||
+      lower.includes("10pm-6am") ||
+      lower.includes("12am") ||
+      lower.includes("10pm")
+    ) {
+      return "Shift C (12:00 AM – 7:00 AM)";
     }
-    if (lower.includes("shift b") || lower.includes("2pm") || lower.includes("3:30pm") || lower.includes("15:30")) {
+    if (
+      lower.startsWith("shift b") ||
+      lower.includes("3:30pm-12am") ||
+      lower.includes("2pm-10pm") ||
+      lower.includes("3:30pm") ||
+      lower.includes("2pm") ||
+      lower.includes("15:30")
+    ) {
       return "Shift B (3:30 PM – 12:00 AM)";
     }
-    if (lower.includes("shift c") || lower.includes("10pm") || lower.includes("12am")) {
-      return "Shift C (12:00 AM – 7:00 AM)";
+    if (
+      lower.startsWith("shift a") ||
+      lower.includes("7am-3:30pm") ||
+      lower.includes("6am-2pm") ||
+      lower.includes("7am") ||
+      lower.includes("6am")
+    ) {
+      return "Shift A (7:00 AM – 3:30 PM)";
     }
     return selectedShift;
   }, [activeShiftObj, selectedShift]);

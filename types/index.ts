@@ -46,6 +46,17 @@ export interface ItemMaster {
   stdOutput?: number;
 }
 
+export interface ItemProductionRollup {
+  itemId: string;
+  itemCode?: string;
+  itemName: string;
+  todayOutput: number;
+  mtdOutput: number;
+  tillNowOutput: number;
+  tillNowStd: number;
+  tillNowRework: number;
+}
+
 export interface BreakdownMinutes {
   noDisc: number;
   change: number;

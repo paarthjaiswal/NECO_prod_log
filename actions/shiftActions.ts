@@ -16,6 +16,7 @@ import {
   ShiftMaster,
   MachineItemCycleTime,
   FactoryTimeContext,
+  ItemProductionRollup,
 } from "@/types";
 
 // ============================================================================
@@ -131,12 +132,55 @@ function formatTime12(t?: string): string {
 
 function extractShiftCode(shiftStr: string): string {
   if (!shiftStr) return "Shift A";
-  const lower = shiftStr.toLowerCase();
-  if (lower.includes("shift a") || lower.includes("6am") || lower.includes("7am")) return "Shift A";
-  if (lower.includes("shift b") || lower.includes("2pm") || lower.includes("3:30pm") || lower.includes("15:30")) return "Shift B";
-  if (lower.includes("shift c") || lower.includes("10pm") || lower.includes("12am")) return "Shift C";
-  const match = shiftStr.match(/^(Shift\s+[A-Za-z0-9]+)/i);
-  return match ? match[1] : shiftStr.trim();
+  const clean = shiftStr.trim();
+  const match = clean.match(/^(Shift\s+[A-Za-z0-9]+)/i);
+  if (match) {
+    const code = match[1].toLowerCase();
+    if (code === "shift a") return "Shift A";
+    if (code === "shift b") return "Shift B";
+    if (code === "shift c") return "Shift C";
+    return match[1];
+  }
+
+  const lower = clean.toLowerCase();
+  // 1. Check full ranges first
+  if (
+    lower.includes("7am-3:30pm") ||
+    lower.includes("6am-2pm") ||
+    lower.includes("7:00 am") ||
+    lower.includes("7:00am")
+  ) {
+    return "Shift A";
+  }
+  if (
+    lower.includes("3:30pm-12am") ||
+    lower.includes("2pm-10pm") ||
+    lower.includes("3:30 pm") ||
+    lower.includes("15:30")
+  ) {
+    return "Shift B";
+  }
+  if (
+    lower.includes("12am-7am") ||
+    lower.includes("10pm-6am") ||
+    lower.includes("12:00 am") ||
+    lower.includes("12:00am")
+  ) {
+    return "Shift C";
+  }
+
+  // 2. Fallback to start tokens
+  if (lower.includes("shift c") || lower.includes("12am") || lower.includes("10pm")) {
+    return "Shift C";
+  }
+  if (lower.includes("shift b") || lower.includes("2pm") || lower.includes("3:30pm")) {
+    return "Shift B";
+  }
+  if (lower.includes("shift a") || lower.includes("6am") || lower.includes("7am")) {
+    return "Shift A";
+  }
+
+  return clean;
 }
 
 function resolveCleanShiftDisplayName(
@@ -1192,4 +1236,111 @@ export async function getAnalyticsLogs(
 
   if (error) throw new Error(error.message);
   return (data as DbShiftLogRow[]).map(mapDbRowToUiRow);
+}
+
+/**
+ * STEP 1: Item Production Rollups
+ * Aggregates production totals per item across:
+ * - todayOutput: sum of actual_output where log_date === todayDateIst
+ * - mtdOutput: sum of actual_output where log_date >= YYYY-MM-01 and <= todayDateIst
+ * - tillNowOutput: cumulative sum of actual_output across all dates in shift_logs
+ * - tillNowStd: cumulative sum of std_output across all dates
+ * - tillNowRework: cumulative sum of rework across all dates
+ */
+export async function getItemProductionRollups(
+  todayDateIst?: string
+): Promise<ItemProductionRollup[]> {
+  const supabase = createAdminClient();
+
+  const refDate =
+    (todayDateIst && todayDateIst.trim()) ||
+    new Date().toISOString().slice(0, 10);
+  const parts = refDate.split("-");
+  const mtdStart =
+    parts.length >= 2
+      ? `${parts[0]}-${parts[1].padStart(2, "0")}-01`
+      : refDate;
+
+  // 1. Build Item Master map for item code & canonical names
+  const itemCodeMap = new Map<string, { itemCode: string; itemName: string }>();
+  try {
+    const { data: dbItems } = await supabase
+      .from("items")
+      .select("id, item_code, item_name");
+    if (dbItems) {
+      for (const it of dbItems) {
+        const info = {
+          itemCode: it.item_code || "",
+          itemName: it.item_name || "",
+        };
+        if (it.id) itemCodeMap.set(it.id.trim().toLowerCase(), info);
+        if (it.item_code) itemCodeMap.set(it.item_code.trim().toLowerCase(), info);
+        if (it.item_name) itemCodeMap.set(it.item_name.trim().toLowerCase(), info);
+      }
+    }
+  } catch {
+    // Ignore master items query failure
+  }
+
+  // 2. Query shift logs with non-zero production or target
+  const { data, error } = await supabase
+    .from("shift_logs")
+    .select("item_id, item_name, log_date, actual_output, std_output, rework")
+    .or("actual_output.gt.0,std_output.gt.0");
+
+  if (error) {
+    console.error("Failed to fetch item rollups from shift_logs:", error);
+    return [];
+  }
+
+  const rollupsMap = new Map<string, ItemProductionRollup>();
+
+  for (const row of (data || [])) {
+    const rawId = (row.item_id || "").trim();
+    const rawName = (row.item_name || "").trim();
+    if (!rawId && !rawName) continue;
+
+    // Resolve item metadata
+    const masterInfo =
+      (rawId ? itemCodeMap.get(rawId.toLowerCase()) : null) ||
+      (rawName ? itemCodeMap.get(rawName.toLowerCase()) : null);
+
+    const itemCode = masterInfo?.itemCode || (rawId.startsWith("item_") ? "" : rawId);
+    const itemName = masterInfo?.itemName || rawName || itemCode || "Unknown Part";
+    const groupKey = (itemCode || rawId || rawName).toLowerCase();
+
+    if (!rollupsMap.has(groupKey)) {
+      rollupsMap.set(groupKey, {
+        itemId: rawId || groupKey,
+        itemCode,
+        itemName,
+        todayOutput: 0,
+        mtdOutput: 0,
+        tillNowOutput: 0,
+        tillNowStd: 0,
+        tillNowRework: 0,
+      });
+    }
+
+    const entry = rollupsMap.get(groupKey)!;
+    const act = Number(row.actual_output) || 0;
+    const std = Number(row.std_output) || 0;
+    const rew = Number(row.rework) || 0;
+    const logDate = row.log_date || "";
+
+    entry.tillNowOutput += act;
+    entry.tillNowStd += std;
+    entry.tillNowRework += rew;
+
+    if (logDate === refDate) {
+      entry.todayOutput += act;
+    }
+    if (logDate >= mtdStart && logDate <= refDate) {
+      entry.mtdOutput += act;
+    }
+  }
+
+  return Array.from(rollupsMap.values()).sort(
+    (a, b) => b.tillNowOutput - a.tillNowOutput
+  );
 }
