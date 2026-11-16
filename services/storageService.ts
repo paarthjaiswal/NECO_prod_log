@@ -364,6 +364,213 @@ export function calculateShiftTimeBalance(
   };
 }
 
+export interface MachineGroupTimeBalance extends ShiftTimeBalance {
+  machineId: string;
+  runCount: number;
+  rowProductionMinutes: Record<string, number>;
+  rowBreakdownMinutes: Record<string, number>;
+}
+
+/**
+ * Computes the grouped time-accounting balance across all split runs of a single machine.
+ * All split runs for the same machineId share and must balance against the single shift's shiftWorkingMinutes.
+ */
+export function calculateMachineGroupTimeBalance(
+  allRows: MachineShiftRow[],
+  machineId: string,
+  shiftWorkingMinutes?: number
+): MachineGroupTimeBalance {
+  const machineRows = allRows.filter((r) => r.machineId === machineId);
+  const shiftMins =
+    Number(shiftWorkingMinutes) ||
+    Number(machineRows[0]?.shiftWorkingMinutes) ||
+    Number(machineRows[0]?.totalWorkingMinutes) ||
+    1305;
+
+  const rowProductionMinutes: Record<string, number> = {};
+  const rowBreakdownMinutes: Record<string, number> = {};
+
+  if (machineRows.length === 0) {
+    return {
+      machineId,
+      runCount: 0,
+      rowProductionMinutes: {},
+      rowBreakdownMinutes: {},
+      shiftMinutes: shiftMins,
+      productionMinutes: 0,
+      requiredBreakdownMinutes: 0,
+      loggedBreakdownMinutes: 0,
+      unaccountedMinutes: 0,
+      totalAccountedMinutes: 0,
+      isBalanced: true,
+      isOver: false,
+      isUnder: false,
+      isProductionExceeded: false,
+      missingCycleTime: false,
+    };
+  }
+
+  // Check if completely untouched
+  const allUntouched = machineRows.every((r) => {
+    const act = Number(r.actualOutput) || 0;
+    const ct = Number(r.cycleTime) || 0;
+    const bd = calculateTotalBreakdown(r.breakdown);
+    return !r.itemId && !r.operatorName && act === 0 && bd === 0 && ct === 0;
+  });
+
+  if (allUntouched || shiftMins <= 0) {
+    machineRows.forEach((r) => {
+      rowProductionMinutes[r.id] = 0;
+      rowBreakdownMinutes[r.id] = 0;
+    });
+    return {
+      machineId,
+      runCount: machineRows.length,
+      rowProductionMinutes,
+      rowBreakdownMinutes,
+      shiftMinutes: shiftMins,
+      productionMinutes: 0,
+      requiredBreakdownMinutes: 0,
+      loggedBreakdownMinutes: 0,
+      unaccountedMinutes: 0,
+      totalAccountedMinutes: 0,
+      isBalanced: true,
+      isOver: false,
+      isUnder: false,
+      isProductionExceeded: false,
+      missingCycleTime: false,
+    };
+  }
+
+  let hasMissingCt = false;
+  let totalProd = 0;
+  let totalBd = 0;
+
+  for (const r of machineRows) {
+    const act = Number(r.actualOutput) || 0;
+    const ct = Number(r.cycleTime) || 0;
+    const bd = calculateTotalBreakdown(r.breakdown);
+
+    if (act > 0 && ct <= 0) {
+      hasMissingCt = true;
+    }
+
+    const prod = Number((act * ct).toFixed(2));
+    rowProductionMinutes[r.id] = prod;
+    rowBreakdownMinutes[r.id] = bd;
+
+    totalProd = Number((totalProd + prod).toFixed(2));
+    totalBd = Number((totalBd + bd).toFixed(2));
+  }
+
+  const productionMinutes = totalProd;
+  const loggedBreakdownMinutes = totalBd;
+  const totalAccountedMinutes = Number((productionMinutes + loggedBreakdownMinutes).toFixed(2));
+  const diff = Number((shiftMins - totalAccountedMinutes).toFixed(2));
+  const isProductionExceeded = productionMinutes > shiftMins + 0.01;
+  const isOver = diff < -0.01;
+  const isUnder = diff > 0.01;
+  const isBalanced = !hasMissingCt && !isProductionExceeded && Math.abs(diff) < 0.01;
+
+  const requiredBreakdownMinutes = Math.max(
+    0,
+    Number((shiftMins - productionMinutes).toFixed(2))
+  );
+
+  let errorMessage: string | undefined = undefined;
+  if (hasMissingCt) {
+    errorMessage = `Actual output entered on ${machineRows[0]?.machineName || "machine"}, but cycle time is 0. Please select an Item with a cycle time or enter cycle time.`;
+  } else if (isProductionExceeded) {
+    errorMessage = `Combined actual output time (${productionMinutes}m) across ${machineRows.length} run(s) exceeds shift duration (${shiftMins}m). Productive time alone is greater than shift timing.`;
+  } else if (isOver) {
+    errorMessage = `Combined machine time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdownMinutes}m BD) exceeds shift duration (${shiftMins}m) by ${Math.abs(diff)}m.`;
+  } else if (isUnder) {
+    errorMessage = `Combined machine time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdownMinutes}m BD) is ${diff}m short of shift duration (${shiftMins}m). Log ${diff}m in breakdown to balance.`;
+  }
+
+  return {
+    machineId,
+    runCount: machineRows.length,
+    rowProductionMinutes,
+    rowBreakdownMinutes,
+    shiftMinutes: shiftMins,
+    productionMinutes,
+    requiredBreakdownMinutes,
+    loggedBreakdownMinutes,
+    unaccountedMinutes: diff,
+    totalAccountedMinutes,
+    isBalanced,
+    isOver,
+    isUnder,
+    isProductionExceeded,
+    missingCycleTime: hasMissingCt,
+    errorMessage,
+  };
+}
+
+/**
+ * Proportionally distributes shift working minutes and computes stdOutput for each run
+ * of a machine group.
+ * - Single run: standard shiftWorkingMinutes / cycleTime
+ * - Multiple runs: allocates each run's used minutes (productive time + logged BD),
+ *   plus any remaining unallocated shift minutes on the last run, and sets stdOutput proportionally.
+ */
+export function recalculateMachineGroupStdOutputs(
+  allRows: MachineShiftRow[],
+  machineId: string,
+  shiftWorkingMinutes?: number
+): MachineShiftRow[] {
+  const machineRows = allRows.filter((r) => r.machineId === machineId);
+  if (machineRows.length === 0) return allRows;
+
+  const shiftMins =
+    Number(shiftWorkingMinutes) ||
+    Number(machineRows[0]?.shiftWorkingMinutes) ||
+    Number(machineRows[0]?.totalWorkingMinutes) ||
+    1305;
+
+  // Single run: standard behavior
+  if (machineRows.length === 1) {
+    const single = machineRows[0];
+    const ct = Number(single.cycleTime) || 0;
+    const std = ct > 0 && shiftMins > 0 ? Math.floor(shiftMins / ct) : 0;
+    return allRows.map((r) => (r.id === single.id ? { ...r, stdOutput: std } : r));
+  }
+
+  // Multiple split runs
+  const runAccounted: { id: string; prodMins: number; bdMins: number; total: number }[] = [];
+  let groupAccounted = 0;
+
+  for (const run of machineRows) {
+    const act = Number(run.actualOutput) || 0;
+    const ct = Number(run.cycleTime) || 0;
+    const prodMins = Number((act * ct).toFixed(2));
+    const bdMins = calculateTotalBreakdown(run.breakdown);
+    const total = Number((prodMins + bdMins).toFixed(2));
+    runAccounted.push({ id: run.id, prodMins, bdMins, total });
+    groupAccounted = Number((groupAccounted + total).toFixed(2));
+  }
+
+  const unallocated = Math.max(0, Number((shiftMins - groupAccounted).toFixed(2)));
+
+  const updatedStdMap = new Map<string, number>();
+  machineRows.forEach((run, idx) => {
+    const isLastRun = idx === machineRows.length - 1;
+    const acc = runAccounted[idx];
+    const allocatedMins = Number((acc.total + (isLastRun ? unallocated : 0)).toFixed(2));
+    const ct = Number(run.cycleTime) || 0;
+    const std = ct > 0 ? Math.floor(allocatedMins / ct) : 0;
+    updatedStdMap.set(run.id, std);
+  });
+
+  return allRows.map((r) => {
+    if (r.machineId === machineId && updatedStdMap.has(r.id)) {
+      return { ...r, stdOutput: updatedStdMap.get(r.id)! };
+    }
+    return r;
+  });
+}
+
 /**
  * Flexibly looks up a cycle time entry matching machine, item, and operation.
  * Supports:

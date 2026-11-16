@@ -84,6 +84,7 @@ export interface MachineShiftRow {
   line: string;
   productionLine?: string; // Line alias
   srNo: number;
+  runNo?: number;              // Multi-Run / Split Row index (1, 2, 3...)
   machineId: string;
   machineCode?: string;
   machineName: string;

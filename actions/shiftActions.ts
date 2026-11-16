@@ -25,6 +25,7 @@ import {
 
 export interface DbShiftLogRow {
   id: string;
+  run_no?: number | null;
   log_date: string;
   shift: string;
   line: string;
@@ -243,6 +244,7 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
     shift: cleanShift,
     line: dbRow.line,
     srNo: Number(dbRow.sr_no ?? 0),
+    runNo: Number(dbRow.run_no ?? 1),
     machineId: dbRow.machine_id ?? "",
     machineName: dbRow.machine_name ?? "",
     operatorName: dbRow.operator_name ?? "",
@@ -285,11 +287,16 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
   const rawShift = uiRow.shift ?? "Shift A";
   const shiftCode = extractShiftCode(rawShift);
   const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
+  const runNo = Number(uiRow.runNo) || 1;
+
+  const deterministicId =
+    runNo === 1
+      ? `${uiRow.date}_${cleanShift}_${uiRow.line}_${uiRow.machineId}`
+      : `${uiRow.date}_${cleanShift}_${uiRow.line}_${uiRow.machineId}_r${runNo}`;
 
   return {
-    id:
-      uiRow.id ||
-      `${uiRow.date}_${cleanShift}_${uiRow.line}_${uiRow.machineId}`,
+    id: uiRow.id || deterministicId,
+    run_no: runNo,
     log_date: uiRow.date,
     shift: cleanShift,
     line: uiRow.line,
@@ -448,62 +455,78 @@ function hydrateShiftSheetRows(
   line: string,
   shiftWorkingMinutes: number // Fetched dynamically from public.shifts
 ): MachineShiftRow[] {
-  const savedLogMap = new Map<string, DbShiftLogRow>(
-    savedDbLogs
-      .filter((row) => row.machine_id !== null)
-      .map((row) => [row.machine_id as string, row])
-  );
-
-  return sortedLineMachines.map((machine, index) => {
-    const existingLog = savedLogMap.get(machine.id);
-    if (existingLog) {
-      const uiRow = mapDbRowToUiRow(existingLog);
-      return {
-        ...uiRow,
-        srNo: index + 1,
-        // Ensure totalWorkingMinutes always reflects the single shift's DB duration
-        totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes || 1305,
-      };
+  // Group saved logs by machine_id, sorted by run_no ASC
+  const logsByMachine = new Map<string, DbShiftLogRow[]>();
+  for (const log of savedDbLogs) {
+    if (!log.machine_id) continue;
+    if (!logsByMachine.has(log.machine_id)) {
+      logsByMachine.set(log.machine_id, []);
     }
+    logsByMachine.get(log.machine_id)!.push(log);
+  }
 
-    return {
-      id: `${date}_${shift}_${line}_${machine.id}`,
-      date,
-      shift,
-      line,
-      srNo: index + 1,
-      machineId: machine.id,
-      machineName: machine.name,
-      operatorName: "",
-      itemId: "",
-      itemName: "",
-      operation: "",
-      cycleTime: 0,
-      totalWorkingMinutes: shiftWorkingMinutes || 1305,
-      stdOutput: 0,
-      actualOutput: 0,
-      rework: 0,
-      breakdown: {
-        noDisc: 0,
-        change: 0,
-        power: 0,
-        operator: 0,
-        machineBreakdown: 0,
-        fixProgSettings: 0,
-      },
-      breakdownPct: {
-        noDiscPct: 0,
-        changePct: 0,
-        powerPct: 0,
-        operatorPct: 0,
-        machineBreakdownPct: 0,
-        fixProgSettingsPct: 0,
-        totalBdMinutes: 0,
-        totalBdPct: 0,
-      },
-      remarks: "",
-    };
+  // Sort each machine's logs by run_no ascending
+  for (const logs of logsByMachine.values()) {
+    logs.sort((a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1));
+  }
+
+  const result: MachineShiftRow[] = [];
+
+  sortedLineMachines.forEach((machine, index) => {
+    const machineLogs = logsByMachine.get(machine.id);
+    if (machineLogs && machineLogs.length > 0) {
+      machineLogs.forEach((log, runIdx) => {
+        const uiRow = mapDbRowToUiRow(log);
+        result.push({
+          ...uiRow,
+          srNo: index + 1,
+          runNo: Number(log.run_no) || runIdx + 1,
+          totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes || 1305,
+        });
+      });
+    } else {
+      result.push({
+        id: `${date}_${shift}_${line}_${machine.id}`,
+        date,
+        shift,
+        line,
+        srNo: index + 1,
+        runNo: 1,
+        machineId: machine.id,
+        machineName: machine.name,
+        operatorName: "",
+        itemId: "",
+        itemName: "",
+        operation: "",
+        cycleTime: 0,
+        totalWorkingMinutes: shiftWorkingMinutes || 1305,
+        stdOutput: 0,
+        actualOutput: 0,
+        rework: 0,
+        breakdown: {
+          noDisc: 0,
+          change: 0,
+          power: 0,
+          operator: 0,
+          machineBreakdown: 0,
+          fixProgSettings: 0,
+        },
+        breakdownPct: {
+          noDiscPct: 0,
+          changePct: 0,
+          powerPct: 0,
+          operatorPct: 0,
+          machineBreakdownPct: 0,
+          fixProgSettingsPct: 0,
+          totalBdMinutes: 0,
+          totalBdPct: 0,
+        },
+        remarks: "",
+      });
+    }
   });
+
+  return result;
 }
 
 // ============================================================================
@@ -787,7 +810,8 @@ export async function getShiftSheetRows(
       .eq("log_date", date)
       .eq("shift", shift)
       .eq("line", line)
-      .order("sr_no", { ascending: true }),
+      .order("sr_no", { ascending: true })
+      .order("run_no", { ascending: true }),
     supabase
       .from("shifts")
       .select("shift_working_minutes")
@@ -819,6 +843,17 @@ async function syncMachineItemCycleTimes(
   supabase: ReturnType<typeof createAdminClient>,
   rows: MachineShiftRow[]
 ) {
+  // Count how many times each (machineId, itemId, operation) appears in rows
+  const comboCounts = new Map<string, number>();
+  for (const row of rows) {
+    const ct = Number(row.cycleTime);
+    const op = row.operation?.trim();
+    if (row.machineId && row.itemId && op && ct > 0) {
+      const key = `${row.machineId}::${row.itemId}::${op}`;
+      comboCounts.set(key, (comboCounts.get(key) || 0) + 1);
+    }
+  }
+
   const validPairs = new Map<
     string,
     {
@@ -837,15 +872,21 @@ async function syncMachineItemCycleTimes(
     const op = row.operation?.trim();
     if (row.machineId && row.itemId && op && ct > 0) {
       const key = `${row.machineId}::${row.itemId}::${op}`;
-      validPairs.set(key, {
-        id: `ct_${row.machineId}_${row.itemId}_${op.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
-        machine_id: row.machineId,
-        item_id: row.itemId,
-        operation: op,
-        cycle_time: ct,
-        is_active: true,
-        updated_at: new Date().toISOString(),
-      });
+      const count = comboCounts.get(key) || 0;
+      // Only auto-upsert if combination appears once across that machine, or if runNo === 1
+      if (count === 1 || (row.runNo || 1) === 1) {
+        if (!validPairs.has(key)) {
+          validPairs.set(key, {
+            id: `ct_${row.machineId}_${row.itemId}_${op.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+            machine_id: row.machineId,
+            item_id: row.itemId,
+            operation: op,
+            cycle_time: ct,
+            is_active: true,
+            updated_at: new Date().toISOString(),
+          });
+        }
+      }
     }
   }
 
@@ -884,8 +925,6 @@ async function syncMachineItemCycleTimes(
 export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
   if (!rows || rows.length === 0) return { success: true, count: 0, rows: [] };
 
-  const isAdmin = await isUnitHeadSession();
-
   // Enforce edit-window check for every unique (date, shift) pair in payload
   const seenKeys = new Set<string>();
   for (const row of rows) {
@@ -896,28 +935,49 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
     }
   }
 
-  const supabase = createAdminClient();
-  const dbPayloads = rows.map((r) => {
-    const payload = mapUiRowToDbRow(r);
-    if (!isAdmin) {
-      const ct = Number(payload.cycle_time) || 0;
-      const totalWorking = Number(payload.total_working_minutes) || 0;
-      payload.std_output = ct > 0 ? Math.floor(totalWorking / ct) : 0;
-    }
-    return payload;
+  // Normalize runNo sequentially (1, 2, 3...) per machineId
+  const machineRunCounters = new Map<string, number>();
+  const normalizedRows: MachineShiftRow[] = rows.map((r) => {
+    const nextRun = (machineRunCounters.get(r.machineId) || 0) + 1;
+    machineRunCounters.set(r.machineId, nextRun);
+    return {
+      ...r,
+      runNo: nextRun,
+    };
   });
+
+  const supabase = createAdminClient();
+  const dbPayloads = normalizedRows.map((r) => mapUiRowToDbRow(r));
 
   const { data, error } = await supabase
     .from("shift_logs")
     .upsert(dbPayloads, {
-      onConflict: "log_date,shift,line,machine_id",
+      onConflict: "log_date,shift,line,machine_id,run_no",
     })
     .select();
 
   if (error) throw new Error(error.message);
 
+  // Delete any removed split rows in public.shift_logs for the same (log_date, shift, line)
+  // whose id is not in the upserted payload
+  const savedIds = dbPayloads.map((p) => p.id).filter(Boolean);
+  if (savedIds.length > 0) {
+    const sample = dbPayloads[0];
+    const { error: delError } = await supabase
+      .from("shift_logs")
+      .delete()
+      .eq("log_date", sample.log_date)
+      .eq("shift", sample.shift)
+      .eq("line", sample.line)
+      .not("id", "in", `(${savedIds.map((id) => `"${id}"`).join(",")})`);
+
+    if (delError) {
+      console.warn("Failed to prune removed split rows from shift_logs:", delError.message);
+    }
+  }
+
   // Auto-sync valid Machine × Item × Operation cycle times in background
-  await syncMachineItemCycleTimes(supabase, rows);
+  await syncMachineItemCycleTimes(supabase, normalizedRows);
 
   revalidatePath("/");
   return {
@@ -931,22 +991,15 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
  * ACTION 4: Single Machine Kiosk Save (OperatorKiosk.tsx)
  */
 export async function updateSingleMachineLog(row: MachineShiftRow) {
-  const isAdmin = await isUnitHeadSession();
   await assertShiftEditable(row.date, row.shift);
 
   const supabase = createAdminClient();
   const dbPayload = mapUiRowToDbRow(row);
 
-  if (!isAdmin) {
-    const ct = Number(dbPayload.cycle_time) || 0;
-    const totalWorking = Number(dbPayload.total_working_minutes) || 0;
-    dbPayload.std_output = ct > 0 ? Math.floor(totalWorking / ct) : 0;
-  }
-
   const { data, error } = await supabase
     .from("shift_logs")
     .upsert(dbPayload, {
-      onConflict: "log_date,shift,line,machine_id",
+      onConflict: "log_date,shift,line,machine_id,run_no",
     })
     .select()
     .single();
@@ -960,6 +1013,63 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
   return {
     success: true,
     row: mapDbRowToUiRow(data as DbShiftLogRow),
+  };
+}
+
+/**
+ * ACTION 4B: Save All Split Runs for a Single Machine (OperatorKiosk.tsx)
+ * Upserts all runs for a machine, ensures sequential runNo, and prunes any removed runs for that machine.
+ */
+export async function saveMachineRuns(runs: MachineShiftRow[]) {
+  if (!runs || runs.length === 0) return { success: true, count: 0, rows: [] };
+
+  const first = runs[0];
+  await assertShiftEditable(first.date, first.shift);
+
+  const supabase = createAdminClient();
+
+  // Normalize runNo sequentially 1, 2, 3...
+  const normalizedRuns = runs.map((r, idx) => ({
+    ...r,
+    runNo: idx + 1,
+  }));
+
+  const dbPayloads = normalizedRuns.map((r) => mapUiRowToDbRow(r));
+
+  const { data, error } = await supabase
+    .from("shift_logs")
+    .upsert(dbPayloads, {
+      onConflict: "log_date,shift,line,machine_id,run_no",
+    })
+    .select();
+
+  if (error) throw new Error(error.message);
+
+  // Clean up any removed split runs for this machine on this date/shift/line
+  const savedIds = dbPayloads.map((p) => p.id);
+  if (savedIds.length > 0) {
+    const { error: delError } = await supabase
+      .from("shift_logs")
+      .delete()
+      .eq("log_date", first.date)
+      .eq("shift", first.shift)
+      .eq("line", first.line)
+      .eq("machine_id", first.machineId)
+      .not("id", "in", `(${savedIds.map((id) => `"${id}"`).join(",")})`);
+
+    if (delError) {
+      console.warn("Failed to prune removed runs for machine:", delError.message);
+    }
+  }
+
+  // Auto-sync valid cycle times
+  await syncMachineItemCycleTimes(supabase, normalizedRuns);
+
+  revalidatePath("/");
+  return {
+    success: true,
+    count: data?.length ?? dbPayloads.length,
+    rows: (data as DbShiftLogRow[]).map(mapDbRowToUiRow),
   };
 }
 
@@ -1243,6 +1353,7 @@ export async function getAnalyticsLogs(
     .select("*")
     .order("log_date", { ascending: false })
     .order("sr_no", { ascending: true })
+    .order("run_no", { ascending: true })
     .limit(10000);
 
   if (startDate) {
@@ -1365,3 +1476,8 @@ export async function getItemProductionRollups(
     (a, b) => b.tillNowOutput - a.tillNowOutput
   );
 }
+
+/**
+ * Alias for getItemProductionRollups matching user specifications.
+ */
+export const getItemProductionSummary = getItemProductionRollups;

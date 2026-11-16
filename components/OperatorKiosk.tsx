@@ -27,6 +27,8 @@ import {
   calculateEfficiency,
   calculateTotalBreakdown,
   calculateShiftTimeBalance,
+  calculateMachineGroupTimeBalance,
+  recalculateMachineGroupStdOutputs,
   calculateDowntimePct,
   getOperationsForItem,
   getUniqueItems,
@@ -47,6 +49,7 @@ interface OperatorKioskProps {
   selectedShift: ShiftType;
   selectedLine: string;
   onSaveMachine: (updatedRow: MachineShiftRow) => void;
+  onSaveMachineRuns?: (updatedRuns: MachineShiftRow[]) => void;
   onRefreshMasterData?: () => Promise<void>;
   onRowsChange?: (rows: MachineShiftRow[]) => void;
   isSaving?: boolean;
@@ -65,6 +68,7 @@ export function OperatorKiosk({
   selectedShift,
   selectedLine,
   onSaveMachine,
+  onSaveMachineRuns,
   onRefreshMasterData,
   onRowsChange,
   isSaving = false,
@@ -107,11 +111,13 @@ export function OperatorKiosk({
 
   // Internal state fallback if DashboardClient doesn't pass selectedMachineId
   const [internalMachineId, setInternalMachineId] = useState<string | null>(null);
+  const [activeRunNo, setActiveRunNo] = useState<number>(1);
 
   const selectedMachineId =
     externalMachineId !== undefined ? externalMachineId : internalMachineId;
 
   const onSelectMachineId = (machineId: string | null) => {
+    setActiveRunNo(1);
     if (externalOnSelectMachineId) {
       externalOnSelectMachineId(machineId);
     } else {
@@ -140,7 +146,7 @@ export function OperatorKiosk({
     [machines, selectedLine]
   );
 
-  // Sync draft when selectedMachineId changes (and auto-hydrate cycleTime if missing)
+  // Sync draft when selectedMachineId or activeRunNo changes (and auto-hydrate cycleTime if missing)
   useEffect(() => {
     if (!selectedMachineId) {
       setDraft(null);
@@ -148,21 +154,30 @@ export function OperatorKiosk({
       return;
     }
 
-    const existingRow = rows.find((r) => r.machineId === selectedMachineId);
+    const matchingRows = rows.filter((r) => r.machineId === selectedMachineId);
+    const existingRow =
+      matchingRows.find((r) => (r.runNo || 1) === activeRunNo) ||
+      matchingRows[0] ||
+      null;
     const machine = machines.find((m) => m.id === selectedMachineId);
 
     if (existingRow) {
+      if ((existingRow.runNo || 1) !== activeRunNo) {
+        setActiveRunNo(existingRow.runNo || 1);
+      }
       setDraft((prev) => {
         const baseRow =
           !isShiftLocked &&
           prev &&
           prev.machineId === existingRow.machineId &&
+          (prev.runNo || 1) === (existingRow.runNo || 1) &&
           prev.date === existingRow.date &&
           prev.shift === existingRow.shift &&
           prev.line === selectedLine
             ? prev
             : {
                 ...existingRow,
+                runNo: existingRow.runNo || 1,
                 line: selectedLine,
                 totalWorkingMinutes:
                   shiftWorkingMinutes || existingRow.totalWorkingMinutes,
@@ -191,6 +206,7 @@ export function OperatorKiosk({
         return baseRow;
       });
     } else if (machine) {
+      setActiveRunNo(1);
       setDraft((prev) => {
         if (
           prev &&
@@ -209,6 +225,7 @@ export function OperatorKiosk({
           shift: selectedShift,
           line: selectedLine,
           srNo: idx >= 0 ? idx + 1 : 1,
+          runNo: 1,
           machineId: machine.id,
           machineName: machine.name,
           operatorName: '',
@@ -235,6 +252,7 @@ export function OperatorKiosk({
     setValidationError(null);
   }, [
     selectedMachineId,
+    activeRunNo,
     rows,
     machines,
     lineMachines,
@@ -247,14 +265,207 @@ export function OperatorKiosk({
     isShiftLocked,
   ]);
 
+  const rowShiftMins = shiftWorkingMinutes || draft?.totalWorkingMinutes || 0;
+
+  const currentMachineRuns = useMemo(() => {
+    if (!selectedMachineId) return [];
+    const matched = rows.filter((r) => r.machineId === selectedMachineId);
+    if (!draft) return matched;
+    if (!matched.some((r) => (r.runNo || 1) === (draft.runNo || 1))) {
+      return [...matched, draft];
+    }
+    return matched.map((r) => ((r.runNo || 1) === (draft.runNo || 1) ? draft : r));
+  }, [rows, selectedMachineId, draft]);
+
+  const timeBalance = useMemo(() => {
+    if (!selectedMachineId) {
+      return calculateShiftTimeBalance(draft || ({} as MachineShiftRow), rowShiftMins);
+    }
+    return calculateMachineGroupTimeBalance(currentMachineRuns, selectedMachineId, rowShiftMins);
+  }, [currentMachineRuns, selectedMachineId, draft, rowShiftMins]);
+
+  // Update current active run draft, sync to rows, and auto-recalculate proportional stdOutput
+  const updateDraft = (updates: Partial<MachineShiftRow>) => {
+    if (isShiftLocked || !draft) return;
+    setValidationError(null);
+    const updatedDraft: MachineShiftRow = { ...draft, ...updates };
+    setDraft(updatedDraft);
+
+    if (selectedMachineId) {
+      const hasMatch = rows.some(
+        (r) => r.machineId === selectedMachineId && (r.runNo || 1) === (draft.runNo || 1)
+      );
+      const syncedRows = hasMatch
+        ? rows.map((r) =>
+            r.machineId === selectedMachineId && (r.runNo || 1) === (draft.runNo || 1)
+              ? updatedDraft
+              : r
+          )
+        : [...rows, updatedDraft];
+
+      const balanced = recalculateMachineGroupStdOutputs(
+        syncedRows,
+        selectedMachineId,
+        shiftWorkingMinutes || draft.totalWorkingMinutes
+      );
+      const refreshedDraft = balanced.find(
+        (r) => r.machineId === selectedMachineId && (r.runNo || 1) === (draft.runNo || 1)
+      );
+      if (refreshedDraft && refreshedDraft.stdOutput !== updatedDraft.stdOutput) {
+        setDraft(refreshedDraft);
+      }
+      if (onRowsChange) {
+        onRowsChange(balanced);
+      }
+    }
+  };
+
+  const handleAddSplitRun = () => {
+    if (isShiftLocked || !selectedMachineId || !draft) return;
+    const currentDraft = draft;
+    const baseRun = currentDraft || rows.find((r) => r.machineId === selectedMachineId);
+    if (!baseRun) return;
+
+    const existingWithDraft: MachineShiftRow[] = rows.map((r) =>
+      r.machineId === selectedMachineId && (r.runNo || 1) === (currentDraft.runNo || 1) ? currentDraft : r
+    );
+    const runsForMach = existingWithDraft.filter((r) => r.machineId === selectedMachineId);
+    const nextRunNo = Math.max(...runsForMach.map((r) => r.runNo || 1), 0) + 1;
+
+    const newRun: MachineShiftRow = {
+      id: `${selectedDate}_${selectedShift}_${selectedLine}_${selectedMachineId}_r${nextRunNo}`,
+      date: selectedDate,
+      shift: selectedShift,
+      line: selectedLine,
+      productionLine: selectedLine,
+      srNo: baseRun.srNo,
+      runNo: nextRunNo,
+      machineId: selectedMachineId,
+      machineName: baseRun.machineName,
+      machineCode: baseRun.machineCode,
+      operatorName: baseRun.operatorName || '',
+      itemId: '',
+      itemName: '',
+      operation: '',
+      cycleTime: 0,
+      stdOutput: 0,
+      actualOutput: 0,
+      rework: 0,
+      totalWorkingMinutes: shiftWorkingMinutes || baseRun.totalWorkingMinutes,
+      breakdown: {
+        noDisc: 0,
+        change: 0,
+        power: 0,
+        operator: 0,
+        machineBreakdown: 0,
+        fixProgSettings: 0,
+      },
+      remarks: '',
+    };
+
+    const lastIdx = existingWithDraft.reduce(
+      (last, r, i) => (r.machineId === selectedMachineId ? i : last),
+      -1
+    );
+    const nextRows = [...existingWithDraft];
+    if (lastIdx >= 0) {
+      nextRows.splice(lastIdx + 1, 0, newRun);
+    } else {
+      nextRows.push(newRun);
+    }
+
+    const balancedRows = recalculateMachineGroupStdOutputs(
+      nextRows,
+      selectedMachineId,
+      shiftWorkingMinutes || baseRun.totalWorkingMinutes
+    );
+
+    if (onRowsChange) {
+      onRowsChange(balancedRows);
+    }
+    setActiveRunNo(nextRunNo);
+    const newDraft = balancedRows.find(
+      (r) => r.machineId === selectedMachineId && r.runNo === nextRunNo
+    );
+    if (newDraft) {
+      setDraft(newDraft);
+    }
+  };
+
+  const handleRemoveSplitRun = (runNoToRemove: number) => {
+    if (isShiftLocked || !selectedMachineId || runNoToRemove <= 1) return;
+    const remaining = rows.filter(
+      (r) => !(r.machineId === selectedMachineId && (r.runNo || 1) === runNoToRemove)
+    );
+    let runCounter = 1;
+    const renumbered = remaining.map((r) => {
+      if (r.machineId === selectedMachineId) {
+        const updated = {
+          ...r,
+          runNo: runCounter,
+          id:
+            runCounter === 1
+              ? `${selectedDate}_${selectedShift}_${selectedLine}_${r.machineId}`
+              : `${selectedDate}_${selectedShift}_${selectedLine}_${r.machineId}_r${runCounter}`,
+        };
+        runCounter++;
+        return updated;
+      }
+      return r;
+    });
+
+    const balancedRows = recalculateMachineGroupStdOutputs(
+      renumbered,
+      selectedMachineId,
+      shiftWorkingMinutes || (draft?.totalWorkingMinutes ?? 465)
+    );
+
+    if (onRowsChange) {
+      onRowsChange(balancedRows);
+    }
+    setActiveRunNo(1);
+    const nextDraft = balancedRows.find(
+      (r) => r.machineId === selectedMachineId && (r.runNo || 1) === 1
+    );
+    if (nextDraft) {
+      setDraft(nextDraft);
+    }
+  };
+
+  const handleSelectRun = (targetRunNo: number) => {
+    if (!draft || (draft.runNo || 1) === targetRunNo) {
+      setActiveRunNo(targetRunNo);
+      return;
+    }
+    const currentDraft = draft;
+    const syncedRows: MachineShiftRow[] = rows.map((r) =>
+      r.machineId === selectedMachineId && (r.runNo || 1) === (currentDraft.runNo || 1) ? currentDraft : r
+    );
+    const balancedRows = recalculateMachineGroupStdOutputs(
+      syncedRows,
+      selectedMachineId!,
+      shiftWorkingMinutes || currentDraft.totalWorkingMinutes
+    );
+    if (onRowsChange) {
+      onRowsChange(balancedRows);
+    }
+    setActiveRunNo(targetRunNo);
+    const targetDraft = balancedRows.find(
+      (r) => r.machineId === selectedMachineId && (r.runNo || 1) === targetRunNo
+    );
+    if (targetDraft) {
+      setDraft(targetDraft);
+    }
+    setValidationError(null);
+  };
+
   // 1. When Item changes in draft: auto-set Operation, Cycle Time, and Std Output
   const handleItemSelect = (itemId: string) => {
     if (isShiftLocked || !draft) return;
     setValidationError(null);
 
     if (!itemId) {
-      setDraft({
-        ...draft,
+      updateDraft({
         itemId: '',
         itemName: '',
         operation: '',
@@ -274,8 +485,7 @@ export function OperatorKiosk({
       draft.machineName
     );
 
-    setDraft({
-      ...draft,
+    updateDraft({
       itemId,
       itemName: target.itemName,
       operation: target.operation,
@@ -291,7 +501,7 @@ export function OperatorKiosk({
     setValidationError(null);
 
     if (!draft.itemId) {
-      setDraft({ ...draft, operation: operationName });
+      updateDraft({ operation: operationName });
       return;
     }
 
@@ -305,8 +515,7 @@ export function OperatorKiosk({
       draft.machineName
     );
 
-    setDraft({
-      ...draft,
+    updateDraft({
       operation: operationName,
       cycleTime: target.cycleTime,
       stdOutput: target.stdOutput,
@@ -541,13 +750,13 @@ export function OperatorKiosk({
     if (isShiftLocked || !draft) return;
     setValidationError(null);
     const newVal = Math.max(0, (draft.actualOutput || 0) + delta);
-    setDraft({ ...draft, actualOutput: newVal });
+    updateDraft({ actualOutput: newVal });
   };
 
   const handleAdjustRework = (delta: number) => {
     if (isShiftLocked || !draft) return;
     const newVal = Math.max(0, (draft.rework || 0) + delta);
-    setDraft({ ...draft, rework: newVal });
+    updateDraft({ rework: newVal });
   };
 
   const handleBreakdownStep = (
@@ -564,8 +773,7 @@ export function OperatorKiosk({
     setValidationError(null);
     const currentVal = Number(draft.breakdown?.[field]) || 0;
     const nextVal = Number(Math.max(0, currentVal + delta).toFixed(2));
-    setDraft({
-      ...draft,
+    updateDraft({
       breakdown: {
         ...draft.breakdown,
         [field]: nextVal,
@@ -587,8 +795,7 @@ export function OperatorKiosk({
     setValidationError(null);
     const currentVal = Number(draft.breakdown?.[field]) || 0;
     const nextVal = Number(Math.max(0, currentVal + unaccountedMins).toFixed(2));
-    setDraft({
-      ...draft,
+    updateDraft({
       breakdown: {
         ...draft.breakdown,
         [field]: nextVal,
@@ -599,53 +806,91 @@ export function OperatorKiosk({
   const handleQuickRemark = (chip: string) => {
     if (isShiftLocked || !draft) return;
     const existing = draft.remarks ? draft.remarks + '; ' : '';
-    setDraft({ ...draft, remarks: existing + chip });
+    updateDraft({ remarks: existing + chip });
   };
 
-  // Submission with strict Shift Time Balance validation (same as DailyShiftSheet)
+  // Submission with strict Shift Time Balance validation across all runs of the machine
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isShiftLocked || !draft) return;
+    if (isShiftLocked || !draft || !selectedMachineId) return;
 
-    if (!draft.operatorName) {
-      setValidationError('Please select the operator name for this machine.');
-      return;
-    }
+    const allMachineRuns = rows
+      .filter((r) => r.machineId === selectedMachineId)
+      .map((r) => ((r.runNo || 1) === (draft.runNo || 1) ? draft : r));
 
-    if (!draft.itemId) {
-      setValidationError('Please select the item/component being machined.');
-      return;
-    }
+    const runsToSave = allMachineRuns.length > 0 ? allMachineRuns : [draft];
 
-    const rowShiftMins = shiftWorkingMinutes || draft.totalWorkingMinutes;
-    const balance = calculateShiftTimeBalance(draft, rowShiftMins);
+    const hasAnyActivity = runsToSave.some(
+      (r) =>
+        !!r.itemId ||
+        !!r.operatorName ||
+        (r.actualOutput || 0) > 0 ||
+        calculateTotalBreakdown(r.breakdown) > 0 ||
+        (r.cycleTime || 0) > 0
+    );
 
-    if (!balance.isBalanced) {
-      if (balance.missingCycleTime) {
-        setValidationError(
-          `Cycle Time is 0! Actual output (${draft.actualOutput} pcs) was entered, but Cycle Time is missing. Please enter Cycle Time or select a configured Item.`
-        );
-      } else if (balance.isProductionExceeded) {
-        setValidationError(
-          `Wrong Entry: Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m = ${balance.productionMinutes} mins) exceeds total shift duration (${balance.shiftMinutes} mins)! Please reduce Actual Output or verify Cycle Time.`
-        );
-      } else if (balance.isOver) {
-        setValidationError(
-          `Wrong Entry: Productive time (${balance.productionMinutes}m) + Breakdown (${balance.loggedBreakdownMinutes}m) = ${balance.totalAccountedMinutes} mins, which exceeds shift duration (${balance.shiftMinutes} mins) by ${Math.abs(balance.unaccountedMinutes)} mins!`
-        );
-      } else {
-        setValidationError(
-          `Missing Breakdown Time: Shift is ${balance.shiftMinutes} mins. Actual output (${draft.actualOutput} pcs × ${draft.cycleTime}m) used ${balance.productionMinutes} mins, leaving ${balance.requiredBreakdownMinutes} mins of breakdown time. You have logged ${balance.loggedBreakdownMinutes} mins — please fill the remaining ${balance.unaccountedMinutes} mins in Breakdown.`
-        );
+    if (hasAnyActivity) {
+      for (const run of runsToSave) {
+        const runHasActivity =
+          (run.actualOutput || 0) > 0 ||
+          calculateTotalBreakdown(run.breakdown) > 0 ||
+          (run.cycleTime || 0) > 0;
+        if (runHasActivity) {
+          if (!run.operatorName) {
+            setValidationError(
+              runsToSave.length > 1
+                ? `Please select an Operator for Run #${run.runNo || 1}.`
+                : 'Please select the operator name for this machine.'
+            );
+            return;
+          }
+          if (!run.itemId) {
+            setValidationError(
+              runsToSave.length > 1
+                ? `Please select an Item for Run #${run.runNo || 1}.`
+                : 'Please select the item/component being machined.'
+            );
+            return;
+          }
+        }
       }
-      return;
+
+      const rowShiftMins = shiftWorkingMinutes || draft.totalWorkingMinutes;
+      const balance = calculateMachineGroupTimeBalance(runsToSave, selectedMachineId, rowShiftMins);
+
+      if (!balance.isBalanced) {
+        if (balance.missingCycleTime) {
+          setValidationError(
+            `Cycle Time is 0! Actual output was entered on ${draft.machineName}, but Cycle Time is missing. Please enter Cycle Time or select a configured Item.`
+          );
+        } else if (balance.isProductionExceeded) {
+          setValidationError(
+            `Wrong Entry: Productive time (${balance.productionMinutes}m) exceeds total shift duration (${balance.shiftMinutes} mins)! Please reduce Actual Output or verify Cycle Time.`
+          );
+        } else if (balance.isOver) {
+          setValidationError(
+            `Wrong Entry: Productive time (${balance.productionMinutes}m) + Breakdown (${balance.loggedBreakdownMinutes}m) = ${balance.totalAccountedMinutes} mins, which exceeds shift duration (${balance.shiftMinutes} mins) by ${Math.abs(balance.unaccountedMinutes)} mins!`
+          );
+        } else {
+          setValidationError(
+            `Missing Breakdown Time: Shift is ${balance.shiftMinutes} mins. Productive time is ${balance.productionMinutes} mins, leaving ${balance.requiredBreakdownMinutes} mins of breakdown time. You have logged ${balance.loggedBreakdownMinutes} mins — please fill the remaining ${balance.unaccountedMinutes} mins in Breakdown.`
+          );
+        }
+        return;
+      }
     }
 
     setValidationError(null);
-    onSaveMachine({
-      ...draft,
-      totalWorkingMinutes: rowShiftMins,
-    });
+
+    if (onSaveMachineRuns) {
+      onSaveMachineRuns(runsToSave);
+    } else {
+      onSaveMachine({
+        ...draft,
+        totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+      });
+    }
+
     setSaveSuccessMsg(true);
     setTimeout(() => setSaveSuccessMsg(false), 2500);
   };
@@ -918,7 +1163,7 @@ export function OperatorKiosk({
             <span className="text-slate-400">
               Completed:{' '}
               <strong className="text-emerald-400">
-                {rows.filter((r) => r.stdOutput > 0 || r.actualOutput > 0).length}
+                {new Set(rows.filter((r) => r.stdOutput > 0 || r.actualOutput > 0).map((r) => r.machineId)).size}
               </strong>{' '}
               / {lineMachines.length}
             </span>
@@ -1021,24 +1266,23 @@ export function OperatorKiosk({
         {/* Machine Visual Grid for current line */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-2.5 sm:gap-4">
           {lineMachines.map((machine, index) => {
-            const row = rows.find((r) => r.machineId === machine.id);
-            const totalBd = row ? calculateTotalBreakdown(row.breakdown) : 0;
-            const isRowActive =
-              !!row &&
-              (!!row.itemId ||
-                !!row.operatorName ||
-                (row.actualOutput || 0) > 0 ||
-                totalBd > 0 ||
-                (row.cycleTime || 0) > 0);
-            const isLogged = !!row && (row.stdOutput > 0 || row.actualOutput > 0);
-            const efficiency =
-              row && row.stdOutput > 0
-                ? calculateEfficiency(row.actualOutput, row.stdOutput)
-                : 0;
-            const rowShiftMins =
-              shiftWorkingMinutes || row?.totalWorkingMinutes || 0;
-            const balance = row
-              ? calculateShiftTimeBalance(row, rowShiftMins)
+            const machRuns = rows.filter((r) => r.machineId === machine.id);
+            const totalAct = machRuns.reduce((s, r) => s + (Number(r.actualOutput) || 0), 0);
+            const totalStd = machRuns.reduce((s, r) => s + (Number(r.stdOutput) || 0), 0);
+            const totalBd = Number(machRuns.reduce((s, r) => s + calculateTotalBreakdown(r.breakdown), 0).toFixed(2));
+            const isRowActive = machRuns.some(
+              (r) =>
+                !!r.itemId ||
+                !!r.operatorName ||
+                (r.actualOutput || 0) > 0 ||
+                calculateTotalBreakdown(r.breakdown) > 0 ||
+                (r.cycleTime || 0) > 0
+            );
+            const isLogged = totalStd > 0 || totalAct > 0;
+            const efficiency = totalStd > 0 ? calculateEfficiency(totalAct, totalStd) : 0;
+            const rowShiftMins = shiftWorkingMinutes || machRuns[0]?.totalWorkingMinutes || 0;
+            const balance = isRowActive
+              ? calculateMachineGroupTimeBalance(rows, machine.id, rowShiftMins)
               : null;
             const hasTimeMismatch = isRowActive && balance && !balance.isBalanced;
 
@@ -1062,9 +1306,16 @@ export function OperatorKiosk({
               >
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[11px] font-mono font-bold text-slate-600">
-                      #{index + 1}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-mono font-bold text-slate-600">
+                        #{index + 1}
+                      </span>
+                      {machRuns.length > 1 && (
+                        <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-bold border border-blue-200">
+                          {machRuns.length} Runs
+                        </span>
+                      )}
+                    </div>
                     {hasTimeMismatch ? (
                       <span
                         className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5 ${
@@ -1112,17 +1363,19 @@ export function OperatorKiosk({
                 </div>
 
                 <div className="pt-2 border-t border-slate-100 text-xs">
-                  {isRowActive && row ? (
+                  {isRowActive && machRuns.length > 0 ? (
                     <div>
                       <div className="flex items-center justify-between text-slate-700 font-mono text-[11px]">
                         <span>Act / Std:</span>
                         <strong className="text-slate-900">
-                          {row.actualOutput} / {row.stdOutput}
+                          {totalAct} / {totalStd}
                         </strong>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-500 mt-0.5">
                         <span className="truncate max-w-22.5">
-                          {row.operatorName || '—'}
+                          {machRuns.length === 1
+                            ? machRuns[0].operatorName || '—'
+                            : `${machRuns.length} runs`}
                         </span>
                         {balance?.isBalanced ? (
                           <span className="text-emerald-700 font-semibold">
@@ -1154,13 +1407,11 @@ export function OperatorKiosk({
   // ============================================================================
   // VIEW 2: SELECTED MACHINE STEP-BY-STEP FORM
   // ============================================================================
-  const rowShiftMins = shiftWorkingMinutes || draft.totalWorkingMinutes;
   const totalBreakdown = calculateTotalBreakdown(draft.breakdown);
   const efficiency =
     draft.stdOutput > 0
       ? calculateEfficiency(draft.actualOutput, draft.stdOutput)
       : 0;
-  const timeBalance = calculateShiftTimeBalance(draft, rowShiftMins);
 
   // Operations list for the selected item (renders dropdown if > 1 operation)
   const draftOperations = draft.itemId
@@ -1173,11 +1424,14 @@ export function OperatorKiosk({
       )
     : [];
 
-  // Show live time-balance status once Actual Output is entered or the row has activity
+  // Show live time-balance status once Actual Output is entered or the machine has activity
   const hasEnteredOutputOrBd =
     (draft.actualOutput || 0) > 0 ||
     totalBreakdown > 0 ||
-    (!!draft.itemId && draft.cycleTime > 0);
+    (!!draft.itemId && draft.cycleTime > 0) ||
+    currentMachineRuns.some(
+      (r) => (r.actualOutput || 0) > 0 || calculateTotalBreakdown(r.breakdown) > 0
+    );
   const hasEntryError =
     hasEnteredOutputOrBd && !timeBalance.isBalanced;
 
@@ -1437,6 +1691,106 @@ export function OperatorKiosk({
         </div>
       </div>
 
+      {/* Multi-Run Machine Selector Bar */}
+      <div className="bg-white p-3 rounded-lg border border-slate-300 shadow-2xs flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
+            <span>Runs:</span>
+          </span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {currentMachineRuns.map((r, idx) => {
+              const runNum = r.runNo || idx + 1;
+              const isSelected = (draft.runNo || 1) === runNum;
+              return (
+                <button
+                  key={r.id || runNum}
+                  type="button"
+                  onClick={() => handleSelectRun(runNum)}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-md border transition-all flex items-center gap-1.5 cursor-pointer ${
+                    isSelected
+                      ? 'bg-blue-600 text-white border-blue-600 shadow-xs ring-2 ring-blue-200'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                  }`}
+                >
+                  <span>Run #{runNum}</span>
+                  {r.itemName && (
+                    <span
+                      className={`text-[10px] font-normal truncate max-w-28 ${
+                        isSelected ? 'text-blue-100' : 'text-slate-500'
+                      }`}
+                    >
+                      ({r.itemName})
+                    </span>
+                  )}
+                  {r.actualOutput > 0 && (
+                    <span
+                      className={`text-[10px] px-1 py-0.2 rounded font-mono ${
+                        isSelected
+                          ? 'bg-blue-700 text-white'
+                          : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {r.actualOutput} pcs
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {!isShiftLocked && (
+            <button
+              type="button"
+              onClick={handleAddSplitRun}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-md bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 transition-colors cursor-pointer"
+              title="Split job / add another run for this machine during this shift"
+            >
+              <Plus className="w-3.5 h-3.5 text-emerald-600" />
+              <span>+ Add Split Run</span>
+            </button>
+          )}
+          {!isShiftLocked && (draft.runNo || 1) > 1 && (
+            <button
+              type="button"
+              onClick={() => handleRemoveSplitRun(draft.runNo || 1)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition-colors cursor-pointer"
+              title={`Remove Run #${draft.runNo}`}
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Remove Run #{draft.runNo}</span>
+            </button>
+          )}
+        </div>
+
+        {/* Machine Group Balance Status */}
+        <div className="flex items-center gap-2 text-xs font-mono">
+          <span className="text-slate-500">Mach Total:</span>
+          <strong className="text-slate-900">
+            {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+          </strong>
+          {timeBalance.isBalanced ? (
+            <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[11px] border border-emerald-300 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+              <span>Balanced</span>
+            </span>
+          ) : timeBalance.unaccountedMinutes > 0 ? (
+            <button
+              type="button"
+              onClick={() => handleFillUnaccountedToField('noDisc', timeBalance.unaccountedMinutes)}
+              disabled={isShiftLocked}
+              className="px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold text-[11px] border border-amber-300 flex items-center gap-1 cursor-pointer"
+              title={`Auto-fill remaining ${timeBalance.unaccountedMinutes}m into NO/DISC of current run`}
+            >
+              <AlertTriangle className="w-3 h-3 text-amber-600" />
+              <span>Missing {timeBalance.unaccountedMinutes}m (+Fill)</span>
+            </button>
+          ) : (
+            <span className="px-2 py-0.5 rounded bg-rose-100 text-rose-900 font-bold text-[11px] border border-rose-300">
+              ⚠️ Over (+{Math.abs(timeBalance.unaccountedMinutes)}m)
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* Form Submit Validation Alert */}
       {validationError && (
         <div className="bg-rose-50 border border-rose-300 text-rose-900 rounded-lg p-3 text-xs flex items-start gap-2.5 shadow-2xs">
@@ -1495,7 +1849,7 @@ export function OperatorKiosk({
                 value={draft.operatorName}
                 disabled={isShiftLocked}
                 onChange={(e) =>
-                  setDraft({ ...draft, operatorName: e.target.value })
+                  updateDraft({ operatorName: e.target.value })
                 }
                 className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 font-medium focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
               >
@@ -1707,14 +2061,8 @@ export function OperatorKiosk({
                   onChange={(e) => {
                     if (isShiftLocked) return;
                     const newCt = Math.max(0, Number(e.target.value) || 0);
-                    const shiftMins =
-                      Number(draft.shiftWorkingMinutes ?? draft.totalWorkingMinutes) ||
-                      rowShiftMins ||
-                      465;
-                    setDraft({
-                      ...draft,
+                    updateDraft({
                       cycleTime: newCt,
-                      stdOutput: newCt > 0 ? Math.floor(shiftMins / newCt) : 0,
                     });
                   }}
                   className={`w-full text-sm font-semibold px-3 py-2 border rounded-md bg-white disabled:bg-slate-100 ${
@@ -1752,8 +2100,7 @@ export function OperatorKiosk({
                   onFocus={(e) => e.target.select()}
                   onChange={(e) => {
                     if (!isAdmin || isShiftLocked) return;
-                    setDraft({
-                      ...draft,
+                    updateDraft({
                       stdOutput: Number(e.target.value) || 0,
                     });
                   }}
@@ -1841,8 +2188,7 @@ export function OperatorKiosk({
                     setValidationError(null);
                     const raw = e.target.value;
                     const parsed = raw === '' ? 0 : parseInt(raw, 10);
-                    setDraft({
-                      ...draft,
+                    updateDraft({
                       actualOutput: isNaN(parsed) ? 0 : Math.max(0, parsed),
                     });
                   }}
@@ -1877,7 +2223,7 @@ export function OperatorKiosk({
                   type="button"
                   disabled={isShiftLocked}
                   onClick={() =>
-                    !isShiftLocked && setDraft({ ...draft, actualOutput: draft.stdOutput })
+                    !isShiftLocked && updateDraft({ actualOutput: draft.stdOutput })
                   }
                   className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -1888,8 +2234,7 @@ export function OperatorKiosk({
                   disabled={isShiftLocked}
                   onClick={() =>
                     !isShiftLocked &&
-                    setDraft({
-                      ...draft,
+                    updateDraft({
                       actualOutput: Math.max(0, draft.stdOutput - 5),
                     })
                   }
@@ -1902,7 +2247,7 @@ export function OperatorKiosk({
                   disabled={isShiftLocked}
                   onClick={() =>
                     !isShiftLocked &&
-                    setDraft({ ...draft, actualOutput: draft.stdOutput + 5 })
+                    updateDraft({ actualOutput: draft.stdOutput + 5 })
                   }
                   className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 px-2 py-0.5 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -1982,7 +2327,7 @@ export function OperatorKiosk({
                   onChange={(e) => {
                     const raw = e.target.value;
                     const parsed = raw === '' ? 0 : parseInt(raw, 10);
-                    setDraft({ ...draft, rework: isNaN(parsed) ? 0 : Math.max(0, parsed) });
+                    updateDraft({ rework: isNaN(parsed) ? 0 : Math.max(0, parsed) });
                   }}
                   className="flex-1 text-center font-mono text-2xl font-black py-1.5 bg-slate-50 border border-slate-300 rounded focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                 />
@@ -2145,8 +2490,7 @@ export function OperatorKiosk({
                           setEditingBdField(card.key);
                           setEditingBdText(raw);
                           const parsed = parseFloat(raw);
-                          setDraft({
-                            ...draft,
+                          updateDraft({
                             breakdown: {
                               ...draft.breakdown,
                               [card.key]:
@@ -2214,7 +2558,7 @@ export function OperatorKiosk({
             disabled={isShiftLocked}
             readOnly={isShiftLocked}
             value={draft.remarks}
-            onChange={(e) => setDraft({ ...draft, remarks: e.target.value })}
+            onChange={(e) => updateDraft({ remarks: e.target.value })}
             placeholder="Type notes or tap quick chips below..."
             className="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
           />

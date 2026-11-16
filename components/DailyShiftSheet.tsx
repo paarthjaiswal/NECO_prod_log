@@ -32,6 +32,9 @@ import {
   calculateDynamicStdOutput,
   calculateDowntimePct,
   calculateShiftTimeBalance,
+  calculateMachineGroupTimeBalance,
+  recalculateMachineGroupStdOutputs,
+  MachineGroupTimeBalance,
 } from '@/services/storageService';
 import {
   upsertMachineItemCycleTime,
@@ -280,9 +283,121 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const updateRow = useCallback(
     (index: number, updatedFields: Partial<MachineShiftRow>) => {
       if (isShiftLocked) return;
-      onRowsChange(rows.map((r, i) => (i === index ? { ...r, ...updatedFields } : r)));
+      const targetMachineId = rows[index]?.machineId;
+      const updatedRows = rows.map((r, i) => (i === index ? { ...r, ...updatedFields } : r));
+      if (targetMachineId) {
+        const rowShiftMins = shiftWorkingMinutes || updatedRows[index]?.totalWorkingMinutes || 1305;
+        const recomputed = recalculateMachineGroupStdOutputs(updatedRows, targetMachineId, rowShiftMins);
+        onRowsChange(recomputed);
+      } else {
+        onRowsChange(updatedRows);
+      }
     },
-    [isShiftLocked, rows, onRowsChange]
+    [isShiftLocked, rows, onRowsChange, shiftWorkingMinutes]
+  );
+
+  // Split machine row into multiple runs
+  const handleSplitMachineRow = useCallback(
+    (rowIndex: number) => {
+      if (isShiftLocked) return;
+      const baseRow = rows[rowIndex];
+      if (!baseRow) return;
+
+      const machineRuns = rows.filter((r) => r.machineId === baseRow.machineId);
+      const nextRunNo = machineRuns.length + 1;
+
+      let lastMachineIndex = rowIndex;
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].machineId === baseRow.machineId) {
+          lastMachineIndex = i;
+          break;
+        }
+      }
+
+      const rowShiftMins = shiftWorkingMinutes || baseRow.totalWorkingMinutes || 1305;
+      const newSubRow: MachineShiftRow = {
+        id: `${baseRow.date}_${baseRow.shift}_${baseRow.line}_${baseRow.machineId}_r${nextRunNo}`,
+        date: baseRow.date,
+        shift: baseRow.shift,
+        line: baseRow.line,
+        productionLine: baseRow.productionLine,
+        srNo: baseRow.srNo,
+        runNo: nextRunNo,
+        machineId: baseRow.machineId,
+        machineCode: baseRow.machineCode,
+        machineName: baseRow.machineName,
+        operatorName: baseRow.operatorName || "",
+        itemId: baseRow.itemId || "",
+        itemName: baseRow.itemName || "",
+        operation: baseRow.operation || "",
+        cycleTime: 0,
+        totalWorkingMinutes: rowShiftMins,
+        shiftWorkingMinutes: rowShiftMins,
+        stdOutput: 0,
+        actualOutput: 0,
+        rework: 0,
+        breakdown: {
+          noDisc: 0,
+          change: 0,
+          power: 0,
+          operator: 0,
+          machineBreakdown: 0,
+          fixProgSettings: 0,
+        },
+        breakdownPct: {
+          noDiscPct: 0,
+          changePct: 0,
+          powerPct: 0,
+          operatorPct: 0,
+          machineBreakdownPct: 0,
+          fixProgSettingsPct: 0,
+          totalBdMinutes: 0,
+          totalBdPct: 0,
+        },
+        remarks: "",
+      };
+
+      const updatedRows = [...rows];
+      updatedRows.splice(lastMachineIndex + 1, 0, newSubRow);
+
+      const balancedRows = recalculateMachineGroupStdOutputs(
+        updatedRows,
+        baseRow.machineId,
+        rowShiftMins
+      );
+      onRowsChange(balancedRows);
+    },
+    [isShiftLocked, rows, shiftWorkingMinutes, onRowsChange]
+  );
+
+  // Remove a split sub-row
+  const handleRemoveSplitRow = useCallback(
+    (rowIndex: number) => {
+      if (isShiftLocked) return;
+      const targetRow = rows[rowIndex];
+      if (!targetRow || (targetRow.runNo || 1) <= 1) return;
+
+      const rowShiftMins = shiftWorkingMinutes || targetRow.totalWorkingMinutes || 1305;
+      const filteredRows = rows.filter((_, idx) => idx !== rowIndex);
+
+      let runCounter = 1;
+      const renumberedRows = filteredRows.map((r) => {
+        if (r.machineId === targetRow.machineId) {
+          const updated = { ...r, runNo: runCounter };
+          runCounter++;
+          return updated;
+        }
+        return r;
+      });
+
+      const balancedRows = recalculateMachineGroupStdOutputs(
+        renumberedRows,
+        targetRow.machineId,
+        rowShiftMins
+      );
+      onRowsChange(balancedRows);
+    },
+    [isShiftLocked, rows, shiftWorkingMinutes, onRowsChange]
   );
 
   // Apply patches to many rows at once (avoids stale-closure overwrites from looping updateRow)
@@ -656,19 +771,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   // 5. Cycle Time Change Handler (Live stdOutput Recalculation)
   const handleCycleTimeChange = (rowIndex: number, rawVal: string) => {
     const newCt = Math.max(0, Number(rawVal) || 0);
-    const updated = [...rows];
-    const row = updated[rowIndex];
+    const row = rows[rowIndex];
+    if (!row) return;
     const shiftMins =
       Number(row.shiftWorkingMinutes ?? row.totalWorkingMinutes) ||
       shiftWorkingMinutes ||
       465;
 
-    updated[rowIndex] = {
-      ...row,
-      cycleTime: newCt,
-      stdOutput: newCt > 0 ? Math.floor(shiftMins / newCt) : 0,
-    };
-    onRowsChange(updated);
+    const updated = rows.map((r, i) => (i === rowIndex ? { ...r, cycleTime: newCt } : r));
+    const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, shiftMins);
+    onRowsChange(recomputed);
   };
 
   // Handle Breakdown Sub-column update
@@ -717,7 +829,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (!row) return;
 
     const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
-    const balance = calculateShiftTimeBalance(row, rowShiftMins);
+    const balance = calculateMachineGroupTimeBalance(rows, row.machineId, rowShiftMins);
     if (balance.unaccountedMinutes <= 0) return;
 
     const targetField: BreakdownKey =
@@ -854,44 +966,61 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       alert(shiftLock?.reason || 'Shift is locked. Data is read-only.');
       return;
     }
-    const unbalancedRows = rows.filter((row) => {
-      const isTouched =
-        !!row.itemId ||
-        !!row.operatorName ||
-        (row.actualOutput || 0) > 0 ||
-        calculateTotalBreakdown(row.breakdown) > 0 ||
-        (row.cycleTime || 0) > 0;
-      if (!isTouched) return false;
-      const balance = calculateShiftTimeBalance(row, shiftWorkingMinutes);
-      return !balance.isBalanced;
-    });
 
-    if (unbalancedRows.length > 0) {
-      const firstBad = unbalancedRows[0];
-      const bal = calculateShiftTimeBalance(firstBad, shiftWorkingMinutes);
+    // Group rows by machineId to validate each machine group
+    const uniqueMachineIds = Array.from(new Set(rows.map((r) => r.machineId)));
+    const unbalancedGroups: { machineId: string; machineName: string; balance: MachineGroupTimeBalance; firstRow: MachineShiftRow }[] = [];
+
+    for (const mId of uniqueMachineIds) {
+      const mRows = rows.filter((r) => r.machineId === mId);
+      const isTouched = mRows.some(
+        (r) =>
+          !!r.itemId ||
+          !!r.operatorName ||
+          (r.actualOutput || 0) > 0 ||
+          calculateTotalBreakdown(r.breakdown) > 0 ||
+          (r.cycleTime || 0) > 0
+      );
+      if (!isTouched) continue;
+
+      const rowShiftMins = shiftWorkingMinutes || mRows[0]?.totalWorkingMinutes || 1305;
+      const bal = calculateMachineGroupTimeBalance(rows, mId, rowShiftMins);
+      if (!bal.isBalanced) {
+        unbalancedGroups.push({
+          machineId: mId,
+          machineName: mRows[0]?.machineName || "Machine",
+          balance: bal,
+          firstRow: mRows[0],
+        });
+      }
+    }
+
+    if (unbalancedGroups.length > 0) {
+      const firstBad = unbalancedGroups[0];
+      const bal = firstBad.balance;
       let details = '';
       if (bal.missingCycleTime) {
         details =
-          `• ERROR: Actual output (${firstBad.actualOutput} pcs) was entered, but Cycle Time is 0!\n` +
+          `• ERROR: Actual output was entered on a run, but Cycle Time is 0!\n` +
           `• Productive time cannot be verified. Please select an Item with a cycle time or enter cycle time.`;
       } else if (bal.isProductionExceeded) {
         details =
-          `• ERROR: Actual output (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m = ${bal.productionMinutes} mins) exceeds shift duration (${bal.shiftMinutes} mins)!\n` +
+          `• ERROR: Combined actual output time (${bal.productionMinutes}m) across ${bal.runCount} run(s) exceeds shift duration (${bal.shiftMinutes} mins)!\n` +
           `• Productive time alone is greater than shift timing. Please reduce Actual Output or verify cycle time.`;
       } else if (bal.isOver) {
         details =
-          `• ERROR: Total productive time (${bal.productionMinutes}m) + breakdown (${bal.loggedBreakdownMinutes}m) = ${bal.totalAccountedMinutes} mins, which exceeds shift duration (${bal.shiftMinutes} mins) by ${Math.abs(bal.unaccountedMinutes)} mins!\n` +
-          `• Total productive time + total breakdown time must NOT exceed shift duration—it must be exactly equal.`;
+          `• ERROR: Combined productive time (${bal.productionMinutes}m) + breakdown (${bal.loggedBreakdownMinutes}m) = ${bal.totalAccountedMinutes} mins, which exceeds shift duration (${bal.shiftMinutes} mins) by ${Math.abs(bal.unaccountedMinutes)} mins!\n` +
+          `• Combined time across all split runs on this machine must NOT exceed shift duration—it must be exactly equal.`;
       } else {
         details =
-          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
+          `• Combined Output Time: ${bal.productionMinutes} mins\n` +
           `• Required Breakdown / Downtime: ${bal.requiredBreakdownMinutes} mins\n` +
           `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
-          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns (NO/DISC, CHANGE, POWER, OPERATOR, BREAK DOWN, or FIX/PROG) so total time equals ${bal.shiftMinutes} mins.`;
+          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns so combined machine time equals ${bal.shiftMinutes} mins.`;
       }
 
       alert(
-        `Shift Time Mismatch on ${firstBad.machineName} (Row #${firstBad.srNo}):\n\n` +
+        `Shift Time Mismatch on ${firstBad.machineName} (${bal.runCount > 1 ? `${bal.runCount} split runs` : `Row #${firstBad.firstRow.srNo}`}):\n\n` +
           `• Shift Duration (from DB): ${bal.shiftMinutes} mins\n` +
           details
       );
@@ -920,23 +1049,49 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     (totalNoDisc + totalChange + totalPower + totalOperator + totalMachineBd + totalFixProg).toFixed(2)
   );
   const overallEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
-  const activeMachineCount = rows.filter((r) => (Number(r.stdOutput) || 0) > 0).length;
+  const activeMachineCount = useMemo(() => {
+    return new Set(
+      rows
+        .filter((r) => (Number(r.stdOutput) || 0) > 0 || (Number(r.actualOutput) || 0) > 0)
+        .map((r) => r.machineId)
+    ).size;
+  }, [rows]);
 
-  // Active rows & time balance sanity checks across all machines
-  const activeRows = rows.filter((r) => {
-    return (
-      !!r.itemId ||
-      !!r.operatorName ||
-      (r.actualOutput || 0) > 0 ||
-      calculateTotalBreakdown(r.breakdown) > 0 ||
-      (r.cycleTime || 0) > 0
-    );
-  });
-  const unbalancedRows = activeRows.filter((r) => {
-    const b = calculateShiftTimeBalance(r, shiftWorkingMinutes);
-    return !b.isBalanced;
-  });
-  const unbalancedCount = unbalancedRows.length;
+  // Machine group time balances
+  const machineBalances = useMemo(() => {
+    const map = new Map<string, MachineGroupTimeBalance>();
+    const mIds = new Set(rows.map((r) => r.machineId));
+    mIds.forEach((mId) => {
+      const bal = calculateMachineGroupTimeBalance(rows, mId, shiftWorkingMinutes);
+      map.set(mId, bal);
+    });
+    return map;
+  }, [rows, shiftWorkingMinutes]);
+
+  const activeMachineIds = useMemo(() => {
+    const set = new Set<string>();
+    rows.forEach((r) => {
+      const isTouched =
+        !!r.itemId ||
+        !!r.operatorName ||
+        (r.actualOutput || 0) > 0 ||
+        calculateTotalBreakdown(r.breakdown) > 0 ||
+        (r.cycleTime || 0) > 0;
+      if (isTouched && r.machineId) set.add(r.machineId);
+    });
+    return set;
+  }, [rows]);
+
+  const unbalancedMachineIds = useMemo(() => {
+    const bad = new Set<string>();
+    activeMachineIds.forEach((mId) => {
+      const bal = machineBalances.get(mId);
+      if (bal && !bal.isBalanced) bad.add(mId);
+    });
+    return bad;
+  }, [activeMachineIds, machineBalances]);
+
+  const unbalancedCount = unbalancedMachineIds.size;
 
   // Footer downtime %: total minutes vs. available minutes of machines that are in use
   const footerWorkingMinutes = rows.reduce((acc, r) => {
@@ -953,9 +1108,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   // Derive active row & its remaining unaccounted BD balance for the Quick BD Strip
   const focusedRow = rows[activeBdCell?.rowIndex ?? 0] || rows[0] || null;
   const focusedRowBalance =
-    focusedRow && focusedRow.itemId && focusedRow.cycleTime > 0
-      ? calculateShiftTimeBalance(
-          focusedRow,
+    focusedRow
+      ? calculateMachineGroupTimeBalance(
+          rows,
+          focusedRow.machineId,
           shiftWorkingMinutes || focusedRow.totalWorkingMinutes
         )
       : null;
@@ -1034,13 +1190,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
                 <span>{unbalancedCount} Time {unbalancedCount === 1 ? 'Mismatch' : 'Mismatches'}</span>
               </span>
-            ) : activeRows.length > 0 ? (
+            ) : activeMachineCount > 0 ? (
               <span
                 className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold border border-emerald-300 flex items-center gap-1"
-                title={`All ${activeRows.length} active machines are time-balanced (Productive + Breakdown = ${shiftWorkingMinutes}m)`}
+                title={`All ${activeMachineCount} active machines are time-balanced (Productive + Breakdown = ${shiftWorkingMinutes}m)`}
               >
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                <span>All {activeRows.length} Balanced</span>
+                <span>All {activeMachineCount} Balanced</span>
               </span>
             ) : null}
           </div>
@@ -1193,11 +1349,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 }
                 className="bg-transparent font-bold text-slate-900 text-xs focus:outline-none cursor-pointer"
               >
-                {rows.map((r, i) => (
-                  <option key={r.machineId || i} value={i}>
-                    #{r.srNo} {r.machineName}
-                  </option>
-                ))}
+                {rows.map((r, i) => {
+                  const runLabel = (r.runNo || 1) > 1 ? `#${r.srNo}.${r.runNo} ${r.machineName} (Run #${r.runNo})` : `#${r.srNo} ${r.machineName}`;
+                  return (
+                    <option key={r.id || `${r.machineId}-${r.runNo || 1}`} value={i}>
+                      {runLabel}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
@@ -1457,14 +1616,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
 
                 const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
-                const timeBalance = calculateShiftTimeBalance(row, rowShiftMins);
-                const isRowActive =
-                  !!row.itemId ||
-                  !!row.operatorName ||
-                  (row.actualOutput || 0) > 0 ||
-                  calculateTotalBreakdown(row.breakdown) > 0 ||
-                  (row.cycleTime || 0) > 0;
-                const isRowInvalid = isRowActive && !timeBalance.isBalanced;
+                const timeBalance = machineBalances.get(row.machineId) || calculateMachineGroupTimeBalance(rows, row.machineId, rowShiftMins);
+                const runProdMins = timeBalance.rowProductionMinutes?.[row.id] ?? Number(((row.actualOutput || 0) * (row.cycleTime || 0)).toFixed(2));
+                const runBdMins = timeBalance.rowBreakdownMinutes?.[row.id] ?? calculateTotalBreakdown(row.breakdown);
+                const isMachineActive = activeMachineIds.has(row.machineId);
+                const isRowInvalid = isMachineActive && !timeBalance.isBalanced;
 
                 return (
                   <tr
@@ -1474,7 +1630,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         ? timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
                           ? 'bg-rose-50/70 hover:bg-rose-100/60 border-l-4 border-l-rose-600'
                           : 'bg-amber-50/50 hover:bg-amber-100/50 border-l-4 border-l-amber-500'
-                        : isRowActive && timeBalance.isBalanced
+                        : isMachineActive && timeBalance.isBalanced
                         ? 'border-l-4 border-l-emerald-500 hover:bg-emerald-50/20'
                         : isUnderperforming
                         ? 'border-l-2 border-l-amber-400 hover:bg-slate-50/80'
@@ -1485,7 +1641,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   >
                     {/* 1. SR. NO */}
                     <td className="px-2 py-2 text-center font-mono font-semibold text-slate-600 border-r border-slate-200">
-                      {row.srNo}
+                      {(row.runNo || 1) === 1 ? (
+                        <span>{row.srNo}</span>
+                      ) : (
+                        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700 border border-slate-300">
+                          {row.srNo}.{row.runNo}
+                        </span>
+                      )}
                     </td>
 
                     {/* 2. MACHINE */}
@@ -1537,27 +1699,69 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                             </button>
                           </div>
                         </div>
-                      ) : (
+                      ) : (row.runNo || 1) === 1 ? (
                         <div className="flex items-center justify-between gap-1 group">
                           <div>
                             <div className="text-xs font-semibold leading-tight">{row.machineName}</div>
                             <div className="text-[10px] text-slate-400">{row.machineCode}</div>
                           </div>
+                          <div className="flex items-center gap-1">
+                            {!isShiftLocked && (
+                              <button
+                                type="button"
+                                title="Split row / add another run on this machine"
+                                onClick={() => handleSplitMachineRow(index)}
+                                className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 flex items-center gap-0.5 transition-colors cursor-pointer"
+                              >
+                                <Plus className="w-2.5 h-2.5 text-blue-600" />
+                                <span>Split</span>
+                              </button>
+                            )}
+                            {!isShiftLocked && (
+                              <button
+                                type="button"
+                                title="Edit machine name/code/type"
+                                onClick={() => {
+                                  const mMeta = masterData.machines?.find((m) => m.id === row.machineId);
+                                  setEditingMachineId(row.machineId);
+                                  setEditMachineName(row.machineName);
+                                  setEditMachineCode(row.machineCode || mMeta?.code || "");
+                                  setEditMachineType(mMeta?.type || "CNC");
+                                }}
+                                className="opacity-30 group-hover:opacity-100 p-1 text-slate-500 hover:text-blue-600 rounded"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-1 pl-2 border-l-2 border-blue-400">
+                          <div>
+                            <div className="text-xs font-bold text-blue-800 flex items-center gap-1">
+                              <span>↳ Run #{row.runNo}</span>
+                              <span className="text-[10px] font-normal text-slate-500">({row.machineName})</span>
+                            </div>
+                          </div>
                           {!isShiftLocked && (
-                            <button
-                              type="button"
-                              title="Edit machine name/code/type"
-                              onClick={() => {
-                                const mMeta = masterData.machines?.find((m) => m.id === row.machineId);
-                                setEditingMachineId(row.machineId);
-                                setEditMachineName(row.machineName);
-                                setEditMachineCode(row.machineCode || mMeta?.code || "");
-                                setEditMachineType(mMeta?.type || "CNC");
-                              }}
-                              className="opacity-30 group-hover:opacity-100 p-1 text-slate-500 hover:text-blue-600 rounded"
-                            >
-                              <Pencil className="w-3 h-3" />
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                title="Add another split run on this machine"
+                                onClick={() => handleSplitMachineRow(index)}
+                                className="p-1 text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer"
+                              >
+                                <Plus className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                title={`Remove Run #${row.runNo}`}
+                                onClick={() => handleRemoveSplitRow(index)}
+                                className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded cursor-pointer"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
                           )}
                         </div>
                       )}
@@ -2013,7 +2217,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
                     {/* TOTAL BD & SHIFT TIME BALANCE (Click badge to auto-fill remaining balance) */}
                     <td className={`px-2 py-1 border-r border-slate-200 text-center font-mono text-xs ${
-                      !isRowActive
+                      !isMachineActive
                         ? 'bg-slate-50/60'
                         : isRowInvalid
                         ? timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
@@ -2021,15 +2225,17 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           : 'bg-amber-50/80'
                         : 'bg-emerald-50/30'
                     }`}>
-                      {!isRowActive ? (
+                      {!isMachineActive ? (
                         <span className="text-slate-400 font-normal">0</span>
                       ) : (
                         <div className="leading-tight space-y-0.5">
                           <div className="font-bold text-slate-900 flex items-center justify-center gap-1">
-                            <span>{timeBalance.loggedBreakdownMinutes}m / {timeBalance.requiredBreakdownMinutes}m</span>
+                            <span>{runBdMins}m BD</span>
+                            <span className="text-slate-400 text-[10px]">|</span>
+                            <span className="text-slate-600 font-normal text-[10px]">{runProdMins}m prod</span>
                           </div>
                           <div className="text-[10px] text-slate-500 font-normal">
-                            Total: {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+                            Mach Total: {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
                           </div>
                           {timeBalance.missingCycleTime ? (
                             <span
@@ -2065,11 +2271,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               title={
                                 isShiftLocked
                                   ? 'Shift is locked (Read-Only)'
-                                  : `Productive time (${timeBalance.productionMinutes}m) + Breakdown (${timeBalance.loggedBreakdownMinutes}m) = ${timeBalance.totalAccountedMinutes}m. Click to auto-fill +${timeBalance.unaccountedMinutes}m into ${
+                                  : `Machine Group: Productive (${timeBalance.productionMinutes}m) + Breakdown (${timeBalance.loggedBreakdownMinutes}m) = ${timeBalance.totalAccountedMinutes}m. Click to auto-fill +${timeBalance.unaccountedMinutes}m into ${
                                       activeBdCell?.rowIndex === index
                                         ? BD_META[activeBdCell.field].shortLabel
                                         : 'NO/DISC'
-                                    } so total time equals ${timeBalance.shiftMinutes}m`
+                                    } of this run so total time equals ${timeBalance.shiftMinutes}m`
                               }
                             >
                               <span>{isShiftLocked ? '🔒' : '⚠️'} Missing {timeBalance.unaccountedMinutes}m BD</span>
@@ -2199,12 +2405,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   {unbalancedCount > 0 ? (
                     <div className="mt-1 text-rose-300 font-bold flex items-center gap-1 text-[11px]">
                       <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
-                      <span>{unbalancedCount} row{unbalancedCount > 1 ? 's' : ''} have time mismatches</span>
+                      <span>{unbalancedCount} machine{unbalancedCount > 1 ? 's' : ''} have time mismatches</span>
                     </div>
-                  ) : activeRows.length > 0 ? (
+                  ) : activeMachineCount > 0 ? (
                     <div className="mt-1 text-emerald-400 font-semibold flex items-center gap-1 text-[11px]">
                       <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                      <span>All rows balanced ({shiftWorkingMinutes}m)</span>
+                      <span>All active machines balanced ({shiftWorkingMinutes}m)</span>
                     </div>
                   ) : null}
                 </td>

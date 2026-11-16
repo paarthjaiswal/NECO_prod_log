@@ -97,10 +97,50 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | '7d' | 'week' | 'custom' | 'selected'>('all');
   const [shiftFilter, setShiftFilter] = useState<string>('all');
   const [lineFilter, setLineFilter] = useState<string>('all');
+  const [machineLineFilter, setMachineLineFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
+  const [itemDropdownFilter, setItemDropdownFilter] = useState<string>('all');
   const [showIdleMachines, setShowIdleMachines] = useState<boolean>(false);
   const [hoveredMachineId, setHoveredMachineId] = useState<string | null>(null);
+
+  // Unique parts for dropdown
+  const uniquePartOptions = useMemo(() => {
+    const map = new Map<string, { value: string; label: string }>();
+
+    masterData?.items?.forEach((it) => {
+      const code = (it.itemCode || '').trim();
+      const name = (it.itemName || '').trim();
+      const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
+      const val = (it.id || code || name).trim().toLowerCase();
+      if (val && !map.has(val)) {
+        map.set(val, { value: it.id || code || name, label });
+      }
+    });
+
+    itemRollups.forEach((r) => {
+      const code = (r.itemCode || '').trim();
+      const name = (r.itemName || '').trim();
+      const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
+      const val = (r.itemId || code || name).trim().toLowerCase();
+      if (val && !map.has(val)) {
+        map.set(val, { value: r.itemId || code || name, label });
+      }
+    });
+
+    allLogs.forEach((l) => {
+      if (!l.itemName && !l.itemId) return;
+      const code = (l.itemId && !l.itemId.startsWith('item_') ? l.itemId : '').trim();
+      const name = (l.itemName || '').trim();
+      const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
+      const val = (l.itemId || code || name).trim().toLowerCase();
+      if (val && !map.has(val)) {
+        map.set(val, { value: l.itemId || code || name, label });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [masterData?.items, itemRollups, allLogs]);
 
   // Custom Date Range State (defaults to past 30 days up to today)
   const [fromDate, setFromDate] = useState<string>(() => {
@@ -154,6 +194,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   useEffect(() => {
     if (selectedLine) {
       setLineFilter(selectedLine);
+      setMachineLineFilter(selectedLine);
     }
   }, [selectedLine]);
 
@@ -570,6 +611,16 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
     let list = Array.from(map.values());
 
+    if (itemDropdownFilter && itemDropdownFilter !== 'all') {
+      const target = itemDropdownFilter.trim().toLowerCase();
+      list = list.filter(
+        (it) =>
+          it.itemId.trim().toLowerCase() === target ||
+          it.itemCode.trim().toLowerCase() === target ||
+          it.itemName.trim().toLowerCase() === target
+      );
+    }
+
     if (itemSearchQuery.trim()) {
       const q = itemSearchQuery.trim().toLowerCase();
       list = list.filter(
@@ -581,12 +632,40 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     }
 
     return list.sort((a, b) => b.periodQty - a.periodQty || b.tillNowQty - a.tillNowQty);
-  }, [itemRollups, filteredLogs, itemSearchQuery]);
+  }, [itemRollups, filteredLogs, itemDropdownFilter, itemSearchQuery]);
+
+  // Aggregate totals for the filtered item summary rows
+  const itemSummaryTotals = useMemo(() => {
+    const periodQty = itemSummaryRows.reduce((acc, it) => acc + it.periodQty, 0);
+    const periodStd = itemSummaryRows.reduce((acc, it) => acc + it.periodStd, 0);
+    const periodRework = itemSummaryRows.reduce((acc, it) => acc + it.periodRework, 0);
+    const todayQty = itemSummaryRows.reduce((acc, it) => acc + it.todayQty, 0);
+    const mtdQty = itemSummaryRows.reduce((acc, it) => acc + it.mtdQty, 0);
+    const tillNowQty = itemSummaryRows.reduce((acc, it) => acc + it.tillNowQty, 0);
+    const tillNowStd = itemSummaryRows.reduce((acc, it) => acc + it.tillNowStd, 0);
+    const tillNowRework = itemSummaryRows.reduce((acc, it) => acc + it.tillNowRework, 0);
+    const eff = periodStd > 0 ? Math.round((periodQty / periodStd) * 100) : null;
+
+    return {
+      periodQty,
+      periodStd,
+      periodRework,
+      todayQty,
+      mtdQty,
+      tillNowQty,
+      tillNowStd,
+      tillNowRework,
+      eff,
+      count: itemSummaryRows.length,
+    };
+  }, [itemSummaryRows]);
 
   // Section 3: Machine-wise Detailed Efficiency Matrix
   const machineMetrics = useMemo(() => {
     const relevantMachines =
-      lineFilter === 'all' ? machines : machines.filter((m) => (m.line || 'Line 1') === lineFilter);
+      machineLineFilter === 'all'
+        ? machines
+        : machines.filter((m) => (m.line || 'Line 1') === machineLineFilter);
 
     return relevantMachines.map((machine) => {
       const machLogs = filteredLogs.filter(
@@ -598,7 +677,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       const std = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
       const act = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
       const rework = machLogs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-      const downtime = Number(machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2));
+      const downtime = Number(
+        machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2)
+      );
       const efficiency = std > 0 ? Math.round((act / std) * 100) : null;
 
       const filterShift = (prefix: string) =>
@@ -620,6 +701,41 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       const cStd = cLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
       const cEff = cStd > 0 ? Math.round((cAct / cStd) * 100) : null;
 
+      const activeShifts: { name: string; eff: number; act: number; std: number }[] = [];
+      if (aEff !== null) activeShifts.push({ name: 'Shift A', eff: aEff, act: aAct, std: aStd });
+      if (bEff !== null) activeShifts.push({ name: 'Shift B', eff: bEff, act: bAct, std: bStd });
+      if (cEff !== null) activeShifts.push({ name: 'Shift C', eff: cEff, act: cAct, std: cStd });
+
+      const shiftsOperatedText = isOperating ? `${activeShifts.length} / 3 shifts` : '0 / 3 (Idle)';
+
+      let bestWorstHighlight: {
+        text: string;
+        spread: number | null;
+        isHighSpread: boolean;
+      } = {
+        text: '—',
+        spread: null,
+        isHighSpread: false,
+      };
+
+      if (activeShifts.length >= 2) {
+        const sorted = [...activeShifts].sort((x, y) => y.eff - x.eff);
+        const best = sorted[0];
+        const worst = sorted[sorted.length - 1];
+        const diff = best.eff - worst.eff;
+        bestWorstHighlight = {
+          text: `Best: ${best.name} (${best.eff}%) | Worst: ${worst.name} (${worst.eff}%)`,
+          spread: diff,
+          isHighSpread: diff >= 10,
+        };
+      } else if (activeShifts.length === 1) {
+        bestWorstHighlight = {
+          text: `${activeShifts[0].name} only (${activeShifts[0].eff}%)`,
+          spread: null,
+          isHighSpread: false,
+        };
+      }
+
       const latestOperator = activeLogs[activeLogs.length - 1]?.operatorName || '—';
       const latestItem = activeLogs[activeLogs.length - 1]?.itemName || '—';
 
@@ -635,24 +751,26 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         rework,
         downtime,
         efficiency,
+        shiftsOperatedCount: activeShifts.length,
+        shiftsOperatedText,
         aAct,
         aEff,
         bAct,
         bEff,
         cAct,
         cEff,
+        bestWorstHighlight,
         latestOperator,
         latestItem,
         hasData: machLogs.length > 0,
       };
     });
-  }, [machines, filteredLogs, lineFilter]);
+  }, [machines, filteredLogs, machineLineFilter]);
 
   // Filtered machine metrics for display based on showIdleMachines toggle
   const visibleMachineMetrics = useMemo(() => {
     if (showIdleMachines) return machineMetrics;
-    const active = machineMetrics.filter((m) => m.isOperating || m.hasData);
-    return active.length > 0 ? active : machineMetrics;
+    return machineMetrics.filter((m) => m.isOperating || m.hasData);
   }, [machineMetrics, showIdleMachines]);
 
   // Sorted machine downtime for Pareto list
@@ -936,208 +1054,36 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         </div>
       </div>
 
-      {/* SECTION 1: Line Efficiency & Shift-Wise Comparison Table */}
-      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
-              <Layers className="w-4 h-4 text-slate-700" />
-              <span>Line Efficiency & Shift-Wise Comparison</span>
-            </h3>
-            <p className="text-xs text-slate-500">
-              Evaluated strictly on active machines (Std Output &gt; 0). Idle machines never drag down line efficiency.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              <span>≥ 85% Target</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-amber-500" />
-              <span>75-84% Moderate</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-rose-500" />
-              <span>&lt; 75% Critical</span>
-            </span>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto border border-slate-200 rounded">
-          <table className="w-full text-xs text-left border-collapse">
-            <thead className="bg-slate-900 text-slate-200 text-[11px] font-semibold uppercase">
-              <tr>
-                <th className="px-3 py-2 border-r border-slate-800">Production Line</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Operating Units</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Target (Std)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Actual (Pcs)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Line Eff %</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A (7AM-3:30PM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B (3:30PM-12AM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C (12AM-7AM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Shift Spread</th>
-                <th className="px-3 py-2 text-center">Downtime</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 font-mono">
-              {lineComparisonData.lines.map((line) => (
-                <tr key={line.lineName} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
-                    {line.lineName}
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-slate-700 whitespace-nowrap">
-                    <span className="font-semibold text-emerald-800">{line.activeCount}</span>
-                    <span className="text-slate-400"> / {line.totalMachines} active</span>
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-slate-600">{line.std}</td>
-                  <td className="px-2.5 py-2 text-center font-bold text-slate-900">{line.act}</td>
-                  <td className="px-2.5 py-2 text-center">
-                    {line.std > 0 ? (
-                      <span
-                        className={`px-2 py-0.5 rounded text-xs font-extrabold ${
-                          line.eff >= 85
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : line.eff >= 75
-                            ? 'bg-amber-100 text-amber-800'
-                            : 'bg-rose-100 text-rose-800'
-                        }`}
-                      >
-                        {line.eff}%
-                      </span>
-                    ) : (
-                      <span className="text-slate-400 font-sans italic text-[11px]">No Target</span>
-                    )}
-                  </td>
-                  {/* Shift A */}
-                  <td className="px-2.5 py-2 text-center bg-slate-50/60">
-                    {line.aEff !== null ? (
-                      <div>
-                        <span className="font-bold text-slate-800">{line.aAct} pcs</span>
-                        <span className="text-slate-500 text-[10px] ml-1">({line.aEff}%)</span>
-                      </div>
-                    ) : (
-                      <span className="text-slate-400 text-[11px]">Idle</span>
-                    )}
-                  </td>
-                  {/* Shift B */}
-                  <td className="px-2.5 py-2 text-center bg-slate-50/60">
-                    {line.bEff !== null ? (
-                      <div>
-                        <span className="font-bold text-slate-800">{line.bAct} pcs</span>
-                        <span className="text-slate-500 text-[10px] ml-1">({line.bEff}%)</span>
-                      </div>
-                    ) : (
-                      <span className="text-slate-400 text-[11px]">Idle</span>
-                    )}
-                  </td>
-                  {/* Shift C */}
-                  <td className="px-2.5 py-2 text-center bg-slate-50/60">
-                    {line.cEff !== null ? (
-                      <div>
-                        <span className="font-bold text-slate-800">{line.cAct} pcs</span>
-                        <span className="text-slate-500 text-[10px] ml-1">({line.cEff}%)</span>
-                      </div>
-                    ) : (
-                      <span className="text-slate-400 text-[11px]">Idle</span>
-                    )}
-                  </td>
-                  {/* Shift Spread */}
-                  <td className="px-2.5 py-2 text-center">
-                    {line.spread !== null ? (
-                      <span
-                        className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
-                          line.spread >= 15
-                            ? 'bg-rose-100 text-rose-800 border border-rose-300'
-                            : line.spread >= 10
-                            ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                            : 'text-slate-600'
-                        }`}
-                        title={line.spread >= 10 ? 'High efficiency disparity between shifts' : undefined}
-                      >
-                        {line.spread}% spread
-                      </span>
-                    ) : (
-                      <span className="text-slate-400 text-[11px]">Single Shift</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-center text-amber-800 font-bold">{line.totalBd}m</td>
-                </tr>
-              ))}
-            </tbody>
-            {/* Plant Total Footer Row */}
-            <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
-              <tr>
-                <td className="px-3 py-2.5 font-sans uppercase tracking-tight text-xs">
-                  {lineComparisonData.plantTotal.lineName}
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-emerald-800">
-                  {lineComparisonData.plantTotal.activeCount} / {lineComparisonData.plantTotal.totalMachines} active
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-700">{lineComparisonData.plantTotal.std}</td>
-                <td className="px-2.5 py-2.5 text-center text-slate-950 font-black">{lineComparisonData.plantTotal.act}</td>
-                <td className="px-2.5 py-2.5 text-center">
-                  <span
-                    className={`px-2.5 py-1 rounded text-xs font-black ${
-                      lineComparisonData.plantTotal.eff >= 85
-                        ? 'bg-emerald-600 text-white'
-                        : lineComparisonData.plantTotal.eff >= 75
-                        ? 'bg-amber-500 text-slate-950'
-                        : 'bg-rose-600 text-white'
-                    }`}
-                  >
-                    {lineComparisonData.plantTotal.eff}%
-                  </span>
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-800">
-                  {lineComparisonData.plantTotal.aEff !== null ? (
-                    <span>{lineComparisonData.plantTotal.aAct} ({lineComparisonData.plantTotal.aEff}%)</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-800">
-                  {lineComparisonData.plantTotal.bEff !== null ? (
-                    <span>{lineComparisonData.plantTotal.bAct} ({lineComparisonData.plantTotal.bEff}%)</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-800">
-                  {lineComparisonData.plantTotal.cEff !== null ? (
-                    <span>{lineComparisonData.plantTotal.cAct} ({lineComparisonData.plantTotal.cEff}%)</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-2.5 py-2.5 text-center">
-                  {lineComparisonData.plantTotal.spread !== null ? (
-                    <span className="font-bold text-slate-800">{lineComparisonData.plantTotal.spread}%</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-3 py-2.5 text-center text-amber-800">{lineComparisonData.plantTotal.totalBd}m</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      </div>
-
-      {/* SECTION 2: Item Production Summary (Selected Period, Today, MTD, All-Time Till Now) */}
+      {/* SECTION 1: Item Production Tracker & Temporal Progress (Today, MTD, All-Time Till Now) */}
       <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
               <Package className="w-4 h-4 text-slate-700" />
-              <span>Item Production Totals & Progress Summary</span>
+              <span>Item Production Tracker & Temporal Progress</span>
             </h3>
             <p className="text-xs text-slate-500">
-              Aggregated actual production quantities: Selected Period, Today, Month-to-Date (MTD), and All-Time Till Now.
+              Real-time part production tracking across temporal horizons: Selected Period, Today, Month-to-Date (MTD), and Total Till Now (All-Time).
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Part Dropdown Filter */}
+            <select
+              value={itemDropdownFilter}
+              onChange={(e) => setItemDropdownFilter(e.target.value)}
+              className="bg-white border border-slate-300 text-xs font-medium text-slate-700 rounded px-2.5 py-1 focus:outline-none focus:border-slate-800 max-w-[200px] truncate"
+              title="Filter by specific item"
+            >
+              <option value="all">All Items (Plant-wide)</option>
+              {uniquePartOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
+            {/* Part Search Box */}
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input
@@ -1145,9 +1091,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 placeholder="Search part code or name..."
                 value={itemSearchQuery}
                 onChange={(e) => setItemSearchQuery(e.target.value)}
-                className="pl-8 pr-3 py-1 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none w-52 sm:w-64"
+                className="pl-8 pr-3 py-1 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none w-48 sm:w-56"
               />
             </div>
+
             {isLoadingRollups && (
               <span className="text-[11px] text-slate-400 font-mono animate-pulse">Syncing...</span>
             )}
@@ -1160,12 +1107,12 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               <tr>
                 <th className="px-3 py-2 border-r border-slate-800">Part Code</th>
                 <th className="px-3 py-2 border-r border-slate-800">Item Name</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/80">Selected Period (Pcs)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Today Qty</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">MTD Qty</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center font-bold text-amber-300">Total Till Now</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/80">Selected Range (Pcs)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Today Output</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Month-to-Date (MTD)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center font-bold text-amber-300">Total Till Now (All-Time)</th>
                 <th className="px-2.5 py-2 border-r border-slate-800 text-center">Till Now Target</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Till Now Rework</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Rework Defect</th>
                 <th className="px-3 py-2 text-center">Period Eff %</th>
               </tr>
             </thead>
@@ -1219,11 +1166,253 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 })
               )}
             </tbody>
+            {itemSummaryRows.length > 0 && (
+              <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
+                <tr>
+                  <td colSpan={2} className="px-3 py-2 font-sans uppercase text-xs tracking-tight">
+                    TOTAL ({itemSummaryTotals.count} Parts)
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-slate-950 font-black bg-slate-200/50">
+                    {itemSummaryTotals.periodQty}
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-slate-800">
+                    {itemSummaryTotals.todayQty}
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-slate-800">
+                    {itemSummaryTotals.mtdQty}
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-amber-900 font-black bg-amber-100/40">
+                    {itemSummaryTotals.tillNowQty}
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-slate-700">
+                    {itemSummaryTotals.tillNowStd}
+                  </td>
+                  <td className="px-2.5 py-2 text-center text-rose-700">
+                    {itemSummaryTotals.tillNowRework}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    {itemSummaryTotals.eff !== null ? (
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-black ${
+                          itemSummaryTotals.eff >= 85
+                            ? 'bg-emerald-600 text-white'
+                            : itemSummaryTotals.eff >= 75
+                            ? 'bg-amber-500 text-slate-950'
+                            : 'bg-rose-600 text-white'
+                        }`}
+                      >
+                        {itemSummaryTotals.eff}%
+                      </span>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       </div>
 
-      {/* SECTION 3: Machine Efficiency Matrix (with Idle Filter) */}
+      {/* SECTION 2: Line Efficiency & Shift-to-Shift Comparison Table */}
+      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
+              <Layers className="w-4 h-4 text-slate-700" />
+              <span>Line Efficiency & Shift-to-Shift Comparison</span>
+            </h3>
+            <p className="text-xs text-slate-500">
+              Evaluated strictly on active machines (Std Output &gt; 0). Idle machines never drag down line efficiency.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span>≥ 85% Target</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-amber-500" />
+              <span>75-84% Moderate</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-rose-500" />
+              <span>&lt; 75% Critical</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto border border-slate-200 rounded">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead className="bg-slate-900 text-slate-200 text-[11px] font-semibold uppercase">
+              <tr>
+                <th className="px-3 py-2 border-r border-slate-800">Production Line</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Operating Footprint</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Target (Std)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Actual (Pcs)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Line Eff %</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A (7AM-3:30PM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B (3:30PM-12AM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C (12AM-7AM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Shift Spread</th>
+                <th className="px-3 py-2 text-center">Downtime</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 font-mono">
+              {lineComparisonData.lines.map((line) => {
+                const footprintPct = line.totalMachines > 0 ? Math.round((line.activeCount / line.totalMachines) * 100) : 0;
+                return (
+                  <tr key={line.lineName} className="hover:bg-slate-50">
+                    <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
+                      {line.lineName}
+                    </td>
+                    <td className="px-2.5 py-2 text-center text-slate-700 whitespace-nowrap">
+                      <span className="font-semibold text-emerald-800">{line.activeCount}</span>
+                      <span className="text-slate-400"> / {line.totalMachines} active </span>
+                      <span className="text-slate-500 font-mono text-[11px]">({footprintPct}%)</span>
+                    </td>
+                    <td className="px-2.5 py-2 text-center text-slate-600">{line.std}</td>
+                    <td className="px-2.5 py-2 text-center font-bold text-slate-900">{line.act}</td>
+                    <td className="px-2.5 py-2 text-center">
+                      {line.std > 0 ? (
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-extrabold ${
+                            line.eff >= 85
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : line.eff >= 75
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {line.eff}%
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 font-sans italic text-[11px]">No Target</span>
+                      )}
+                    </td>
+                    {/* Shift A */}
+                    <td className="px-2.5 py-2 text-center bg-slate-50/60">
+                      {line.aEff !== null ? (
+                        <div>
+                          <span className="font-bold text-slate-800">{line.aAct} pcs</span>
+                          <span className="text-slate-500 text-[10px] ml-1">({line.aEff}%)</span>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 text-[11px]">Idle</span>
+                      )}
+                    </td>
+                    {/* Shift B */}
+                    <td className="px-2.5 py-2 text-center bg-slate-50/60">
+                      {line.bEff !== null ? (
+                        <div>
+                          <span className="font-bold text-slate-800">{line.bAct} pcs</span>
+                          <span className="text-slate-500 text-[10px] ml-1">({line.bEff}%)</span>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 text-[11px]">Idle</span>
+                      )}
+                    </td>
+                    {/* Shift C */}
+                    <td className="px-2.5 py-2 text-center bg-slate-50/60">
+                      {line.cEff !== null ? (
+                        <div>
+                          <span className="font-bold text-slate-800">{line.cAct} pcs</span>
+                          <span className="text-slate-500 text-[10px] ml-1">({line.cEff}%)</span>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 text-[11px]">Idle</span>
+                      )}
+                    </td>
+                    {/* Shift Spread */}
+                    <td className="px-2.5 py-2 text-center">
+                      {line.spread !== null ? (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                            line.spread >= 15
+                              ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                              : line.spread >= 10
+                              ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                              : 'text-slate-600'
+                          }`}
+                          title={line.spread >= 10 ? 'High efficiency disparity between shifts (≥ 10%)' : undefined}
+                        >
+                          {line.spread}% spread
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 text-[11px]">Single Shift</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-center text-amber-800 font-bold">{line.totalBd}m</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            {/* Plant Total Footer Row */}
+            <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
+              <tr>
+                <td className="px-3 py-2.5 font-sans uppercase tracking-tight text-xs">
+                  {lineComparisonData.plantTotal.lineName}
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-emerald-800">
+                  {lineComparisonData.plantTotal.activeCount} / {lineComparisonData.plantTotal.totalMachines} active (
+                  {lineComparisonData.plantTotal.totalMachines > 0
+                    ? Math.round(
+                        (lineComparisonData.plantTotal.activeCount / lineComparisonData.plantTotal.totalMachines) * 100
+                      )
+                    : 0}
+                  %)
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-700">{lineComparisonData.plantTotal.std}</td>
+                <td className="px-2.5 py-2.5 text-center text-slate-950 font-black">{lineComparisonData.plantTotal.act}</td>
+                <td className="px-2.5 py-2.5 text-center">
+                  <span
+                    className={`px-2.5 py-1 rounded text-xs font-black ${
+                      lineComparisonData.plantTotal.eff >= 85
+                        ? 'bg-emerald-600 text-white'
+                        : lineComparisonData.plantTotal.eff >= 75
+                        ? 'bg-amber-500 text-slate-950'
+                        : 'bg-rose-600 text-white'
+                    }`}
+                  >
+                    {lineComparisonData.plantTotal.eff}%
+                  </span>
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-800">
+                  {lineComparisonData.plantTotal.aEff !== null ? (
+                    <span>{lineComparisonData.plantTotal.aAct} ({lineComparisonData.plantTotal.aEff}%)</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-800">
+                  {lineComparisonData.plantTotal.bEff !== null ? (
+                    <span>{lineComparisonData.plantTotal.bAct} ({lineComparisonData.plantTotal.bEff}%)</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-2.5 py-2.5 text-center text-slate-800">
+                  {lineComparisonData.plantTotal.cEff !== null ? (
+                    <span>{lineComparisonData.plantTotal.cAct} ({lineComparisonData.plantTotal.cEff}%)</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-2.5 py-2.5 text-center">
+                  {lineComparisonData.plantTotal.spread !== null ? (
+                    <span className="font-bold text-slate-800">{lineComparisonData.plantTotal.spread}%</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-3 py-2.5 text-center text-amber-800">{lineComparisonData.plantTotal.totalBd}m</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      {/* SECTION 3: Machine Efficiency Matrix & Shift Distribution */}
       <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -1232,11 +1421,28 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               <span>Machine Efficiency Matrix & Shift Distribution</span>
             </h3>
             <p className="text-xs text-slate-500">
-              Machine-level performance across active shifts with partial-line status tracking.
+              Machine-level performance across active shifts with partial-line status tracking and shift variance analysis.
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Machine Line Filter */}
+            <select
+              value={machineLineFilter}
+              onChange={(e) => setMachineLineFilter(e.target.value)}
+              className="bg-white border border-slate-300 text-xs font-medium text-slate-700 rounded px-2.5 py-1 focus:outline-none focus:border-slate-800"
+            >
+              <option value="all">All Lines (Machines)</option>
+              {((masterData?.lines && masterData.lines.length > 0)
+                ? masterData.lines.filter((l) => l.isActive !== false).map((l) => l.name)
+                : PRODUCTION_LINES
+              ).map((line) => (
+                <option key={line} value={line}>
+                  {line}
+                </option>
+              ))}
+            </select>
+
             <label className="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -1256,81 +1462,161 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 <th className="px-3 py-2 border-r border-slate-800">Machine Name</th>
                 <th className="px-2 py-2 border-r border-slate-800">Code</th>
                 <th className="px-2.5 py-2 border-r border-slate-800">Line</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Status</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Shifts Operated</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Std</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Actual</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Machine Eff %</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A (7AM-3:30PM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B (3:30PM-12AM)</th>
+                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C (12AM-7AM)</th>
+                <th className="px-3 py-2 border-r border-slate-800 text-center">Best / Worst Shift</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Downtime</th>
                 <th className="px-2 py-2 text-center">Rework</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 font-mono">
-              {visibleMachineMetrics.map((m) => (
-                <tr key={m.id} className="hover:bg-slate-50">
-                  <td className="px-3 py-1.5 font-sans font-bold text-slate-900 whitespace-nowrap">
-                    {m.name}
+              {visibleMachineMetrics.length === 0 ? (
+                <tr>
+                  <td colSpan={13} className="text-center py-6 text-slate-500 font-sans">
+                    No active machines found for current filters.
+                    <button
+                      type="button"
+                      onClick={() => setShowIdleMachines(true)}
+                      className="ml-2 font-semibold text-slate-900 underline hover:text-slate-700"
+                    >
+                      Show Idle Machines
+                    </button>
                   </td>
-                  <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{m.code}</td>
-                  <td className="px-2.5 py-1.5 font-sans text-slate-700 whitespace-nowrap">{m.line}</td>
-                  <td className="px-2.5 py-1.5 text-center">
-                    {m.isOperating ? (
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                        Active
-                      </span>
-                    ) : (
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500">
-                        Idle
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-2 py-1.5 text-center text-slate-600">{m.std}</td>
-                  <td className="px-2 py-1.5 text-center font-bold text-slate-900">{m.act}</td>
-                  <td className="px-2 py-1.5 text-center">
-                    {m.efficiency !== null ? (
-                      <span
-                        className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
-                          m.efficiency >= 85
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : m.efficiency >= 75
-                            ? 'bg-amber-100 text-amber-800'
-                            : 'bg-rose-100 text-rose-800'
-                        }`}
-                      >
-                        {m.efficiency}%
-                      </span>
-                    ) : (
-                      <span className="text-slate-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-2.5 py-1.5 text-center bg-slate-50/60">
-                    {m.aEff !== null ? (
-                      <span>{m.aAct} <strong className="text-[10px]">({m.aEff}%)</strong></span>
-                    ) : (
-                      <span className="text-slate-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-2.5 py-1.5 text-center bg-slate-50/60">
-                    {m.bEff !== null ? (
-                      <span>{m.bAct} <strong className="text-[10px]">({m.bEff}%)</strong></span>
-                    ) : (
-                      <span className="text-slate-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-2.5 py-1.5 text-center bg-slate-50/60">
-                    {m.cEff !== null ? (
-                      <span>{m.cAct} <strong className="text-[10px]">({m.cEff}%)</strong></span>
-                    ) : (
-                      <span className="text-slate-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-2 py-1.5 text-center text-amber-700 font-bold">{m.downtime}m</td>
-                  <td className="px-2 py-1.5 text-center text-rose-700">{m.rework}</td>
                 </tr>
-              ))}
+              ) : (
+                visibleMachineMetrics.map((m) => (
+                  <tr key={m.id} className="hover:bg-slate-50">
+                    <td className="px-3 py-1.5 font-sans font-bold text-slate-900 whitespace-nowrap">
+                      {m.name}
+                    </td>
+                    <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{m.code}</td>
+                    <td className="px-2.5 py-1.5 font-sans text-slate-700 whitespace-nowrap">{m.line}</td>
+                    <td className="px-2.5 py-1.5 text-center whitespace-nowrap">
+                      {m.isOperating ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                          {m.shiftsOperatedText}
+                        </span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500">
+                          0 / 3 (Idle)
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5 text-center text-slate-600">{m.std}</td>
+                    <td className="px-2 py-1.5 text-center font-bold text-slate-900">{m.act}</td>
+                    <td className="px-2 py-1.5 text-center">
+                      {m.efficiency !== null ? (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                            m.efficiency >= 85
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : m.efficiency >= 75
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {m.efficiency}%
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-2.5 py-1.5 text-center bg-slate-50/60 whitespace-nowrap">
+                      {m.aEff !== null ? (
+                        <span>
+                          {m.aAct} <strong className="text-[10px]">({m.aEff}%)</strong>
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-2.5 py-1.5 text-center bg-slate-50/60 whitespace-nowrap">
+                      {m.bEff !== null ? (
+                        <span>
+                          {m.bAct} <strong className="text-[10px]">({m.bEff}%)</strong>
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-2.5 py-1.5 text-center bg-slate-50/60 whitespace-nowrap">
+                      {m.cEff !== null ? (
+                        <span>
+                          {m.cAct} <strong className="text-[10px]">({m.cEff}%)</strong>
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 text-center whitespace-nowrap font-sans">
+                      {m.bestWorstHighlight.isHighSpread ? (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300"
+                          title="Disparity ≥ 10% between shifts"
+                        >
+                          {m.bestWorstHighlight.text}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600 text-[11px]">
+                          {m.bestWorstHighlight.text}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5 text-center text-amber-700 font-bold">{m.downtime}m</td>
+                    <td className="px-2 py-1.5 text-center text-rose-700">{m.rework}</td>
+                  </tr>
+                ))
+              )}
             </tbody>
+            {visibleMachineMetrics.length > 0 && (
+              <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
+                {(() => {
+                  const totalStd = visibleMachineMetrics.reduce((acc, m) => acc + m.std, 0);
+                  const totalAct = visibleMachineMetrics.reduce((acc, m) => acc + m.act, 0);
+                  const totalDowntime = Number(
+                    visibleMachineMetrics.reduce((acc, m) => acc + m.downtime, 0).toFixed(2)
+                  );
+                  const totalRework = visibleMachineMetrics.reduce((acc, m) => acc + m.rework, 0);
+                  const eff = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : null;
+                  return (
+                    <tr>
+                      <td colSpan={4} className="px-3 py-2 font-sans uppercase text-xs tracking-tight">
+                        TOTAL VISIBLE MACHINES ({visibleMachineMetrics.length})
+                      </td>
+                      <td className="px-2 py-2 text-center text-slate-700">{totalStd}</td>
+                      <td className="px-2 py-2 text-center text-slate-950 font-black">{totalAct}</td>
+                      <td className="px-2 py-2 text-center">
+                        {eff !== null ? (
+                          <span
+                            className={`px-2 py-0.5 rounded text-xs font-black ${
+                              eff >= 85
+                                ? 'bg-emerald-600 text-white'
+                                : eff >= 75
+                                ? 'bg-amber-500 text-slate-950'
+                                : 'bg-rose-600 text-white'
+                            }`}
+                          >
+                            {eff}%
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <td colSpan={4} className="px-2 py-2 text-center text-slate-400 font-sans font-normal text-[11px]">
+                        Shift-level summaries displayed in Section 2 above
+                      </td>
+                      <td className="px-2 py-2 text-center text-amber-800 font-bold">{totalDowntime}m</td>
+                      <td className="px-2 py-2 text-center text-rose-700">{totalRework}</td>
+                    </tr>
+                  );
+                })()}
+              </tfoot>
+            )}
           </table>
         </div>
       </div>
@@ -1567,6 +1853,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 <th className="px-2.5 py-2 border-r border-slate-800">Line</th>
                 <th className="px-3 py-2 border-r border-slate-800">Shift</th>
                 <th className="px-3 py-2 border-r border-slate-800">Machine</th>
+                <th className="px-2 py-2 border-r border-slate-800 text-center">Run</th>
                 <th className="px-3 py-2 border-r border-slate-800">Operator</th>
                 <th className="px-3 py-2 border-r border-slate-800">Item</th>
                 <th className="px-2 py-2 border-r border-slate-800 text-center">Cycle Time</th>
@@ -1582,7 +1869,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             <tbody className="divide-y divide-slate-200 font-mono">
               {filteredLogs.length === 0 ? (
                 <tr>
-                  <td colSpan={14} className="text-center py-8 text-slate-500 font-sans">
+                  <td colSpan={15} className="text-center py-8 text-slate-500 font-sans">
                     No records found matching current date/shift/line filters.
                   </td>
                 </tr>
@@ -1606,6 +1893,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{row.shift.split(' ')[0]}</td>
                       <td className="px-3 py-1.5 font-bold font-sans text-slate-900 whitespace-nowrap">
                         {row.machineName}
+                      </td>
+                      <td className="px-2 py-1.5 text-center text-slate-700 font-semibold whitespace-nowrap">
+                        #{row.runNo || 1}
                       </td>
                       <td className="px-3 py-1.5 font-sans text-slate-700 whitespace-nowrap">
                         {row.operatorName || '—'}

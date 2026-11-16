@@ -17,6 +17,7 @@ import {
   getShiftSheetRows,
   saveShiftSheetRows,
   updateSingleMachineLog,
+  saveMachineRuns,
   getMasterData,
   getFactoryTimeContext,
   checkShiftEditWindow,
@@ -29,6 +30,7 @@ import {
 import { exportShiftToExcel } from "@/services/excelExport";
 import {
   calculateShiftTimeBalance,
+  calculateMachineGroupTimeBalance,
   calculateTotalBreakdown,
   evaluateShiftLock,
 } from "@/services/storageService";
@@ -379,44 +381,57 @@ export default function DashboardClient({
       rowsToSave[0]?.totalWorkingMinutes ??
       0;
 
-    const unbalancedRows = rowsToSave.filter((row) => {
+    const touchedMachineIds = new Set<string>();
+    rowsToSave.forEach((row) => {
       const isTouched =
         !!row.itemId ||
         !!row.operatorName ||
         (row.actualOutput || 0) > 0 ||
         calculateTotalBreakdown(row.breakdown) > 0 ||
         (row.cycleTime || 0) > 0;
-      if (!isTouched) return false;
-      const balance = calculateShiftTimeBalance(row, shiftWorkingMinutes);
-      return !balance.isBalanced;
+      if (isTouched) {
+        touchedMachineIds.add(row.machineId);
+      }
     });
 
-    if (unbalancedRows.length > 0) {
-      const firstBad = unbalancedRows[0];
-      const bal = calculateShiftTimeBalance(firstBad, shiftWorkingMinutes);
+    const unbalancedMachineIds: string[] = [];
+    const machineBalances = new Map<string, ReturnType<typeof calculateMachineGroupTimeBalance>>();
+
+    touchedMachineIds.forEach((mId) => {
+      const balance = calculateMachineGroupTimeBalance(rowsToSave, mId, shiftWorkingMinutes);
+      machineBalances.set(mId, balance);
+      if (!balance.isBalanced) {
+        unbalancedMachineIds.push(mId);
+      }
+    });
+
+    if (unbalancedMachineIds.length > 0) {
+      const firstBadId = unbalancedMachineIds[0];
+      const bal = machineBalances.get(firstBadId)!;
+      const firstBadRow = rowsToSave.find((r) => r.machineId === firstBadId)!;
       let details = '';
       if (bal.missingCycleTime) {
         details =
-          `• ERROR: Actual output (${firstBad.actualOutput} pcs) was entered, but Cycle Time is 0!\n` +
+          `• ERROR: Actual output was entered on ${firstBadRow.machineName}, but Cycle Time is 0!\n` +
           `• Productive time cannot be verified. Please select an Item with a cycle time or enter cycle time.`;
       } else if (bal.isProductionExceeded) {
         details =
-          `• ERROR: Actual output (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m = ${bal.productionMinutes} mins) exceeds shift duration (${bal.shiftMinutes} mins)!\n` +
+          `• ERROR: Total productive time across all runs on ${firstBadRow.machineName} (${bal.productionMinutes} mins) exceeds shift duration (${bal.shiftMinutes} mins)!\n` +
           `• Productive time alone is greater than shift timing. Please reduce Actual Output or verify cycle time.`;
       } else if (bal.isOver) {
         details =
           `• ERROR: Total productive time (${bal.productionMinutes}m) + breakdown (${bal.loggedBreakdownMinutes}m) = ${bal.totalAccountedMinutes} mins, which exceeds shift duration (${bal.shiftMinutes} mins) by ${Math.abs(bal.unaccountedMinutes)} mins!\n` +
-          `• Total productive time + total breakdown time must NOT exceed shift duration—it must be exactly equal.`;
+          `• Total productive time + total breakdown time across all runs on ${firstBadRow.machineName} must NOT exceed shift duration—it must be exactly equal.`;
       } else {
         details =
-          `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
+          `• Total Productive Time: ${bal.productionMinutes} mins\n` +
           `• Required Breakdown / Downtime: ${bal.requiredBreakdownMinutes} mins\n` +
           `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
-          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns (NO/DISC, CHANGE, POWER, or OPERATOR) so total time equals ${bal.shiftMinutes} mins.`;
+          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns so total time for ${firstBadRow.machineName} equals ${bal.shiftMinutes} mins.`;
       }
 
       alert(
-        `Shift Time Mismatch on ${firstBad.machineName} (Row #${firstBad.srNo}):\n\n` +
+        `Shift Time Mismatch on ${firstBadRow.machineName} (Row #${firstBadRow.srNo}):\n\n` +
           `• Shift Duration (from DB): ${bal.shiftMinutes} mins\n` +
           details
       );
@@ -474,17 +489,68 @@ export default function DashboardClient({
         const result = await updateSingleMachineLog(rowToSave);
         if (result.success && result.row) {
           const updatedRows = currentShiftRows.map((r) =>
-            r.machineId === result.row.machineId ? result.row : r
+            r.machineId === result.row.machineId && (r.runNo || 1) === (result.row.runNo || 1)
+              ? result.row
+              : r
           );
           setCurrentShiftRows(updatedRows);
           if (hasUnsavedDraft) writeDraft(updatedRows);
-          setStatusMessage(`Saved ${result.row.machineName}`);
+          setStatusMessage(`Saved ${result.row.machineName} (Run #${result.row.runNo || 1})`);
           setTimeout(() => setStatusMessage(null), 2500);
         }
       } catch (err: unknown) {
         console.error("Error saving kiosk log:", err);
         const msg =
           err instanceof Error ? err.message : "Failed to save machine log.";
+        setStatusMessage(msg);
+        setTimeout(() => setStatusMessage(null), 5000);
+      }
+    });
+  };
+
+  const handleSaveMachineRuns = async (machineRuns: MachineShiftRow[]) => {
+    if (isShiftLocked) {
+      setStatusMessage("Shift is locked — changes cannot be saved.");
+      setTimeout(() => setStatusMessage(null), 3000);
+      return;
+    }
+    if (!machineRuns || machineRuns.length === 0) return;
+
+    const sanitizedRuns = machineRuns.map((r) => ({
+      ...r,
+      shift: selectedShift || r.shift,
+      date: selectedDate || r.date,
+      line: selectedLine || r.line,
+    }));
+
+    startTransition(async () => {
+      try {
+        const result = await saveMachineRuns(sanitizedRuns);
+        if (result.success && result.rows) {
+          const targetMachineId = sanitizedRuns[0].machineId;
+          const firstTargetIdx = currentShiftRows.findIndex(
+            (r) => r.machineId === targetMachineId
+          );
+          const currentCount = currentShiftRows.filter(
+            (r) => r.machineId === targetMachineId
+          ).length;
+
+          const newRows = [...currentShiftRows];
+          if (firstTargetIdx >= 0) {
+            newRows.splice(firstTargetIdx, currentCount, ...result.rows);
+          } else {
+            newRows.push(...result.rows);
+          }
+
+          setCurrentShiftRows(newRows);
+          if (hasUnsavedDraft) writeDraft(newRows);
+          setStatusMessage(`Saved ${result.rows[0]?.machineName || "machine runs"}`);
+          setTimeout(() => setStatusMessage(null), 2500);
+        }
+      } catch (err: unknown) {
+        console.error("Error saving kiosk machine runs:", err);
+        const msg =
+          err instanceof Error ? err.message : "Failed to save machine runs.";
         setStatusMessage(msg);
         setTimeout(() => setStatusMessage(null), 5000);
       }
@@ -605,6 +671,7 @@ export default function DashboardClient({
             selectedMachineId={kioskMachineId}
             onSelectMachineId={setKioskMachineId}
             onSaveMachine={handleSaveSingleKioskRow}
+            onSaveMachineRuns={handleSaveMachineRuns}
             onRefreshMasterData={handleRefreshMasterData}
             onRowsChange={handleRowsChange}
             isSaving={isPending}

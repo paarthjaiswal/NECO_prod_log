@@ -51,6 +51,7 @@ export function formatRowForExport(row: MachineShiftRow): Record<string, string 
     "Shift": row.shift,
     "Line": row.line || "Line 1",
     "Sr No": row.srNo,
+    "Run No": row.runNo || 1,
     "Machine ID": row.machineId,
     "Machine Name": row.machineName,
     "Operator Name": row.operatorName || "",
@@ -170,7 +171,7 @@ function buildLineEfficiencyData(
 
     result.push({
       "Line Name": lineName,
-      "Operating Machines": `${activeMachineIds.size} / ${totalLineMachines} active`,
+      "Operating Machines": `${activeMachineIds.size} / ${totalLineMachines} active (${totalLineMachines > 0 ? Math.round((activeMachineIds.size / totalLineMachines) * 100) : 0}%)`,
       "Target (Std Pcs)": lineStd,
       "Actual Output (Pcs)": lineAct,
       "Variance (Pcs)": lineVariance,
@@ -204,7 +205,7 @@ function buildLineEfficiencyData(
 
   result.push({
     "Line Name": "TOTAL PLANT (ALL LINES)",
-    "Operating Machines": `${grandActiveMachinesSet.size} / ${grandTotalMachines} active`,
+    "Operating Machines": `${grandActiveMachinesSet.size} / ${grandTotalMachines} active (${grandTotalMachines > 0 ? Math.round((grandActiveMachinesSet.size / grandTotalMachines) * 100) : 0}%)`,
     "Target (Std Pcs)": grandStd,
     "Actual Output (Pcs)": grandAct,
     "Variance (Pcs)": grandAct - grandStd,
@@ -267,11 +268,32 @@ function buildMachineEfficiencyData(
     const cAct = shiftC.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
     const cEff = cStd > 0 ? `${Math.round((cAct / cStd) * 100)}%` : "—";
 
+    const activeShifts: { name: string; eff: number }[] = [];
+    if (aStd > 0) activeShifts.push({ name: "Shift A", eff: Math.round((aAct / aStd) * 100) });
+    if (bStd > 0) activeShifts.push({ name: "Shift B", eff: Math.round((bAct / bStd) * 100) });
+    if (cStd > 0) activeShifts.push({ name: "Shift C", eff: Math.round((cAct / cStd) * 100) });
+
+    const shiftsOperatedText = `${activeShifts.length} / 3 shifts`;
+
+    let bestWorstText = "—";
+    let shiftSpreadText = "—";
+    if (activeShifts.length >= 2) {
+      activeShifts.sort((x, y) => y.eff - x.eff);
+      const best = activeShifts[0];
+      const worst = activeShifts[activeShifts.length - 1];
+      const diff = best.eff - worst.eff;
+      shiftSpreadText = `${diff}%`;
+      bestWorstText = `Best: ${best.name} (${best.eff}%) / Worst: ${worst.name} (${worst.eff}%) [Δ ${diff}%]`;
+    } else if (activeShifts.length === 1) {
+      bestWorstText = `${activeShifts[0].name} only (${activeShifts[0].eff}%)`;
+    }
+
     return {
       "Machine Name": m.name,
       "Code": m.code || "",
       "Line": m.line || "Line 1",
       "Status": activeLogs.length > 0 ? "Active" : "Idle / Unassigned",
+      "Shifts Operated": shiftsOperatedText,
       "Scheduled Target (Std)": std,
       "Actual Output (Pcs)": act,
       "Variance": act - std,
@@ -282,6 +304,8 @@ function buildMachineEfficiencyData(
       "Shift B Eff %": bEff,
       "Shift C Output": cAct,
       "Shift C Eff %": cEff,
+      "Best / Worst Shift": bestWorstText,
+      "Shift Spread %": shiftSpreadText,
       "Downtime (mins)": downtime,
       "Rework (pcs)": rework,
     };
@@ -296,79 +320,86 @@ function buildItemProductionData(
   itemRollups?: ItemProductionRollup[],
   masterData?: MasterDataState
 ): Record<string, string | number>[] {
-  // If itemRollups are provided from Supabase RPC, map directly
-  if (itemRollups && itemRollups.length > 0) {
-    return itemRollups.map((roll) => {
-      const matchRows = rows.filter(
-        (r) =>
-          (roll.itemId && r.itemId === roll.itemId) ||
-          (roll.itemCode && (r.itemId === roll.itemCode || r.itemName.includes(roll.itemCode))) ||
-          (roll.itemName && r.itemName.toLowerCase() === roll.itemName.toLowerCase())
-      );
-      const periodAct = matchRows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const periodStd = matchRows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const periodEff = periodStd > 0 ? `${Math.round((periodAct / periodStd) * 100)}%` : "—";
-
-      return {
-        "Part Code": roll.itemCode || "—",
-        "Item Name": roll.itemName,
-        "Selected Period Qty": periodAct,
-        "Today Qty": roll.todayOutput,
-        "Month-to-Date (MTD) Qty": roll.mtdOutput,
-        "Total Till Now Qty": roll.tillNowOutput,
-        "Till Now Target (Std)": roll.tillNowStd,
-        "Till Now Rework (pcs)": roll.tillNowRework,
-        "Period Efficiency %": periodEff,
-      };
-    });
-  }
-
-  // Fallback: aggregate items directly from rows
-  const itemMap = new Map<
+  const map = new Map<
     string,
     {
+      itemId: string;
       itemCode: string;
       itemName: string;
       periodAct: number;
       periodStd: number;
       periodRework: number;
+      todayQty: number;
+      mtdQty: number;
+      tillNowQty: number;
+      tillNowStd: number;
+      tillNowRework: number;
     }
   >();
 
-  for (const r of rows) {
-    if (!r.itemId && !r.itemName) continue;
-    const key = (r.itemId || r.itemName).trim().toLowerCase();
-    if (!itemMap.has(key)) {
-      const masterItem = masterData?.items?.find(
-        (it) => it.id === r.itemId || it.itemCode === r.itemId || it.itemName === r.itemName
-      );
-      itemMap.set(key, {
-        itemCode: masterItem?.itemCode || r.itemId || "—",
-        itemName: masterItem?.itemName || r.itemName || "Unknown Item",
+  // 1. Seed from itemRollups if available
+  if (itemRollups && itemRollups.length > 0) {
+    for (const roll of itemRollups) {
+      const key = (roll.itemCode || roll.itemId || roll.itemName).trim().toLowerCase();
+      map.set(key, {
+        itemId: roll.itemId,
+        itemCode: roll.itemCode || "—",
+        itemName: roll.itemName,
         periodAct: 0,
         periodStd: 0,
         periodRework: 0,
+        todayQty: roll.todayOutput,
+        mtdQty: roll.mtdOutput,
+        tillNowQty: roll.tillNowOutput,
+        tillNowStd: roll.tillNowStd,
+        tillNowRework: roll.tillNowRework,
+      });
+    }
+  }
+
+  // 2. Accumulate period quantities from current rows
+  for (const r of rows) {
+    if (!r.itemId && !r.itemName) continue;
+    const key = (r.itemId || r.itemName).trim().toLowerCase();
+    if (!map.has(key)) {
+      const masterItem = masterData?.items?.find(
+        (it) => it.id === r.itemId || it.itemCode === r.itemId || it.itemName === r.itemName
+      );
+      map.set(key, {
+        itemId: r.itemId,
+        itemCode: masterItem?.itemCode || r.itemId || "—",
+        itemName: masterItem?.itemName || r.itemName || "Unknown Part",
+        periodAct: 0,
+        periodStd: 0,
+        periodRework: 0,
+        todayQty: 0,
+        mtdQty: 0,
+        tillNowQty: 0,
+        tillNowStd: 0,
+        tillNowRework: 0,
       });
     }
 
-    const entry = itemMap.get(key)!;
+    const entry = map.get(key)!;
     entry.periodAct += Number(r.actualOutput) || 0;
     entry.periodStd += Number(r.stdOutput) || 0;
     entry.periodRework += Number(r.rework) || 0;
   }
 
-  return Array.from(itemMap.values()).map((it) => ({
-    "Part Code": it.itemCode,
-    "Item Name": it.itemName,
-    "Selected Period Qty": it.periodAct,
-    "Today Qty": it.periodAct,
-    "Month-to-Date (MTD) Qty": it.periodAct,
-    "Total Till Now Qty": it.periodAct,
-    "Till Now Target (Std)": it.periodStd,
-    "Till Now Rework (pcs)": it.periodRework,
-    "Period Efficiency %":
-      it.periodStd > 0 ? `${Math.round((it.periodAct / it.periodStd) * 100)}%` : "—",
-  }));
+  return Array.from(map.values())
+    .sort((a, b) => b.periodAct - a.periodAct || b.tillNowQty - a.tillNowQty)
+    .map((it) => ({
+      "Part Code": it.itemCode,
+      "Item Name": it.itemName,
+      "Selected Period Qty": it.periodAct,
+      "Today Qty": it.todayQty,
+      "Month-to-Date (MTD) Qty": it.mtdQty,
+      "Total Till Now Qty": it.tillNowQty,
+      "Till Now Target (Std)": it.tillNowStd,
+      "Till Now Rework (pcs)": it.tillNowRework,
+      "Period Efficiency %":
+        it.periodStd > 0 ? `${Math.round((it.periodAct / it.periodStd) * 100)}%` : "—",
+    }));
 }
 
 /**
