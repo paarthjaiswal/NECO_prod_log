@@ -215,7 +215,14 @@ export function OperatorKiosk({
           stdOutput: 0,
           actualOutput: 0,
           rework: 0,
-          breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+          breakdown: {
+            noDisc: 0,
+            change: 0,
+            power: 0,
+            operator: 0,
+            machineBreakdown: 0,
+            fixProgSettings: 0,
+          },
           remarks: '',
         };
       });
@@ -459,7 +466,14 @@ export function OperatorKiosk({
           stdOutput: 0,
           actualOutput: 0,
           rework: 0,
-          breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+          breakdown: {
+            noDisc: 0,
+            change: 0,
+            power: 0,
+            operator: 0,
+            machineBreakdown: 0,
+            fixProgSettings: 0,
+          },
           remarks: "",
         };
         onRowsChange([...rows, newRow]);
@@ -532,7 +546,13 @@ export function OperatorKiosk({
   };
 
   const handleBreakdownStep = (
-    field: 'noDisc' | 'change' | 'power' | 'operator',
+    field:
+      | 'noDisc'
+      | 'change'
+      | 'power'
+      | 'operator'
+      | 'machineBreakdown'
+      | 'fixProgSettings',
     delta: number
   ) => {
     if (isShiftLocked || !draft) return;
@@ -549,7 +569,13 @@ export function OperatorKiosk({
   };
 
   const handleFillUnaccountedToField = (
-    field: 'noDisc' | 'change' | 'power' | 'operator',
+    field:
+      | 'noDisc'
+      | 'change'
+      | 'power'
+      | 'operator'
+      | 'machineBreakdown'
+      | 'fixProgSettings',
     unaccountedMins: number
   ) => {
     if (isShiftLocked || !draft || unaccountedMins <= 0) return;
@@ -1152,7 +1178,13 @@ export function OperatorKiosk({
   const pct = (mins: number) => calculateDowntimePct(mins, rowShiftMins);
 
   const BD_CARDS: {
-    key: 'noDisc' | 'change' | 'power' | 'operator';
+    key:
+      | 'noDisc'
+      | 'change'
+      | 'power'
+      | 'operator'
+      | 'machineBreakdown'
+      | 'fixProgSettings';
     title: string;
     subtitle: string;
     step1: number;
@@ -1190,6 +1222,22 @@ export function OperatorKiosk({
       step1: 10,
       step2: 20,
       badgeClass: 'bg-purple-50 text-purple-800 border-purple-200',
+    },
+    {
+      key: 'machineBreakdown',
+      title: 'BREAK DOWN',
+      subtitle: 'Machine / mechanical fault',
+      step1: 15,
+      step2: 30,
+      badgeClass: 'bg-orange-50 text-orange-800 border-orange-200',
+    },
+    {
+      key: 'fixProgSettings',
+      title: 'FIX/PROG SETTINGS',
+      subtitle: 'Fixture / program setting',
+      step1: 10,
+      step2: 20,
+      badgeClass: 'bg-indigo-50 text-indigo-800 border-indigo-200',
     },
   ];
 
@@ -2017,7 +2065,7 @@ export function OperatorKiosk({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {BD_CARDS.map((card) => {
               const val = Number(draft.breakdown?.[card.key] || 0);
               return (

@@ -44,12 +44,16 @@ export interface DbShiftLogRow {
   bd_change: number | null;
   bd_power: number | null;
   bd_operator: number | null;
+  bd_machine?: number | null;
+  bd_fix_prog?: number | null;
   // Read-only PostgreSQL GENERATED ALWAYS columns (present on SELECT, excluded on UPSERT)
   total_bd_minutes?: number | null;
   bd_no_disc_pct?: number | null;
   bd_change_pct?: number | null;
   bd_power_pct?: number | null;
   bd_operator_pct?: number | null;
+  bd_machine_pct?: number | null;
+  bd_fix_prog_pct?: number | null;
   total_bd_pct?: number | null;
   remarks: string | null;
   updated_at?: string | null;
@@ -221,8 +225,10 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
   const change = Number(dbRow.bd_change ?? 0);
   const power = Number(dbRow.bd_power ?? 0);
   const operator = Number(dbRow.bd_operator ?? 0);
+  const machineBreakdown = Number(dbRow.bd_machine ?? 0);
+  const fixProgSettings = Number(dbRow.bd_fix_prog ?? 0);
   const totalBd = Number(
-    dbRow.total_bd_minutes ?? noDisc + change + power + operator
+    dbRow.total_bd_minutes ?? (noDisc + change + power + operator + machineBreakdown + fixProgSettings)
   );
   const rawShift = dbRow.shift ?? "Shift A";
   const shiftCode = extractShiftCode(rawShift);
@@ -250,12 +256,16 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
       change,
       power,
       operator,
+      machineBreakdown,
+      fixProgSettings,
     },
     breakdownPct: {
       noDiscPct: Number(dbRow.bd_no_disc_pct ?? 0),
       changePct: Number(dbRow.bd_change_pct ?? 0),
       powerPct: Number(dbRow.bd_power_pct ?? 0),
       operatorPct: Number(dbRow.bd_operator_pct ?? 0),
+      machineBreakdownPct: Number(dbRow.bd_machine_pct ?? 0),
+      fixProgSettingsPct: Number(dbRow.bd_fix_prog_pct ?? 0),
       totalBdMinutes: totalBd,
       totalBdPct: Number(dbRow.total_bd_pct ?? 0),
     },
@@ -292,10 +302,12 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     std_output: Number(uiRow.stdOutput) || 0,
     actual_output: Number(uiRow.actualOutput) || 0,
     rework: Number(uiRow.rework) || 0,
-    bd_no_disc: Number(uiRow.breakdown?.noDisc) || 0,
-    bd_change: Number(uiRow.breakdown?.change) || 0,
-    bd_power: Number(uiRow.breakdown?.power) || 0,
-    bd_operator: Number(uiRow.breakdown?.operator) || 0,
+    bd_no_disc: Math.max(0, Number(uiRow.breakdown?.noDisc) || 0),
+    bd_change: Math.max(0, Number(uiRow.breakdown?.change) || 0),
+    bd_power: Math.max(0, Number(uiRow.breakdown?.power) || 0),
+    bd_operator: Math.max(0, Number(uiRow.breakdown?.operator) || 0),
+    bd_machine: Math.max(0, Number(uiRow.breakdown?.machineBreakdown) || 0),
+    bd_fix_prog: Math.max(0, Number(uiRow.breakdown?.fixProgSettings) || 0),
     remarks: uiRow.remarks?.trim() ?? "",
     updated_at: new Date().toISOString(),
   };
@@ -473,12 +485,16 @@ function hydrateShiftSheetRows(
         change: 0,
         power: 0,
         operator: 0,
+        machineBreakdown: 0,
+        fixProgSettings: 0,
       },
       breakdownPct: {
         noDiscPct: 0,
         changePct: 0,
         powerPct: 0,
         operatorPct: 0,
+        machineBreakdownPct: 0,
+        fixProgSettingsPct: 0,
         totalBdMinutes: 0,
         totalBdPct: 0,
       },

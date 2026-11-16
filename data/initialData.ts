@@ -147,6 +147,8 @@ export const generateDefaultShiftRows = (
         change: 0,
         power: 0,
         operator: 0,
+        machineBreakdown: 0,
+        fixProgSettings: 0,
       },
       remarks: "",
     };
@@ -199,6 +201,8 @@ export const generateSampleHistoricalLogs = (): MachineShiftRow[] => {
             change,
             power,
             operator: opDowntime,
+            machineBreakdown: 0,
+            fixProgSettings: 0,
           },
           remarks: `${line} shift verified and archived`,
         });

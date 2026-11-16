@@ -38,9 +38,22 @@ import {
   upsertMachineMaster,
 } from '@/actions/shiftActions';
 
-type BreakdownKey = 'noDisc' | 'change' | 'power' | 'operator';
+type BreakdownKey =
+  | 'noDisc'
+  | 'change'
+  | 'power'
+  | 'operator'
+  | 'machineBreakdown'
+  | 'fixProgSettings';
 
-const BD_KEYS: BreakdownKey[] = ['noDisc', 'change', 'power', 'operator'];
+const BD_KEYS: BreakdownKey[] = [
+  'noDisc',
+  'change',
+  'power',
+  'operator',
+  'machineBreakdown',
+  'fixProgSettings',
+];
 
 const BD_META: Record<
   BreakdownKey,
@@ -75,6 +88,18 @@ const BD_META: Record<
     pillClass: 'bg-purple-100 text-purple-900 border-purple-300',
     activeCellClass: 'bg-purple-50 text-purple-900 font-semibold border-purple-300',
   },
+  machineBreakdown: {
+    shortLabel: 'BREAK DOWN',
+    fullLabel: 'BREAK DOWN (Machine)',
+    pillClass: 'bg-orange-100 text-orange-900 border-orange-300',
+    activeCellClass: 'bg-orange-50 text-orange-900 font-semibold border-orange-300',
+  },
+  fixProgSettings: {
+    shortLabel: 'FIX/PROG',
+    fullLabel: 'FIX/PROG Settings',
+    pillClass: 'bg-indigo-100 text-indigo-900 border-indigo-300',
+    activeCellClass: 'bg-indigo-50 text-indigo-900 font-semibold border-indigo-300',
+  },
 };
 
 const NAV_COLS = [
@@ -86,6 +111,8 @@ const NAV_COLS = [
   'change',
   'power',
   'operator',
+  'machineBreakdown',
+  'fixProgSettings',
 ] as const;
 
 interface DailyShiftSheetProps {
@@ -570,7 +597,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
-        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0, machineBreakdown: 0, fixProgSettings: 0 },
         remarks: "",
         shiftWorkingMinutes: shiftWorkingMinutesVal,
         totalWorkingMinutes,
@@ -643,6 +670,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         change: 0,
         power: 0,
         operator: 0,
+        machineBreakdown: 0,
+        fixProgSettings: 0,
       };
       const safeVal = isNaN(val) ? 0 : Math.max(0, val);
       updateRow(index, {
@@ -700,6 +729,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         change: 0,
         power: 0,
         operator: 0,
+        machineBreakdown: 0,
+        fixProgSettings: 0,
       };
       return {
         breakdown: {
@@ -779,7 +810,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         stdOutput: target.stdOutput,
         actualOutput: Math.max(0, target.stdOutput - 4),
         rework: 1,
-        breakdown: { noDisc: 0, change: 10, power: 0, operator: 0 },
+        breakdown: { noDisc: 0, change: 10, power: 0, operator: 0, machineBreakdown: 0, fixProgSettings: 0 },
         remarks: 'Standard production cycle logged',
       };
     });
@@ -799,7 +830,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
-        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0 },
+        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0, machineBreakdown: 0, fixProgSettings: 0 },
         remarks: '',
       }));
     }
@@ -843,7 +874,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
           `• Actual Output Time (${firstBad.actualOutput} pcs × ${firstBad.cycleTime}m): ${bal.productionMinutes} mins\n` +
           `• Required Breakdown / Downtime: ${bal.requiredBreakdownMinutes} mins\n` +
           `• Currently Logged Breakdown: ${bal.loggedBreakdownMinutes} mins\n\n` +
-          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns (NO/DISC, CHANGE, POWER, or OPERATOR) so total time equals ${bal.shiftMinutes} mins.`;
+          `• Please fill the remaining ${bal.unaccountedMinutes} mins in Breakdown columns (NO/DISC, CHANGE, POWER, OPERATOR, BREAK DOWN, or FIX/PROG) so total time equals ${bal.shiftMinutes} mins.`;
       }
 
       alert(
@@ -870,7 +901,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const totalChange = rows.reduce((acc, r) => acc + (Number(r.breakdown?.change) || 0), 0);
   const totalPower = rows.reduce((acc, r) => acc + (Number(r.breakdown?.power) || 0), 0);
   const totalOperator = rows.reduce((acc, r) => acc + (Number(r.breakdown?.operator) || 0), 0);
-  const grandBreakdown = totalNoDisc + totalChange + totalPower + totalOperator;
+  const totalMachineBd = rows.reduce((acc, r) => acc + (Number(r.breakdown?.machineBreakdown) || 0), 0);
+  const totalFixProg = rows.reduce((acc, r) => acc + (Number(r.breakdown?.fixProgSettings) || 0), 0);
+  const grandBreakdown = totalNoDisc + totalChange + totalPower + totalOperator + totalMachineBd + totalFixProg;
   const overallEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
   const activeMachineCount = rows.filter((r) => (Number(r.stdOutput) || 0) > 0).length;
 
@@ -1243,6 +1276,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
               <option value="noDisc">NO/DISC (All Machines)</option>
               <option value="change">CHANGE (All Machines)</option>
               <option value="operator">OPERATOR (All Machines)</option>
+              <option value="machineBreakdown">BREAK DOWN (All Machines)</option>
+              <option value="fixProgSettings">FIX/PROG SETTINGS (All Machines)</option>
             </select>
             <input
               type="number"
@@ -1349,7 +1384,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   RE-WORK
                 </th>
                 <th
-                  colSpan={4}
+                  colSpan={6}
                   className="px-2 py-1.5 border-r border-slate-800 text-center bg-slate-800 text-amber-300 font-bold tracking-normal"
                 >
                   BREAKDOWN (MINUTES)
@@ -1377,8 +1412,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <th className="px-1.5 py-1 border-r border-slate-700 w-16" title="Power interruption">
                   POWER
                 </th>
-                <th className="px-1.5 py-1 border-r border-slate-800 w-16" title="Operator delay / absentee">
+                <th className="px-1.5 py-1 border-r border-slate-700 w-16" title="Operator delay / absentee">
                   OPERATOR
+                </th>
+                <th className="px-1.5 py-1 border-r border-slate-700 w-18" title="Machine / mechanical breakdown">
+                  BREAK DOWN
+                </th>
+                <th className="px-1.5 py-1 border-r border-slate-800 w-20" title="Fixture or program setting time">
+                  FIX/PROG
                 </th>
               </tr>
             </thead>
@@ -2060,6 +2101,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-purple-300">
                   {totalOperator}m
                   {renderFooterPct(totalOperator)}
+                </td>
+                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-orange-300">
+                  {totalMachineBd}m
+                  {renderFooterPct(totalMachineBd)}
+                </td>
+                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-indigo-300">
+                  {totalFixProg}m
+                  {renderFooterPct(totalFixProg)}
                 </td>
                 <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-amber-400 bg-slate-800">
                   {grandBreakdown}m

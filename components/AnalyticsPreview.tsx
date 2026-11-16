@@ -292,7 +292,15 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     const totalChange = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.change) || 0), 0);
     const totalPower = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.power) || 0), 0);
     const totalOperator = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.operator) || 0), 0);
-    const totalBreakdown = totalNoDisc + totalChange + totalPower + totalOperator;
+    const totalMachineBd = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.machineBreakdown) || 0), 0);
+    const totalFixProg = activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.fixProgSettings) || 0), 0);
+    const totalBreakdown =
+      totalNoDisc +
+      totalChange +
+      totalPower +
+      totalOperator +
+      totalMachineBd +
+      totalFixProg;
 
     const plantEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
     const reworkRate = totalAct > 0 ? ((totalRework / totalAct) * 100).toFixed(1) : '0.0';
@@ -328,6 +336,16 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         ? ((totalOperator / totalWorkingMins) * 100).toFixed(1)
         : '0.0';
 
+    const machineBdPctOfWorking =
+      totalWorkingMins > 0
+        ? ((totalMachineBd / totalWorkingMins) * 100).toFixed(1)
+        : '0.0';
+
+    const fixProgPctOfWorking =
+      totalWorkingMins > 0
+        ? ((totalFixProg / totalWorkingMins) * 100).toFixed(1)
+        : '0.0';
+
     return {
       totalStd,
       totalAct,
@@ -343,12 +361,16 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         change: totalChange,
         power: totalPower,
         operator: totalOperator,
+        machineBreakdown: totalMachineBd,
+        fixProgSettings: totalFixProg,
       },
       categoryWorkingPct: {
         noDisc: noDiscPctOfWorking,
         change: changePctOfWorking,
         power: powerPctOfWorking,
         operator: operatorPctOfWorking,
+        machineBreakdown: machineBdPctOfWorking,
+        fixProgSettings: fixProgPctOfWorking,
       },
       logCount: activeLogs.length,
     };
@@ -643,6 +665,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const changePct = Math.round((kpis.breakdownSplit.change / grandBreakdown) * 100);
   const powerPct = Math.round((kpis.breakdownSplit.power / grandBreakdown) * 100);
   const operatorPct = Math.round((kpis.breakdownSplit.operator / grandBreakdown) * 100);
+  const machineBdPct = Math.round((kpis.breakdownSplit.machineBreakdown / grandBreakdown) * 100);
+  const fixProgPct = Math.round((kpis.breakdownSplit.fixProgSettings / grandBreakdown) * 100);
 
   return (
     <div className="space-y-6">
@@ -1317,7 +1341,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               Breakdown Downtime Categorization
             </h3>
             <p className="text-xs text-slate-500">
-              Split across the 4 factory logging categories (Total: {kpis.totalBreakdown} mins)
+              Split across the 6 factory logging categories (Total: {kpis.totalBreakdown} mins)
             </p>
           </div>
 
@@ -1342,6 +1366,16 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               style={{ width: `${operatorPct}%` }}
               className="bg-purple-500 h-full"
               title={`OPERATOR: ${kpis.breakdownSplit.operator}m (${operatorPct}%)`}
+            />
+            <div
+              style={{ width: `${machineBdPct}%` }}
+              className="bg-orange-500 h-full"
+              title={`BREAK DOWN: ${kpis.breakdownSplit.machineBreakdown}m (${machineBdPct}%)`}
+            />
+            <div
+              style={{ width: `${fixProgPct}%` }}
+              className="bg-indigo-500 h-full"
+              title={`FIX/PROG: ${kpis.breakdownSplit.fixProgSettings}m (${fixProgPct}%)`}
             />
           </div>
 
@@ -1415,6 +1449,42 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   <span className="text-slate-600 font-semibold">{operatorPct}% share</span>
                   <span className="text-slate-400">·</span>
                   <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.operator}% of total</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-orange-500 inline-block" />
+                <div>
+                  <span className="font-bold text-slate-800">BREAK DOWN</span>
+                  <p className="text-[10px] text-slate-500">Machine & mechanical fault</p>
+                </div>
+              </div>
+              <div className="text-right font-mono">
+                <span className="font-bold text-slate-900">{kpis.breakdownSplit.machineBreakdown} mins</span>
+                <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                  <span className="text-slate-600 font-semibold">{machineBdPct}% share</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.machineBreakdown}% of total</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-indigo-500 inline-block" />
+                <div>
+                  <span className="font-bold text-slate-800">FIX/PROG</span>
+                  <p className="text-[10px] text-slate-500">Fixture & program setting</p>
+                </div>
+              </div>
+              <div className="text-right font-mono">
+                <span className="font-bold text-slate-900">{kpis.breakdownSplit.fixProgSettings} mins</span>
+                <div className="flex items-center justify-end gap-1.5 text-[10px]">
+                  <span className="text-slate-600 font-semibold">{fixProgPct}% share</span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.fixProgSettings}% of total</span>
                 </div>
               </div>
             </div>

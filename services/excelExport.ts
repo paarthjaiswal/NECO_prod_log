@@ -13,7 +13,10 @@ export function formatRowForExport(row: MachineShiftRow): Record<string, string 
   const change = Number(row.breakdown?.change) || 0;
   const power = Number(row.breakdown?.power) || 0;
   const operator = Number(row.breakdown?.operator) || 0;
-  const totalBd = noDisc + change + power + operator;
+  const machineBreakdown = Number(row.breakdown?.machineBreakdown) || 0;
+  const fixProgSettings = Number(row.breakdown?.fixProgSettings) || 0;
+  const totalBd =
+    noDisc + change + power + operator + machineBreakdown + fixProgSettings;
 
   const eff =
     Number(row.stdOutput) > 0
@@ -32,6 +35,12 @@ export function formatRowForExport(row: MachineShiftRow): Record<string, string 
   const operatorPct =
     row.breakdownPct?.operatorPct ??
     Number(((operator / totalWorking) * 100).toFixed(2));
+  const machineBdPct =
+    row.breakdownPct?.machineBreakdownPct ??
+    Number(((machineBreakdown / totalWorking) * 100).toFixed(2));
+  const fixProgPct =
+    row.breakdownPct?.fixProgSettingsPct ??
+    Number(((fixProgSettings / totalWorking) * 100).toFixed(2));
   const totalBdPct =
     row.breakdownPct?.totalBdPct ??
     Number(((totalBd / totalWorking) * 100).toFixed(2));
@@ -57,11 +66,15 @@ export function formatRowForExport(row: MachineShiftRow): Record<string, string 
     "CHANGE (mins)": change,
     "POWER (mins)": power,
     "OPERATOR (mins)": operator,
+    "BREAK DOWN (mins)": machineBreakdown,
+    "FIX/PROG (mins)": fixProgSettings,
     "Total BD Mins": totalBd,
     "NO/DISC %": noDiscPct,
     "CHANGE %": changePct,
     "POWER %": powerPct,
     "OPERATOR %": operatorPct,
+    "BREAK DOWN %": machineBdPct,
+    "FIX/PROG %": fixProgPct,
     "Total BD %": totalBdPct,
     "Remarks": row.remarks || "",
   };

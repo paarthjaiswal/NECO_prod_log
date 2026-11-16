@@ -22,7 +22,9 @@ export function calculateTotalBreakdown(
     (Number(b.noDisc) || 0) +
     (Number(b.change) || 0) +
     (Number(b.power) || 0) +
-    (Number(b.operator) || 0)
+    (Number(b.operator) || 0) +
+    (Number(b.machineBreakdown) || 0) +
+    (Number(b.fixProgSettings) || 0)
   );
 }
 
