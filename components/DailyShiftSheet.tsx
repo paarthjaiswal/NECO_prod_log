@@ -949,8 +949,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       : null;
 
   return (
-    <div className="w-full space-y-2.5">
-      {/* Shift Lock Banner */}
+    <div className="w-full space-y-2">
+      {/* Fixed / Sticky Top Controls: Banners, Action Buttons, and Quick BD Bar */}
+      <div className="sticky top-0 md:top-[64px] z-30 bg-slate-50 space-y-2 pb-1 pt-0.5">
+        {/* Shift Lock Banner */}
       {isReadOnly && (
         <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-3 text-rose-100 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shadow-md">
           <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 text-xs font-semibold">
@@ -1351,13 +1353,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
           </button>
         </div>
       )}
+      </div>
 
       {/* Interactive Paper Log Sheet (Grouped Table) */}
-      <div className="bg-white rounded-lg border border-slate-300 shadow-xs overflow-hidden">
-        <div className="overflow-x-auto max-w-full">
+      <div className="bg-white rounded-lg border border-slate-300 shadow-xs overflow-hidden flex flex-col">
+        <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-270px)] min-h-[380px]">
           <table className="w-full text-xs text-left border-collapse select-none min-w-310">
             {/* Exact Grouped Table Header */}
-            <thead>
+            <thead className="sticky top-0 z-20 shadow-xs">
               <tr className="bg-slate-900 text-slate-100 border-b border-slate-800 text-[11px] uppercase tracking-wider font-semibold">
                 <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 text-center w-12">
                   SR. NO
@@ -2098,7 +2101,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             </tbody>
 
             {/* Exact Grouped Summary Footer */}
-            <tfoot>
+            <tfoot className="sticky bottom-0 z-20 shadow-[0_-3px_6px_rgba(0,0,0,0.18)]">
               <tr className="bg-slate-900 text-slate-100 font-bold border-t-2 border-slate-700 text-xs">
                 <td colSpan={2} className="px-3 py-3 border-r border-slate-800 text-left">
                   SHIFT TOTALS ({activeMachineCount} Active Machines)
