@@ -1830,19 +1830,17 @@ export function OperatorKiosk({
                   min="0"
                   disabled={isShiftLocked}
                   readOnly={isShiftLocked}
-                  value={
-                    draft.actualOutput > 0
-                      ? draft.actualOutput
-                      : draft.stdOutput > 0
-                      ? 0
-                      : ''
-                  }
+                  value={draft.actualOutput > 0 ? draft.actualOutput : ''}
+                  placeholder="0"
                   onFocus={(e) => e.target.select()}
+                  onClick={(e) => (e.target as HTMLInputElement).select()}
                   onChange={(e) => {
                     setValidationError(null);
+                    const raw = e.target.value;
+                    const parsed = raw === '' ? 0 : parseInt(raw, 10);
                     setDraft({
                       ...draft,
-                      actualOutput: Number(e.target.value) || 0,
+                      actualOutput: isNaN(parsed) ? 0 : Math.max(0, parsed),
                     });
                   }}
                   className={`flex-1 text-center font-mono text-2xl font-black py-1.5 border rounded focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed ${
@@ -1977,9 +1975,12 @@ export function OperatorKiosk({
                   value={draft.rework > 0 ? draft.rework : ''}
                   placeholder="0"
                   onFocus={(e) => e.target.select()}
-                  onChange={(e) =>
-                    setDraft({ ...draft, rework: Number(e.target.value) || 0 })
-                  }
+                  onClick={(e) => (e.target as HTMLInputElement).select()}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const parsed = raw === '' ? 0 : parseInt(raw, 10);
+                    setDraft({ ...draft, rework: isNaN(parsed) ? 0 : Math.max(0, parsed) });
+                  }}
                   className="flex-1 text-center font-mono text-2xl font-black py-1.5 bg-slate-50 border border-slate-300 rounded focus:bg-white focus:border-slate-800 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                 />
                 <button
@@ -2120,16 +2121,16 @@ export function OperatorKiosk({
                         value={val > 0 ? val : ''}
                         placeholder="0"
                         onFocus={(e) => e.target.select()}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
                         onChange={(e) => {
                           setValidationError(null);
+                          const raw = e.target.value;
+                          const parsed = raw === '' ? 0 : parseInt(raw, 10);
                           setDraft({
                             ...draft,
                             breakdown: {
                               ...draft.breakdown,
-                              [card.key]: Math.max(
-                                0,
-                                Number(e.target.value) || 0
-                              ),
+                              [card.key]: isNaN(parsed) ? 0 : Math.max(0, parsed),
                             },
                           });
                         }}

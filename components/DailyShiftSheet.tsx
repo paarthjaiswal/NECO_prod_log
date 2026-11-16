@@ -1814,6 +1814,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         min="0"
                         disabled={isShiftLocked}
                         value={row.cycleTime || ""}
+                        placeholder="0.00"
+                        onFocus={(e) => e.target.select()}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
                         onChange={(e) => handleCycleTimeChange(index, e.target.value)}
                         onBlur={(e) => handleCycleTimeBlurOrCommit(index, Number(e.target.value) || 0)}
                         className="w-16 text-right text-xs px-1.5 py-1 border border-slate-200 rounded bg-white disabled:bg-slate-100"
@@ -1827,9 +1830,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         min="0"
                         readOnly={!isAdmin || isReadOnly}
                         value={row.stdOutput || ""}
+                        placeholder="0"
+                        onFocus={(e) => e.target.select()}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
                         onChange={(e) => {
                           if (!isAdmin) return;
-                          updateRow(index, { stdOutput: Number(e.target.value) || 0 });
+                          const raw = e.target.value;
+                          const parsed = raw === '' ? 0 : parseInt(raw, 10);
+                          updateRow(index, { stdOutput: isNaN(parsed) ? 0 : Math.max(0, parsed) });
                         }}
                         title={!isAdmin ? "Auto-calculated from Shift Minutes ÷ Cycle Time (Unit Head only)" : undefined}
                         className={`w-16 mx-auto text-center font-mono font-semibold px-1 py-1 rounded border ${
@@ -1848,12 +1856,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         disabled={isShiftLocked}
                         readOnly={isShiftLocked}
                         data-grid-cell={`${index}-actualOutput`}
-                        value={row.actualOutput > 0 ? row.actualOutput : hasTarget ? 0 : ''}
+                        value={row.actualOutput > 0 ? row.actualOutput : ''}
+                        placeholder="0"
                         onFocus={(e) => e.target.select()}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
                         onKeyDown={(e) => handleGridKeyDown(e, index, 'actualOutput')}
-                        onChange={(e) =>
-                          updateRow(index, { actualOutput: Number(e.target.value) || 0 })
-                        }
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          const parsed = raw === '' ? 0 : parseInt(raw, 10);
+                          updateRow(index, { actualOutput: isNaN(parsed) ? 0 : Math.max(0, parsed) });
+                        }}
                         title={
                           isShiftLocked
                             ? 'Shift is locked (Read-Only)'
@@ -1890,10 +1902,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         value={row.rework > 0 ? row.rework : ''}
                         placeholder="0"
                         onFocus={(e) => e.target.select()}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
                         onKeyDown={(e) => handleGridKeyDown(e, index, 'rework')}
-                        onChange={(e) =>
-                          updateRow(index, { rework: Number(e.target.value) || 0 })
-                        }
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          const parsed = raw === '' ? 0 : parseInt(raw, 10);
+                          updateRow(index, { rework: isNaN(parsed) ? 0 : Math.max(0, parsed) });
+                        }}
                         className={`w-14 mx-auto text-center font-mono px-1 py-1 rounded border ${
                           row.rework > 0
                             ? 'bg-rose-50 text-rose-800 border-rose-200 font-bold'
@@ -1930,10 +1945,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               e.target.select();
                               setActiveBdCell({ rowIndex: index, field: bdKey });
                             }}
+                            onClick={(e) => (e.target as HTMLInputElement).select()}
                             onKeyDown={(e) => handleGridKeyDown(e, index, bdKey)}
-                            onChange={(e) =>
-                              handleBreakdownChange(index, bdKey, Number(e.target.value))
-                            }
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              const parsed = raw === '' ? 0 : parseInt(raw, 10);
+                              handleBreakdownChange(index, bdKey, isNaN(parsed) ? 0 : Math.max(0, parsed));
+                            }}
                             className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border transition-colors focus:outline-none ${
                               isShiftLocked
                                 ? 'cursor-not-allowed opacity-75 border-transparent bg-transparent text-slate-500'
