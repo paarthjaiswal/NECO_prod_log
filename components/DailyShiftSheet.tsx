@@ -280,21 +280,132 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const [bulkBdField, setBulkBdField] = useState<BreakdownKey>('power');
   const [bulkBdMinutes, setBulkBdMinutes] = useState<string>('');
 
+  // Guard: ensure each machine run is unique, keeping populated rows over duplicate blank rows
+  const cleanRows = useMemo(() => {
+    if (!rows || rows.length <= 1) return rows;
+
+    const normalize = (s?: string | null) => (s || "").trim().toLowerCase();
+    const extractCode = (s?: string | null) => {
+      if (!s) return "";
+      const m = s.trim().match(/^(Shift\s+[A-Za-z0-9]+)/i);
+      return m ? m[1].toLowerCase() : s.trim().toLowerCase();
+    };
+    const targetShiftCode = extractCode(currentShift);
+
+    const isPopulated = (r: MachineShiftRow) => {
+      const bdTotal =
+        (Number(r.breakdown?.noDisc) || 0) +
+        (Number(r.breakdown?.change) || 0) +
+        (Number(r.breakdown?.power) || 0) +
+        (Number(r.breakdown?.operator) || 0) +
+        (Number(r.breakdown?.machineBreakdown) || 0) +
+        (Number(r.breakdown?.fixProgSettings) || 0);
+
+      return (
+        (Number(r.actualOutput) || 0) > 0 ||
+        (Number(r.stdOutput) || 0) > 0 ||
+        (Number(r.rework) || 0) > 0 ||
+        Boolean(r.operatorName && r.operatorName.trim()) ||
+        Boolean(r.itemId && r.itemId.trim()) ||
+        Boolean(r.itemName && r.itemName.trim()) ||
+        Boolean(r.operation && r.operation.trim()) ||
+        (Number(r.cycleTime) || 0) > 0 ||
+        bdTotal > 0 ||
+        Boolean(r.remarks && r.remarks.trim())
+      );
+    };
+
+    const grouped = new Map<string, Map<number, MachineShiftRow>>();
+    const orderedKeys: string[] = [];
+
+    for (const r of rows) {
+      // Guard against rows belonging to a different shift
+      if (r.shift && targetShiftCode) {
+        const rCode = extractCode(r.shift);
+        if (rCode && rCode !== targetShiftCode) continue;
+      }
+
+      const key = r.machineId || normalize(r.machineName);
+      if (!grouped.has(key)) {
+        grouped.set(key, new Map());
+        orderedKeys.push(key);
+      }
+      const runMap = grouped.get(key)!;
+      const runNo = Number(r.runNo) || 1;
+      const existing = runMap.get(runNo);
+      if (!existing) {
+        runMap.set(runNo, r);
+      } else {
+        if (!isPopulated(existing) && isPopulated(r)) {
+          runMap.set(runNo, r);
+        }
+      }
+    }
+
+    let hasDuplicates = false;
+    let count = 0;
+    for (const key of orderedKeys) {
+      count += grouped.get(key)!.size;
+    }
+    if (count !== rows.length) {
+      hasDuplicates = true;
+    }
+
+    if (!hasDuplicates) return rows;
+
+    const cleaned: MachineShiftRow[] = [];
+    for (const key of orderedKeys) {
+      const runMap = grouped.get(key)!;
+      const sorted = Array.from(runMap.values()).sort(
+        (a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1)
+      );
+      cleaned.push(...sorted);
+    }
+    return cleaned;
+  }, [rows, currentShift]);
+
+  // Synchronize with parent if duplicate rows were present
+  useEffect(() => {
+    if (cleanRows.length !== rows.length) {
+      onRowsChange(cleanRows);
+    }
+  }, [cleanRows, rows.length, onRowsChange]);
+
   // Apply a patch to one row (single onRowsChange call -> single draft write)
   const updateRow = useCallback(
     (index: number, updatedFields: Partial<MachineShiftRow>) => {
       if (isShiftLocked) return;
-      const targetMachineId = rows[index]?.machineId;
-      const updatedRows = rows.map((r, i) => (i === index ? { ...r, ...updatedFields } : r));
+      const targetRow = cleanRows[index] || rows[index];
+      if (!targetRow) return;
+      const targetMachineId = targetRow.machineId;
+
+      const actualIndex = rows.findIndex(
+        (r) =>
+          (targetRow.id && r.id === targetRow.id) ||
+          (r.machineId === targetRow.machineId && (r.runNo || 1) === (targetRow.runNo || 1))
+      );
+      const matchIdx = actualIndex >= 0 ? actualIndex : index;
+
+      const updatedRows = rows.map((r, i) =>
+        i === matchIdx
+          ? {
+              ...r,
+              date: currentDate || r.date,
+              shift: currentShift || r.shift,
+              line: currentLine || r.line,
+              ...updatedFields,
+            }
+          : r
+      );
       if (targetMachineId) {
-        const rowShiftMins = shiftWorkingMinutes || updatedRows[index]?.totalWorkingMinutes || 1305;
+        const rowShiftMins = shiftWorkingMinutes || updatedRows[matchIdx]?.totalWorkingMinutes || 1305;
         const recomputed = recalculateMachineGroupStdOutputs(updatedRows, targetMachineId, rowShiftMins);
         onRowsChange(recomputed);
       } else {
         onRowsChange(updatedRows);
       }
     },
-    [isShiftLocked, rows, onRowsChange, shiftWorkingMinutes]
+    [isShiftLocked, cleanRows, rows, onRowsChange, shiftWorkingMinutes, currentDate, currentShift, currentLine]
   );
 
   // Split machine row into multiple runs
@@ -473,6 +584,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (hasUpdates) {
       onRowsChange(updated);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isShiftLocked, cycleTimes, items, shiftWorkingMinutes]);
 
   // 1. When Item changes: auto-select default operation & fetch matching Cycle Time + Std Output
@@ -792,7 +904,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             totalWorkingMinutes,
           };
 
-          onRowsChange([...rows, newRow]);
+          const normNew = newMachineName.trim().toLowerCase();
+          const alreadyExists = rows.some(
+            (r) =>
+              r.machineId === res.machine.id ||
+              (r.machineName && r.machineName.trim().toLowerCase() === normNew)
+          );
+
+          if (!alreadyExists) {
+            onRowsChange([...rows, newRow]);
+          }
           setNewMachineName("");
           setNewMachineCode("");
           setNewMachineType("CNC");
@@ -913,7 +1034,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       remarks: "",
     };
 
-    onRowsChange([...rows, newRow]);
+    const normTemp = tempMachineName.trim().toLowerCase();
+    const alreadyExists = rows.some(
+      (r) =>
+        r.machineId === tempId ||
+        (r.machineName && r.machineName.trim().toLowerCase() === normTemp)
+    );
+
+    if (!alreadyExists) {
+      onRowsChange([...rows, newRow]);
+    }
     setTempMachineName("");
     setTempMachineCode("");
     setShowAddTempMachineBar(false);
@@ -1138,11 +1268,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     }
 
     // Group rows by machineId to validate each machine group
-    const uniqueMachineIds = Array.from(new Set(rows.map((r) => r.machineId)));
+    const uniqueMachineIds = Array.from(new Set(cleanRows.map((r) => r.machineId)));
     const unbalancedGroups: { machineId: string; machineName: string; balance: MachineGroupTimeBalance; firstRow: MachineShiftRow }[] = [];
 
     for (const mId of uniqueMachineIds) {
-      const mRows = rows.filter((r) => r.machineId === mId);
+      const mRows = cleanRows.filter((r) => r.machineId === mId);
       const isTouched = mRows.some(
         (r) =>
           !!r.itemId ||
@@ -1154,7 +1284,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       if (!isTouched) continue;
 
       const rowShiftMins = shiftWorkingMinutes || mRows[0]?.totalWorkingMinutes || 1305;
-      const bal = calculateMachineGroupTimeBalance(rows, mId, rowShiftMins);
+      const bal = calculateMachineGroupTimeBalance(cleanRows, mId, rowShiftMins);
       if (!bal.isBalanced) {
         unbalancedGroups.push({
           machineId: mId,
@@ -1198,49 +1328,52 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     }
 
     onSave(
-      rows.map((r) => ({
+      cleanRows.map((r) => ({
         ...r,
+        date: currentDate || r.date,
+        shift: currentShift || r.shift,
+        line: currentLine || r.line,
         totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes,
       }))
     );
   };
 
   // Calculations for summary footer row
-  const totalStd = rows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-  const totalAct = rows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-  const totalRework = rows.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-  const totalNoDisc = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.noDisc) || 0), 0).toFixed(2));
-  const totalChange = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.change) || 0), 0).toFixed(2));
-  const totalPower = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.power) || 0), 0).toFixed(2));
-  const totalOperator = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.operator) || 0), 0).toFixed(2));
-  const totalMachineBd = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.machineBreakdown) || 0), 0).toFixed(2));
-  const totalFixProg = Number(rows.reduce((acc, r) => acc + (Number(r.breakdown?.fixProgSettings) || 0), 0).toFixed(2));
+  const totalStd = cleanRows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+  const totalAct = cleanRows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+  const totalRework = cleanRows.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
+  const totalNoDisc = Number(cleanRows.reduce((acc, r) => acc + (Number(r.breakdown?.noDisc) || 0), 0).toFixed(2));
+  const totalChange = Number(cleanRows.reduce((acc, r) => acc + (Number(r.breakdown?.change) || 0), 0).toFixed(2));
+  const totalPower = Number(cleanRows.reduce((acc, r) => acc + (Number(r.breakdown?.power) || 0), 0).toFixed(2));
+  const totalOperator = Number(cleanRows.reduce((acc, r) => acc + (Number(r.breakdown?.operator) || 0), 0).toFixed(2));
+  const totalMachineBd = Number(cleanRows.reduce((acc, r) => acc + (Number(r.breakdown?.machineBreakdown) || 0), 0).toFixed(2));
+  const totalFixProg = Number(cleanRows.reduce((acc, r) => acc + (Number(r.breakdown?.fixProgSettings) || 0), 0).toFixed(2));
   const grandBreakdown = Number(
     (totalNoDisc + totalChange + totalPower + totalOperator + totalMachineBd + totalFixProg).toFixed(2)
   );
   const overallEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
   const activeMachineCount = useMemo(() => {
     return new Set(
-      rows
+      cleanRows
         .filter((r) => (Number(r.stdOutput) || 0) > 0 || (Number(r.actualOutput) || 0) > 0)
         .map((r) => r.machineId)
     ).size;
-  }, [rows]);
+  }, [cleanRows]);
 
   // Machine group time balances
   const machineBalances = useMemo(() => {
     const map = new Map<string, MachineGroupTimeBalance>();
-    const mIds = new Set(rows.map((r) => r.machineId));
+    const mIds = new Set(cleanRows.map((r) => r.machineId));
     mIds.forEach((mId) => {
-      const bal = calculateMachineGroupTimeBalance(rows, mId, shiftWorkingMinutes);
+      const bal = calculateMachineGroupTimeBalance(cleanRows, mId, shiftWorkingMinutes);
       map.set(mId, bal);
     });
     return map;
-  }, [rows, shiftWorkingMinutes]);
+  }, [cleanRows, shiftWorkingMinutes]);
 
   const activeMachineIds = useMemo(() => {
     const set = new Set<string>();
-    rows.forEach((r) => {
+    cleanRows.forEach((r) => {
       const isTouched =
         !!r.itemId ||
         !!r.operatorName ||
@@ -1250,7 +1383,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       if (isTouched && r.machineId) set.add(r.machineId);
     });
     return set;
-  }, [rows]);
+  }, [cleanRows]);
 
   const unbalancedMachineIds = useMemo(() => {
     const bad = new Set<string>();
@@ -1264,7 +1397,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const unbalancedCount = unbalancedMachineIds.size;
 
   // Footer downtime %: total minutes vs. available minutes of machines that are in use
-  const footerWorkingMinutes = rows.reduce((acc, r) => {
+  const footerWorkingMinutes = cleanRows.reduce((acc, r) => {
     const inUse = (Number(r.stdOutput) || 0) > 0 || calculateTotalBreakdown(r.breakdown) > 0;
     return inUse ? acc + (r.totalWorkingMinutes || shiftWorkingMinutes) : acc;
   }, 0);
@@ -1276,11 +1409,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     ) : null;
 
   // Derive active row & its remaining unaccounted BD balance for the Quick BD Strip
-  const focusedRow = rows[activeBdCell?.rowIndex ?? 0] || rows[0] || null;
+  const focusedRow = cleanRows[activeBdCell?.rowIndex ?? 0] || cleanRows[0] || null;
   const focusedRowBalance =
     focusedRow
       ? calculateMachineGroupTimeBalance(
-          rows,
+          cleanRows,
           focusedRow.machineId,
           shiftWorkingMinutes || focusedRow.totalWorkingMinutes
         )
@@ -1348,7 +1481,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
           <div className="text-xs text-slate-600 flex flex-wrap items-center gap-2">
             <span className="hidden md:inline">Date: <strong className="text-slate-900">{selectedDate}</strong></span>
             <span className="hidden md:inline">·</span>
-            <span className="hidden md:inline">Active Machines: <strong className="text-emerald-700">{activeMachineCount} / {rows.length}</strong></span>
+            <span className="hidden md:inline">Active Machines: <strong className="text-emerald-700">{activeMachineCount} / {cleanRows.length}</strong></span>
             <span className="hidden md:inline">·</span>
             <span className="hidden md:inline">Line Target: <strong className="text-slate-900">{totalStd} pcs</strong></span>
             <span className="hidden md:inline">·</span>
@@ -1528,7 +1661,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 }
                 className="bg-transparent font-bold text-slate-900 text-xs focus:outline-none cursor-pointer"
               >
-                {rows.map((r, i) => {
+                {cleanRows.map((r, i) => {
                   const runLabel = (r.runNo || 1) > 1 ? `#${r.srNo}.${r.runNo} ${r.machineName} (Run #${r.runNo})` : `#${r.srNo} ${r.machineName}`;
                   return (
                     <option key={r.id || `${r.machineId}-${r.runNo || 1}`} value={i}>
@@ -1826,7 +1959,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
             {/* Table Rows (16 fixed machine rows) */}
             <tbody className="divide-y divide-slate-200">
-              {rows.map((row, index) => {
+              {cleanRows.map((row, index) => {
                 const hasTarget = row.stdOutput > 0;
                 const efficiency = hasTarget ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
                 const isUnderperforming = hasTarget && row.actualOutput < row.stdOutput;
@@ -1839,8 +1972,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
 
                 const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
-                const timeBalance = machineBalances.get(row.machineId) || calculateMachineGroupTimeBalance(rows, row.machineId, rowShiftMins);
-                const isSplitMachine = rows.filter((r) => r.machineId === row.machineId).length > 1;
+                const timeBalance = machineBalances.get(row.machineId) || calculateMachineGroupTimeBalance(cleanRows, row.machineId, rowShiftMins);
+                const isSplitMachine = cleanRows.filter((r) => r.machineId === row.machineId).length > 1;
                 const rowSummary = timeBalance.rowBreakdownSummary?.[row.id] ?? {
                   prodMins: timeBalance.rowProductionMinutes?.[row.id] ?? Number(((row.actualOutput || 0) * (row.cycleTime || 0)).toFixed(2)),
                   bdMins: timeBalance.rowBreakdownMinutes?.[row.id] ?? calculateTotalBreakdown(row.breakdown),

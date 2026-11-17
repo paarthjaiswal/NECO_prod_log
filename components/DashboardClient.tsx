@@ -101,6 +101,29 @@ const formatMsToIstString = (ms: number): string => {
  * - Normalizes srNo sequentially (1, 2, 3...) based on line machines order.
  * - Appends valid temporary machines (isTempMachine or machineId starts with "temp_") for this line.
  */
+function isPopulatedUiRow(r: MachineShiftRow): boolean {
+  const bdTotal =
+    (Number(r.breakdown?.noDisc) || 0) +
+    (Number(r.breakdown?.change) || 0) +
+    (Number(r.breakdown?.power) || 0) +
+    (Number(r.breakdown?.operator) || 0) +
+    (Number(r.breakdown?.machineBreakdown) || 0) +
+    (Number(r.breakdown?.fixProgSettings) || 0);
+
+  return (
+    (Number(r.actualOutput) || 0) > 0 ||
+    (Number(r.stdOutput) || 0) > 0 ||
+    (Number(r.rework) || 0) > 0 ||
+    Boolean(r.operatorName && r.operatorName.trim()) ||
+    Boolean(r.itemId && r.itemId.trim()) ||
+    Boolean(r.itemName && r.itemName.trim()) ||
+    Boolean(r.operation && r.operation.trim()) ||
+    (Number(r.cycleTime) || 0) > 0 ||
+    bdTotal > 0 ||
+    Boolean(r.remarks && r.remarks.trim())
+  );
+}
+
 export function ensureAllLineMachinesInRows(
   currentRows: MachineShiftRow[],
   lineMachines: MachineMaster[],
@@ -109,27 +132,60 @@ export function ensureAllLineMachinesInRows(
   line: string,
   shiftWorkingMinutes: number
 ): MachineShiftRow[] {
+  const normalize = (s?: string | null) => (s || "").trim().toLowerCase();
+  const extractCode = (s?: string | null) => {
+    if (!s) return "";
+    const m = s.trim().match(/^(Shift\s+[A-Za-z0-9]+)/i);
+    return m ? m[1].toLowerCase() : s.trim().toLowerCase();
+  };
+  const normTargetDate = (date || "").trim();
+  const targetShiftCode = extractCode(shift);
+  const targetLine = normalize(line || "Line 1");
   const result: MachineShiftRow[] = [];
   const assignedRowIds = new Set<string>();
 
   // 1. Permanent machines in lineMachines order
   lineMachines.forEach((machine, mIdx) => {
     const srNo = mIdx + 1;
-    const matchingRows = (currentRows || []).filter(
-      (r) =>
-        !r.isTempMachine &&
-        !String(r.machineId || "").startsWith("temp_") &&
-        (r.machineId === machine.id ||
-          (r.machineName &&
-            machine.name &&
-            r.machineName.trim().toLowerCase() === machine.name.trim().toLowerCase()))
-    );
+    const machNormName = normalize(machine.name);
+
+    // Checks whether machine already exists in currentRows using both machine.id OR machine.name
+    const matchingRows = (currentRows || []).filter((r) => {
+      if (r.isTempMachine || String(r.machineId || "").startsWith("temp_")) return false;
+      // Guard against rows belonging to a different date, shift, or line
+      if (r.date && normTargetDate && r.date.trim() !== normTargetDate) return false;
+      if (r.line && targetLine && normalize(r.line) !== targetLine) return false;
+      if (r.shift && targetShiftCode) {
+        const rShiftCode = extractCode(r.shift);
+        if (rShiftCode && rShiftCode !== targetShiftCode) return false;
+      }
+
+      return (
+        r.machineId === machine.id ||
+        Boolean(machNormName && normalize(r.machineName) === machNormName)
+      );
+    });
 
     if (matchingRows.length > 0) {
-      const sortedRuns = [...matchingRows].sort(
+      // Deduplicate runs with the same runNo: keep populated over empty
+      const byRunNo = new Map<number, MachineShiftRow>();
+      for (const r of matchingRows) {
+        const runNo = Number(r.runNo) || 1;
+        const existing = byRunNo.get(runNo);
+        if (!existing) {
+          byRunNo.set(runNo, r);
+        } else {
+          if (!isPopulatedUiRow(existing) && isPopulatedUiRow(r)) {
+            byRunNo.set(runNo, r);
+          }
+        }
+      }
+
+      const deduplicatedRuns = Array.from(byRunNo.values()).sort(
         (a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1)
       );
-      sortedRuns.forEach((r, runIdx) => {
+
+      deduplicatedRuns.forEach((r, runIdx) => {
         if (r.id) assignedRowIds.add(r.id);
         result.push({
           ...r,
@@ -192,12 +248,13 @@ export function ensureAllLineMachinesInRows(
   });
 
   // 2. Temporary machines for this line
-  const targetLine = (line || "Line 1").trim().toLowerCase();
   const tempRows = (currentRows || []).filter(
     (r) =>
       !assignedRowIds.has(r.id) &&
       (Boolean(r.isTempMachine) === true || String(r.machineId || "").startsWith("temp_")) &&
-      (r.line || line || "Line 1").trim().toLowerCase() === targetLine
+      (!r.date || !normTargetDate || r.date.trim() === normTargetDate) &&
+      (!r.line || normalize(r.line || line || "Line 1") === targetLine) &&
+      (!r.shift || !targetShiftCode || !extractCode(r.shift) || extractCode(r.shift) === targetShiftCode)
   );
 
   const tempGroups = new Map<string, MachineShiftRow[]>();
@@ -211,8 +268,21 @@ export function ensureAllLineMachinesInRows(
 
   let nextSrNo = lineMachines.length + 1;
   for (const [, runs] of tempGroups.entries()) {
-    runs.sort((a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1));
-    runs.forEach((r, runIdx) => {
+    const byRunNo = new Map<number, MachineShiftRow>();
+    for (const r of runs) {
+      const runNo = Number(r.runNo) || 1;
+      const existing = byRunNo.get(runNo);
+      if (!existing) {
+        byRunNo.set(runNo, r);
+      } else if (!isPopulatedUiRow(existing) && isPopulatedUiRow(r)) {
+        byRunNo.set(runNo, r);
+      }
+    }
+    const deduplicatedRuns = Array.from(byRunNo.values()).sort(
+      (a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1)
+    );
+
+    deduplicatedRuns.forEach((r, runIdx) => {
       result.push({
         ...r,
         date: date || r.date,
@@ -222,13 +292,47 @@ export function ensureAllLineMachinesInRows(
         runNo: Number(r.runNo) || runIdx + 1,
         isTempMachine: true,
         totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes || 1305,
-        shiftWorkingMinutes: shiftWorkingMinutes || r.shiftWorkingMinutes || 1305,
+        shiftWorkingMinutes: shiftWorkingMinutes || 1305,
       });
     });
     nextSrNo++;
   }
 
-  return result;
+  // 3. Final deduplication pass:
+  // Group rows by canonical key (row.machineId || normalize(row.machineName)).
+  // If a machine has multiple rows with the same runNo, keep ONLY the populated row (or first row)
+  // and discard the duplicate empty row.
+  const finalGrouped = new Map<string, Map<number, MachineShiftRow>>();
+  const finalOrderedKeys: string[] = [];
+
+  for (const row of result) {
+    const canonKey = row.machineId || normalize(row.machineName);
+    if (!finalGrouped.has(canonKey)) {
+      finalGrouped.set(canonKey, new Map());
+      finalOrderedKeys.push(canonKey);
+    }
+    const runMap = finalGrouped.get(canonKey)!;
+    const runNo = Number(row.runNo) || 1;
+    const existing = runMap.get(runNo);
+    if (!existing) {
+      runMap.set(runNo, row);
+    } else {
+      if (!isPopulatedUiRow(existing) && isPopulatedUiRow(row)) {
+        runMap.set(runNo, row);
+      }
+    }
+  }
+
+  const finalResult: MachineShiftRow[] = [];
+  for (const key of finalOrderedKeys) {
+    const runMap = finalGrouped.get(key)!;
+    const sortedRuns = Array.from(runMap.values()).sort(
+      (a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1)
+    );
+    finalResult.push(...sortedRuns);
+  }
+
+  return finalResult;
 }
 
 export interface DashboardClientProps {
@@ -566,6 +670,19 @@ export default function DashboardClient({
     };
 
     let isMounted = true;
+
+    // Immediately replace currentShiftRows with clean default rows for the new selection
+    // so stale rows from the previous shift/date/line are NEVER retained or merged
+    const cleanDefaultRows = ensureAllLineMachinesInRows(
+      [],
+      currentLineMachines,
+      selectedDate,
+      selectedShift,
+      selectedLine,
+      activeShiftWorkingMinutes
+    );
+    setCurrentShiftRows(cleanDefaultRows);
+    setHasUnsavedDraft(false);
 
     // Do NOT restore unsaved localStorage draft if shift is locked
     if (!isShiftLocked) {
@@ -1031,6 +1148,7 @@ export default function DashboardClient({
       >
         {activeTab === "sheet" && (
           <DailyShiftSheet
+            key={`${selectedDate}_${selectedShift}_${selectedLine}`}
             rows={displayRows}
             masterData={masterData}
             onRowsChange={handleRowsChange}
@@ -1060,6 +1178,7 @@ export default function DashboardClient({
 
         {activeTab === "kiosk" && (
           <OperatorKiosk
+            key={`${selectedDate}_${selectedShift}_${selectedLine}`}
             rows={displayRows}
             masterData={masterData}
             selectedDate={selectedDate}

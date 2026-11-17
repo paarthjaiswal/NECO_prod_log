@@ -297,7 +297,7 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
       : `${uiRow.date}_${cleanShift}_${uiRow.line}_${uiRow.machineId}_r${runNo}`;
 
   return {
-    id: uiRow.id || deterministicId,
+    id: deterministicId,
     run_no: runNo,
     log_date: uiRow.date,
     shift: cleanShift,
@@ -451,6 +451,29 @@ function mapDbCycleTimeToUi(dbCt: DbCycleTimeRow): MachineItemCycleTime {
   };
 }
 
+function isPopulatedDbLogRow(log: DbShiftLogRow): boolean {
+  const bdTotal =
+    (Number(log.bd_no_disc) || 0) +
+    (Number(log.bd_change) || 0) +
+    (Number(log.bd_power) || 0) +
+    (Number(log.bd_operator) || 0) +
+    (Number(log.bd_machine) || 0) +
+    (Number(log.bd_fix_prog) || 0);
+
+  return (
+    (Number(log.actual_output) || 0) > 0 ||
+    (Number(log.std_output) || 0) > 0 ||
+    (Number(log.rework) || 0) > 0 ||
+    Boolean(log.operator_name && log.operator_name.trim()) ||
+    Boolean(log.item_id && log.item_id.trim()) ||
+    Boolean(log.item_name && log.item_name.trim()) ||
+    Boolean(log.operation && log.operation.trim()) ||
+    (Number(log.cycle_time) || 0) > 0 ||
+    bdTotal > 0 ||
+    Boolean(log.remarks && log.remarks.trim())
+  );
+}
+
 function hydrateShiftSheetRows(
   sortedLineMachines: DbMachineRow[],
   savedDbLogs: DbShiftLogRow[],
@@ -459,52 +482,83 @@ function hydrateShiftSheetRows(
   line: string,
   shiftWorkingMinutes: number // Fetched dynamically from public.shifts
 ): MachineShiftRow[] {
-  // Step A: Group saved logs for permanent machines by matching machine.id or machine.name, sorted by run_no ASC
-  const logsByMachine = new Map<string, DbShiftLogRow[]>();
-  // Step B: Group saved logs for Temporary Machines (ONLY is_temp_machine === true AND machine_id starts with "temp_")
+  const normalizeName = (s?: string | null) => (s || "").trim().toLowerCase();
+
+  // 1. Build lookup of lineMachines by both id and normalizeName(machine.name)
+  const machineById = new Map<string, DbMachineRow>();
+  const machineByName = new Map<string, DbMachineRow>();
+  for (const m of sortedLineMachines) {
+    if (m.id) machineById.set(m.id.trim(), m);
+    const norm = normalizeName(m.name);
+    if (norm) machineByName.set(norm, m);
+  }
+
+  // 2. Group savedDbLogs by resolved canonical machine.id
+  const groupedSavedLogs = new Map<string, DbShiftLogRow[]>();
   const tempLogsByMachine = new Map<string, DbShiftLogRow[]>();
 
   for (const log of savedDbLogs) {
     if (!log.machine_id && !log.machine_name) continue;
 
-    const matchedPermMachine = sortedLineMachines.find(
-      (m) =>
-        (log.machine_id && m.id === log.machine_id) ||
-        (log.machine_name &&
-          m.name &&
-          log.machine_name.trim().toLowerCase() === m.name.trim().toLowerCase())
-    );
+    // Check if explicitly marked temporary machine
+    const isTemp =
+      Boolean(log.is_temp_machine) === true &&
+      String(log.machine_id || "").startsWith("temp_");
+
+    if (isTemp) {
+      const tempId = String(log.machine_id);
+      if (!tempLogsByMachine.has(tempId)) {
+        tempLogsByMachine.set(tempId, []);
+      }
+      tempLogsByMachine.get(tempId)!.push(log);
+      continue;
+    }
+
+    // Match permanent machine: try log.machine_id first, then fallback to normalizeName(log.machine_name)
+    const rawId = (log.machine_id || "").trim();
+    const rawName = normalizeName(log.machine_name);
+    const matchedPermMachine =
+      (rawId ? machineById.get(rawId) : null) ||
+      (rawName ? machineByName.get(rawName) : null);
 
     if (matchedPermMachine) {
-      if (!logsByMachine.has(matchedPermMachine.id)) {
-        logsByMachine.set(matchedPermMachine.id, []);
+      if (!groupedSavedLogs.has(matchedPermMachine.id)) {
+        groupedSavedLogs.set(matchedPermMachine.id, []);
       }
-      logsByMachine.get(matchedPermMachine.id)!.push(log);
-    } else if (
-      Boolean(log.is_temp_machine) === true &&
-      String(log.machine_id || "").startsWith("temp_")
-    ) {
-      if (!tempLogsByMachine.has(log.machine_id!)) {
-        tempLogsByMachine.set(log.machine_id!, []);
-      }
-      tempLogsByMachine.get(log.machine_id!)!.push(log);
+      groupedSavedLogs.get(matchedPermMachine.id)!.push(log);
     } else {
-      // CRITICAL: Stale / deleted machine from past logs - IGNORE / SKIP COMPLETELY
+      // Unmatched non-temp row: stale/deleted machine or different line, skip completely
       continue;
     }
   }
 
-  // Sort each permanent machine's logs by run_no ascending
-  for (const logs of logsByMachine.values()) {
-    logs.sort((a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1));
+  // Deduplicate runs per permanent machine: if duplicate run_no exists, keep populated over empty
+  for (const [mId, logs] of groupedSavedLogs.entries()) {
+    const byRunNo = new Map<number, DbShiftLogRow>();
+    for (const log of logs) {
+      const runNo = Number(log.run_no) || 1;
+      const existing = byRunNo.get(runNo);
+      if (!existing) {
+        byRunNo.set(runNo, log);
+      } else {
+        if (!isPopulatedDbLogRow(existing) && isPopulatedDbLogRow(log)) {
+          byRunNo.set(runNo, log);
+        }
+      }
+    }
+    const deduplicated = Array.from(byRunNo.values()).sort(
+      (a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1)
+    );
+    groupedSavedLogs.set(mId, deduplicated);
   }
 
   const result: MachineShiftRow[] = [];
 
-  // Step A: Hydrate all DB machines for that line
+  // Step A: For each machine in lineMachines
   sortedLineMachines.forEach((machine, index) => {
-    const machineLogs = logsByMachine.get(machine.id);
+    const machineLogs = groupedSavedLogs.get(machine.id);
     if (machineLogs && machineLogs.length > 0) {
+      // Emit ONLY the saved rows for that machine (sorted by run_no ASC, normalizing machineId: machine.id and machineName: machine.name)
       machineLogs.forEach((log, runIdx) => {
         const uiRow = mapDbRowToUiRow(log);
         result.push({
@@ -519,8 +573,9 @@ function hydrateShiftSheetRows(
           shiftWorkingMinutes: shiftWorkingMinutes || 1305,
         });
       });
+      // CRITICAL: DO NOT emit an empty row for that machine!
     } else {
-      // 1 blank run with runNo = 1
+      // If !groupedSavedLogs.has(machine.id): emit 1 blank default row (runNo: 1)
       result.push({
         id: `${date}_${shift}_${line}_${machine.id}`,
         date,
@@ -565,7 +620,7 @@ function hydrateShiftSheetRows(
     }
   });
 
-  // Step B: Hydrate ONLY valid temporary machines
+  // Step B: After processing all lineMachines, append ONLY saved rows explicitly marked is_temp_machine === true AND machine_id?.startsWith("temp_")
   const tempMachineEntries = Array.from(tempLogsByMachine.entries()).sort(
     ([, logsA], [, logsB]) => {
       const minSrA = Math.min(...logsA.map((l) => Number(l.sr_no) || 9999));
@@ -576,8 +631,21 @@ function hydrateShiftSheetRows(
 
   let nextSrNo = sortedLineMachines.length + 1;
   for (const [, logs] of tempMachineEntries) {
-    logs.sort((a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1));
-    logs.forEach((log, runIdx) => {
+    const byRunNo = new Map<number, DbShiftLogRow>();
+    for (const log of logs) {
+      const runNo = Number(log.run_no) || 1;
+      const existing = byRunNo.get(runNo);
+      if (!existing) {
+        byRunNo.set(runNo, log);
+      } else if (!isPopulatedDbLogRow(existing) && isPopulatedDbLogRow(log)) {
+        byRunNo.set(runNo, log);
+      }
+    }
+    const deduplicated = Array.from(byRunNo.values()).sort(
+      (a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1)
+    );
+
+    deduplicated.forEach((log, runIdx) => {
       const uiRow = mapDbRowToUiRow(log);
       result.push({
         ...uiRow,
@@ -909,9 +977,9 @@ export async function getShiftSheetRows(
     const logShiftCode = extractShiftCode(log.shift || "").trim().toLowerCase();
     return (
       logShift === targetShift ||
-      logShiftCode === targetShiftCode ||
-      (logShiftCode && logShift.startsWith(logShiftCode)) ||
-      (targetShiftCode && targetShift.startsWith(logShiftCode))
+      (Boolean(logShiftCode && targetShiftCode) && logShiftCode === targetShiftCode) ||
+      (Boolean(targetShiftCode) && logShift.startsWith(targetShiftCode)) ||
+      (Boolean(logShiftCode) && targetShift.startsWith(logShiftCode))
     );
   });
 
@@ -1048,46 +1116,98 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
     }
   }
 
-  // Normalize runNo sequentially (1, 2, 3...) per machineId
+  // 1. Normalize runNo sequentially (1, 2, 3...) per machineId and generate deterministic id
   const machineRunCounters = new Map<string, number>();
   const normalizedRows: MachineShiftRow[] = rows.map((r) => {
-    const nextRun = (machineRunCounters.get(r.machineId) || 0) + 1;
-    machineRunCounters.set(r.machineId, nextRun);
+    const rawShift = r.shift ?? "Shift A";
+    const shiftCode = extractShiftCode(rawShift);
+    const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
+
+    const mKey = `${r.date}__${cleanShift}__${r.line}__${r.machineId}`;
+    const nextRun = (machineRunCounters.get(mKey) || 0) + 1;
+    machineRunCounters.set(mKey, nextRun);
+
+    const deterministicId =
+      nextRun === 1
+        ? `${r.date}_${cleanShift}_${r.line}_${r.machineId}`
+        : `${r.date}_${cleanShift}_${r.line}_${r.machineId}_r${nextRun}`;
+
     return {
       ...r,
+      shift: cleanShift,
       runNo: nextRun,
+      id: deterministicId,
     };
   });
 
   const supabase = createAdminClient();
   const dbPayloads = normalizedRows.map((r) => mapUiRowToDbRow(r));
 
+  // 2. Deduplicate dbPayloads in memory before touching Supabase
+  type DbPayload = ReturnType<typeof mapUiRowToDbRow>;
+  const dedupedMap = new Map<string, DbPayload>();
+  const seenCompositeKeys = new Set<string>();
+
+  for (const payload of dbPayloads) {
+    const compositeKey = `${payload.log_date}|${payload.shift}|${payload.line}|${payload.machine_id}|${payload.run_no}`;
+    if (dedupedMap.has(payload.id) || seenCompositeKeys.has(compositeKey)) {
+      const existing = dedupedMap.get(payload.id);
+      if (
+        existing &&
+        !isPopulatedDbLogRow(existing as unknown as DbShiftLogRow) &&
+        isPopulatedDbLogRow(payload as unknown as DbShiftLogRow)
+      ) {
+        dedupedMap.set(payload.id, payload);
+      }
+      continue;
+    }
+    dedupedMap.set(payload.id, payload);
+    seenCompositeKeys.add(compositeKey);
+  }
+
+  const dedupedPayloads = Array.from(dedupedMap.values());
+  if (dedupedPayloads.length === 0) return { success: true, count: 0, rows: [] };
+
+  // 3. Delete Stale / Removed Rows for (log_date, shift, line) BEFORE Calling .upsert()
+  const savedIds = dedupedPayloads.map((p) => p.id).filter(Boolean);
+  if (savedIds.length > 0) {
+    // Collect distinct (log_date, shift, line) scopes present in dedupedPayloads
+    const scopes = new Map<string, { date: string; shift: string; line: string; ids: string[] }>();
+    for (const p of dedupedPayloads) {
+      const scopeKey = `${p.log_date}__${p.shift}__${p.line}`;
+      if (!scopes.has(scopeKey)) {
+        scopes.set(scopeKey, { date: p.log_date, shift: p.shift, line: p.line, ids: [] });
+      }
+      scopes.get(scopeKey)!.ids.push(p.id);
+    }
+
+    for (const scope of scopes.values()) {
+      if (scope.ids.length > 0) {
+        const inClause = `(${scope.ids.map((id) => `"${id.replace(/"/g, "")}"`).join(",")})`;
+        const { error: delError } = await supabase
+          .from("shift_logs")
+          .delete()
+          .eq("log_date", scope.date)
+          .eq("shift", scope.shift)
+          .eq("line", scope.line)
+          .not("id", "in", inClause);
+
+        if (delError) {
+          console.warn("Failed to prune removed split rows from shift_logs before upsert:", delError.message);
+        }
+      }
+    }
+  }
+
+  // 4. Upsert Explicitly on Primary Key { onConflict: "id" }
   const { data, error } = await supabase
     .from("shift_logs")
-    .upsert(dbPayloads, {
-      onConflict: "log_date,shift,line,machine_id,run_no",
+    .upsert(dedupedPayloads, {
+      onConflict: "id",
     })
     .select();
 
   if (error) throw new Error(error.message);
-
-  // Delete any removed split rows in public.shift_logs for the same (log_date, shift, line)
-  // whose id is not in the upserted payload
-  const savedIds = dbPayloads.map((p) => p.id).filter(Boolean);
-  if (savedIds.length > 0) {
-    const sample = dbPayloads[0];
-    const { error: delError } = await supabase
-      .from("shift_logs")
-      .delete()
-      .eq("log_date", sample.log_date)
-      .eq("shift", sample.shift)
-      .eq("line", sample.line)
-      .not("id", "in", `(${savedIds.map((id) => `"${id}"`).join(",")})`);
-
-    if (delError) {
-      console.warn("Failed to prune removed split rows from shift_logs:", delError.message);
-    }
-  }
 
   // Auto-sync valid Machine × Item × Operation cycle times in background
   await syncMachineItemCycleTimes(supabase, normalizedRows);
@@ -1095,7 +1215,7 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
   revalidatePath("/");
   return {
     success: true,
-    count: data?.length ?? dbPayloads.length,
+    count: data?.length ?? dedupedPayloads.length,
     rows: (data as DbShiftLogRow[]).map(mapDbRowToUiRow),
   };
 }
@@ -1107,12 +1227,28 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
   await assertShiftEditable(row.date, row.shift);
 
   const supabase = createAdminClient();
-  const dbPayload = mapUiRowToDbRow(row);
+  const rawShift = row.shift ?? "Shift A";
+  const shiftCode = extractShiftCode(rawShift);
+  const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
+  const runNo = Number(row.runNo) || 1;
+  const deterministicId =
+    runNo === 1
+      ? `${row.date}_${cleanShift}_${row.line}_${row.machineId}`
+      : `${row.date}_${cleanShift}_${row.line}_${row.machineId}_r${runNo}`;
+
+  const normalizedRow: MachineShiftRow = {
+    ...row,
+    shift: cleanShift,
+    runNo,
+    id: deterministicId,
+  };
+
+  const dbPayload = mapUiRowToDbRow(normalizedRow);
 
   const { data, error } = await supabase
     .from("shift_logs")
     .upsert(dbPayload, {
-      onConflict: "log_date,shift,line,machine_id,run_no",
+      onConflict: "id",
     })
     .select()
     .single();
@@ -1120,7 +1256,7 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
   if (error) throw new Error(error.message);
 
   // Auto-sync valid Machine × Item × Operation cycle times in background
-  await syncMachineItemCycleTimes(supabase, [row]);
+  await syncMachineItemCycleTimes(supabase, [normalizedRow]);
 
   revalidatePath("/");
   return {
@@ -1141,39 +1277,78 @@ export async function saveMachineRuns(runs: MachineShiftRow[]) {
 
   const supabase = createAdminClient();
 
-  // Normalize runNo sequentially 1, 2, 3...
-  const normalizedRuns = runs.map((r, idx) => ({
-    ...r,
-    runNo: idx + 1,
-  }));
+  const rawShift = first.shift ?? "Shift A";
+  const shiftCode = extractShiftCode(rawShift);
+  const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
+
+  // 1. Normalize runNo sequentially 1, 2, 3... and deterministic id
+  const normalizedRuns: MachineShiftRow[] = runs.map((r, idx) => {
+    const runNo = idx + 1;
+    const deterministicId =
+      runNo === 1
+        ? `${r.date}_${cleanShift}_${r.line}_${r.machineId}`
+        : `${r.date}_${cleanShift}_${r.line}_${r.machineId}_r${runNo}`;
+    return {
+      ...r,
+      shift: cleanShift,
+      runNo,
+      id: deterministicId,
+    };
+  });
 
   const dbPayloads = normalizedRuns.map((r) => mapUiRowToDbRow(r));
 
-  const { data, error } = await supabase
-    .from("shift_logs")
-    .upsert(dbPayloads, {
-      onConflict: "log_date,shift,line,machine_id,run_no",
-    })
-    .select();
+  // 2. Deduplicate dbPayloads in memory before touching Supabase
+  type DbPayload = ReturnType<typeof mapUiRowToDbRow>;
+  const dedupedMap = new Map<string, DbPayload>();
+  const seenCompositeKeys = new Set<string>();
 
-  if (error) throw new Error(error.message);
+  for (const payload of dbPayloads) {
+    const compositeKey = `${payload.log_date}|${payload.shift}|${payload.line}|${payload.machine_id}|${payload.run_no}`;
+    if (dedupedMap.has(payload.id) || seenCompositeKeys.has(compositeKey)) {
+      const existing = dedupedMap.get(payload.id);
+      if (
+        existing &&
+        !isPopulatedDbLogRow(existing as unknown as DbShiftLogRow) &&
+        isPopulatedDbLogRow(payload as unknown as DbShiftLogRow)
+      ) {
+        dedupedMap.set(payload.id, payload);
+      }
+      continue;
+    }
+    dedupedMap.set(payload.id, payload);
+    seenCompositeKeys.add(compositeKey);
+  }
 
-  // Clean up any removed split runs for this machine on this date/shift/line
-  const savedIds = dbPayloads.map((p) => p.id);
+  const dedupedPayloads = Array.from(dedupedMap.values());
+  const savedIds = dedupedPayloads.map((p) => p.id).filter(Boolean);
+
+  // 3. Clean up any removed split runs for this machine on this date/shift/line BEFORE .upsert()
   if (savedIds.length > 0) {
+    const inClause = `(${savedIds.map((id) => `"${id.replace(/"/g, "")}"`).join(",")})`;
     const { error: delError } = await supabase
       .from("shift_logs")
       .delete()
       .eq("log_date", first.date)
-      .eq("shift", first.shift)
+      .eq("shift", cleanShift)
       .eq("line", first.line)
       .eq("machine_id", first.machineId)
-      .not("id", "in", `(${savedIds.map((id) => `"${id}"`).join(",")})`);
+      .not("id", "in", inClause);
 
     if (delError) {
-      console.warn("Failed to prune removed runs for machine:", delError.message);
+      console.warn("Failed to prune removed runs for machine before upsert:", delError.message);
     }
   }
+
+  // 4. Upsert Explicitly on Primary Key { onConflict: "id" }
+  const { data, error } = await supabase
+    .from("shift_logs")
+    .upsert(dedupedPayloads, {
+      onConflict: "id",
+    })
+    .select();
+
+  if (error) throw new Error(error.message);
 
   // Auto-sync valid cycle times
   await syncMachineItemCycleTimes(supabase, normalizedRuns);
@@ -1181,7 +1356,7 @@ export async function saveMachineRuns(runs: MachineShiftRow[]) {
   revalidatePath("/");
   return {
     success: true,
-    count: data?.length ?? dbPayloads.length,
+    count: data?.length ?? dedupedPayloads.length,
     rows: (data as DbShiftLogRow[]).map(mapDbRowToUiRow),
   };
 }
