@@ -6,13 +6,7 @@ import {
 } from "@/actions/shiftActions";
 import { getIsUnitHead } from "@/actions/authActions";
 import { getFallbackFactoryTimeContext } from "@/utils/factoryTime";
-import {
-  PRODUCTION_LINES,
-  INITIAL_MACHINES,
-  INITIAL_OPERATORS,
-  INITIAL_ITEMS,
-  generateDefaultShiftRows,
-} from "@/data/initialData";
+import { PRODUCTION_LINES } from "@/data/initialData";
 import { MasterDataState, MachineShiftRow, ShiftType } from "@/types";
 
 export const dynamic = "force-dynamic";
@@ -21,9 +15,9 @@ export default async function HomePage() {
   const initialLine: string = PRODUCTION_LINES?.[0] ?? "Line 1";
 
   let initialMasterData: MasterDataState = {
-    machines: INITIAL_MACHINES ?? [],
-    operators: INITIAL_OPERATORS ?? [],
-    items: INITIAL_ITEMS ?? [],
+    machines: [],
+    operators: [],
+    items: [],
   };
 
   let initialRows: MachineShiftRow[] = [];
@@ -44,7 +38,7 @@ export default async function HomePage() {
     initialShift = timeContext.autoSelectedShift;
     serverNowIst = timeContext.serverNowIst;
 
-    if (fetchedMaster?.machines?.length > 0) {
+    if (fetchedMaster) {
       initialMasterData = fetchedMaster;
     }
 
@@ -53,17 +47,9 @@ export default async function HomePage() {
       initialShift,
       initialLine
     );
-
-    if (initialRows.length === 0) {
-      initialRows = generateDefaultShiftRows(
-        initialDate,
-        initialShift,
-        initialLine
-      );
-    }
   } catch (error) {
     console.error(
-      "Supabase unreachable or error on initial load, falling back to defaults:",
+      "Supabase unreachable or error on initial load:",
       error
     );
     if (!initialDate || !serverNowIst) {
@@ -73,11 +59,7 @@ export default async function HomePage() {
       if (!serverNowIst) serverNowIst = fallbackCtx.serverNowIst;
       initialShift = fallbackCtx.autoSelectedShift;
     }
-    initialRows = generateDefaultShiftRows(
-      initialDate,
-      initialShift,
-      initialLine
-    );
+    initialRows = [];
   }
 
   return (

@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   CheckCircle2,
   AlertTriangle,
@@ -22,6 +22,7 @@ import {
   MasterDataState,
   ShiftType,
   ShiftLockInfo,
+  MachineMaster,
 } from '@/types';
 import {
   calculateEfficiency,
@@ -104,6 +105,10 @@ export function OperatorKiosk({
   const [newMachineCode, setNewMachineCode] = useState("");
   const [newMachineType, setNewMachineType] = useState("CNC");
 
+  const [showAddTempMachineBar, setShowAddTempMachineBar] = useState(false);
+  const [tempMachineName, setTempMachineName] = useState("");
+  const [tempMachineCode, setTempMachineCode] = useState("");
+
   const [isEditingMachine, setIsEditingMachine] = useState(false);
   const [editMachineName, setEditMachineName] = useState("");
   const [editMachineCode, setEditMachineCode] = useState("");
@@ -119,14 +124,17 @@ export function OperatorKiosk({
   const selectedMachineId =
     externalMachineId !== undefined ? externalMachineId : internalMachineId;
 
-  const onSelectMachineId = (machineId: string | null) => {
-    setActiveRunNo(1);
-    if (externalOnSelectMachineId) {
-      externalOnSelectMachineId(machineId);
-    } else {
-      setInternalMachineId(machineId);
-    }
-  };
+  const onSelectMachineId = useCallback(
+    (machineId: string | null) => {
+      setActiveRunNo(1);
+      if (externalOnSelectMachineId) {
+        externalOnSelectMachineId(machineId);
+      } else {
+        setInternalMachineId(machineId);
+      }
+    },
+    [externalOnSelectMachineId]
+  );
 
   const [draft, setDraft] = useState<MachineShiftRow | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -143,11 +151,41 @@ export function OperatorKiosk({
     rows[0]?.totalWorkingMinutes ??
     0;
 
-  // Filter machines for current production line
-  const lineMachines = useMemo(
-    () => machines.filter((m) => (m.line || 'Line 1') === selectedLine),
-    [machines, selectedLine]
-  );
+  // Filter machines for current production line (including temporary machines for this shift)
+  const lineMachines = useMemo(() => {
+    const targetLine = (selectedLine || 'Line 1').trim().toLowerCase();
+    const perms = machines.filter(
+      (m) =>
+        (m.line || 'Line 1').trim().toLowerCase() === targetLine &&
+        (m.status || '').trim().toLowerCase() !== 'disabled'
+    );
+
+    const tempMachines: MachineMaster[] = [];
+    const seenTempIds = new Set<string>();
+
+    for (const r of rows) {
+      if ((r.line || 'Line 1').trim().toLowerCase() !== targetLine) continue;
+      // CRITICAL: Only include real temporary machines (starts with "temp_" and flagged isTempMachine)
+      // Never treat deleted/stale machines as temporary machines!
+      const isTemp =
+        Boolean(r.isTempMachine) === true &&
+        String(r.machineId || '').startsWith('temp_');
+
+      if (isTemp && !seenTempIds.has(r.machineId)) {
+        seenTempIds.add(r.machineId);
+        tempMachines.push({
+          id: r.machineId,
+          name: r.machineName || 'Temp Machine',
+          code: r.machineCode || '',
+          line: r.line || selectedLine,
+          type: 'TEMP',
+          status: 'active',
+        });
+      }
+    }
+
+    return [...perms, ...tempMachines];
+  }, [machines, rows, selectedLine]);
 
   // Sync draft when selectedMachineId or activeRunNo changes (and auto-hydrate cycleTime if missing)
   useEffect(() => {
@@ -162,7 +200,9 @@ export function OperatorKiosk({
       matchingRows.find((r) => (r.runNo || 1) === activeRunNo) ||
       matchingRows[0] ||
       null;
-    const machine = machines.find((m) => m.id === selectedMachineId);
+    const machine =
+      lineMachines.find((m) => m.id === selectedMachineId) ||
+      machines.find((m) => m.id === selectedMachineId);
 
     if (existingRow) {
       if ((existingRow.runNo || 1) !== activeRunNo) {
@@ -229,7 +269,9 @@ export function OperatorKiosk({
           line: selectedLine,
           srNo: idx >= 0 ? idx + 1 : 1,
           runNo: 1,
+          isTempMachine: machine.type === 'TEMP' || machine.id.startsWith('temp_'),
           machineId: machine.id,
+          machineCode: machine.code || undefined,
           machineName: machine.name,
           operatorName: '',
           itemId: '',
@@ -343,6 +385,7 @@ export function OperatorKiosk({
       productionLine: selectedLine,
       srNo: baseRun.srNo,
       runNo: nextRunNo,
+      isTempMachine: Boolean(baseRun.isTempMachine || baseRun.machineId?.startsWith('temp_')),
       machineId: selectedMachineId,
       machineName: baseRun.machineName,
       machineCode: baseRun.machineCode,
@@ -671,7 +714,13 @@ export function OperatorKiosk({
             }
           }
 
-          if (draft.machineId) {
+          if (
+            draft.machineId &&
+            !draft.machineId.startsWith("temp_") &&
+            !draft.isTempMachine &&
+            draft.itemId &&
+            (draft.cycleTime || 0) > 0
+          ) {
             await upsertMachineItemCycleTime({
               machineId: draft.machineId,
               itemId: draft.itemId,
@@ -778,6 +827,83 @@ export function OperatorKiosk({
       setIsInlineSaving(false);
     }
   };
+
+  // 2D. Add Temporary Machine for this shift (not saved to Master Data)
+  const handleAddTempMachine = useCallback(() => {
+    if (isShiftLocked) return;
+    const trimmedName = tempMachineName.trim();
+    if (!trimmedName) {
+      alert("Please enter a Temporary Machine Name");
+      return;
+    }
+
+    const lineSlug = selectedLine.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    const tempId = `temp_${lineSlug}_${Date.now()}`;
+    const maxSrNo = rows.reduce((max, r) => Math.max(max, Number(r.srNo) || 0), 0);
+    const rowShiftMins = shiftWorkingMinutes || rows[0]?.totalWorkingMinutes || 1305;
+
+    const newRow: MachineShiftRow = {
+      id: `${selectedDate}_${selectedShift}_${selectedLine}_${tempId}`,
+      date: selectedDate,
+      shift: selectedShift,
+      line: selectedLine,
+      productionLine: selectedLine,
+      srNo: maxSrNo + 1,
+      runNo: 1,
+      isTempMachine: true,
+      machineId: tempId,
+      machineCode: tempMachineCode.trim() || undefined,
+      machineName: trimmedName,
+      operatorName: "",
+      itemId: "",
+      itemName: "",
+      operation: "",
+      cycleTime: 0,
+      totalWorkingMinutes: rowShiftMins,
+      shiftWorkingMinutes: rowShiftMins,
+      stdOutput: 0,
+      actualOutput: 0,
+      rework: 0,
+      breakdown: {
+        noDisc: 0,
+        change: 0,
+        power: 0,
+        operator: 0,
+        machineBreakdown: 0,
+        fixProgSettings: 0,
+      },
+      breakdownPct: {
+        noDiscPct: 0,
+        changePct: 0,
+        powerPct: 0,
+        operatorPct: 0,
+        machineBreakdownPct: 0,
+        fixProgSettingsPct: 0,
+        totalBdMinutes: 0,
+        totalBdPct: 0,
+      },
+      remarks: "",
+    };
+
+    if (onRowsChange) {
+      onRowsChange([...rows, newRow]);
+    }
+    setTempMachineName("");
+    setTempMachineCode("");
+    setShowAddTempMachineBar(false);
+    onSelectMachineId(tempId);
+  }, [
+    isShiftLocked,
+    tempMachineName,
+    tempMachineCode,
+    selectedLine,
+    selectedDate,
+    selectedShift,
+    rows,
+    shiftWorkingMinutes,
+    onRowsChange,
+    onSelectMachineId,
+  ]);
 
   // 2E. Update Machine Name & Code inline
   const handleUpdateMachineDetails = async () => {
@@ -1270,6 +1396,15 @@ export function OperatorKiosk({
               </button>
               <button
                 type="button"
+                onClick={() => setShowAddTempMachineBar((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded bg-amber-600 text-white hover:bg-amber-500 shadow-2xs transition-colors cursor-pointer"
+                title="Add temporary machine to this shift (not saved to Master Data)"
+              >
+                <Plus className="w-3.5 h-3.5 text-white" />
+                <span>+ Add Temp Machine</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setShowAddOperatorModal(true);
                   setNewOperatorName('');
@@ -1349,6 +1484,50 @@ export function OperatorKiosk({
           </div>
         )}
 
+        {/* Inline Add Temp Machine Bar */}
+        {showAddTempMachineBar && !isShiftLocked && (
+          <div className="flex flex-wrap items-center gap-2 p-3 bg-amber-50/90 border border-amber-300 rounded-lg shadow-2xs animate-in fade-in duration-150">
+            <span className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500 text-slate-950 font-black tracking-wider uppercase">
+                TEMP
+              </span>
+              <span>Temporary Machine ({selectedLine}):</span>
+            </span>
+            <input
+              type="text"
+              placeholder="Machine Name * (e.g. CNC-EXTRA-01)"
+              value={tempMachineName}
+              onChange={(e) => setTempMachineName(e.target.value)}
+              className="px-2.5 py-1 text-xs border border-amber-300 rounded bg-white text-slate-900 font-medium placeholder-slate-400 focus:outline-none focus:border-amber-600"
+            />
+            <input
+              type="text"
+              placeholder="Code / Note (Optional)"
+              value={tempMachineCode}
+              onChange={(e) => setTempMachineCode(e.target.value)}
+              className="px-2.5 py-1 text-xs border border-amber-300 rounded bg-white text-slate-900 font-mono placeholder-slate-400 w-36 focus:outline-none focus:border-amber-600"
+            />
+            <button
+              type="button"
+              onClick={handleAddTempMachine}
+              className="px-3.5 py-1 text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white rounded transition-colors shadow-2xs cursor-pointer"
+            >
+              + Add & Select
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowAddTempMachineBar(false);
+                setTempMachineName("");
+                setTempMachineCode("");
+              }}
+              className="px-2.5 py-1 text-xs text-slate-600 hover:text-slate-800 cursor-pointer"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
         {/* Machine Visual Grid for current line */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 gap-2.5 sm:gap-4">
           {lineMachines.map((machine, index) => {
@@ -1392,13 +1571,18 @@ export function OperatorKiosk({
               >
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-[11px] font-mono font-bold text-slate-600">
                         #{index + 1}
                       </span>
                       {machRuns.length > 1 && (
                         <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-bold border border-blue-200">
                           {machRuns.length} Runs
+                        </span>
+                      )}
+                      {(machine.type === 'TEMP' || machRuns.some((r) => r.isTempMachine || r.machineId?.startsWith('temp_'))) && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-black tracking-wider uppercase border border-amber-300">
+                          TEMP
                         </span>
                       )}
                     </div>
@@ -1707,11 +1891,16 @@ export function OperatorKiosk({
                   </button>
                 </div>
               ) : (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <h2 className="text-xl font-extrabold text-white tracking-tight">
                     {draft.machineName}
                   </h2>
-                  {!isShiftLocked && (
+                  {(draft.isTempMachine || draft.machineId?.startsWith('temp_')) && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500 text-slate-950 font-black tracking-wider uppercase">
+                      TEMP
+                    </span>
+                  )}
+                  {!isShiftLocked && !(draft.isTempMachine || draft.machineId?.startsWith('temp_')) && (
                     <button
                       type="button"
                       onClick={() => {

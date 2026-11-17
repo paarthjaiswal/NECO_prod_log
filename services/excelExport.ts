@@ -52,6 +52,7 @@ export function formatRowForExport(row: MachineShiftRow): Record<string, string 
     "Line": row.line || "Line 1",
     "Sr No": row.srNo,
     "Run No": row.runNo || 1,
+    "Is Temp Machine": Boolean(row.isTempMachine || row.machineId?.startsWith("temp_")) ? "Yes" : "No",
     "Machine ID": row.machineId,
     "Machine Name": row.machineName,
     "Operator Name": row.operatorName || "",
@@ -237,9 +238,37 @@ function buildMachineEfficiencyData(
     ? masterData.machines
     : INITIAL_MACHINES;
 
-  return allMachines.map((m) => {
+  const baseMachineIds = new Set(allMachines.map((m) => m.id));
+  const tempMachinesMap = new Map<
+    string,
+    { id: string; name: string; code: string; line: string; isTemp: boolean }
+  >();
+
+  for (const r of rows) {
+    const isTemp = Boolean(
+      r.isTempMachine ||
+      r.machineId?.startsWith("temp_") ||
+      !baseMachineIds.has(r.machineId)
+    );
+    if (isTemp && r.machineId && !tempMachinesMap.has(r.machineId)) {
+      tempMachinesMap.set(r.machineId, {
+        id: r.machineId,
+        name: `${r.machineName || "Temp Machine"} (Temp)`,
+        code: r.machineCode || "TEMP",
+        line: r.line || "Line 1",
+        isTemp: true,
+      });
+    }
+  }
+
+  const combinedMachines = [
+    ...allMachines.map((m) => ({ ...m, isTemp: false })),
+    ...Array.from(tempMachinesMap.values()),
+  ];
+
+  return combinedMachines.map((m) => {
     const machLogs = rows.filter(
-      (r) => r.machineId === m.id || r.machineName === m.name
+      (r) => r.machineId === m.id || (!m.isTemp && r.machineName === m.name)
     );
     const activeLogs = machLogs.filter((r) => Number(r.stdOutput) > 0);
 

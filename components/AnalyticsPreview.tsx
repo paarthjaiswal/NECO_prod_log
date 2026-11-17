@@ -675,14 +675,50 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   // Section 3: Machine-wise Detailed Efficiency Matrix
   const machineMetrics = useMemo(() => {
-    const relevantMachines =
+    const baseMachines =
       machineLineFilter === 'all'
         ? machines
         : machines.filter((m) => (m.line || 'Line 1') === machineLineFilter);
 
+    const baseMachineIds = new Set(machines.map((m) => m.id));
+
+    // Find any temporary machines present in filteredLogs for the selected machineLineFilter
+    const tempMachinesMap = new Map<
+      string,
+      { id: string; name: string; code: string; line: string; isTemp: boolean }
+    >();
+
+    for (const log of filteredLogs) {
+      const isTemp = Boolean(
+        log.isTempMachine ||
+        log.machineId?.startsWith('temp_') ||
+        !baseMachineIds.has(log.machineId)
+      );
+
+      if (isTemp && log.machineId) {
+        const line = log.line || 'Line 1';
+        if (machineLineFilter === 'all' || line === machineLineFilter) {
+          if (!tempMachinesMap.has(log.machineId)) {
+            tempMachinesMap.set(log.machineId, {
+              id: log.machineId,
+              name: `${log.machineName || 'Temp Machine'} (Temp)`,
+              code: log.machineCode || 'TEMP',
+              line,
+              isTemp: true,
+            });
+          }
+        }
+      }
+    }
+
+    const relevantMachines = [
+      ...baseMachines.map((m) => ({ ...m, isTemp: false })),
+      ...Array.from(tempMachinesMap.values()),
+    ];
+
     return relevantMachines.map((machine) => {
       const machLogs = filteredLogs.filter(
-        (l) => l.machineId === machine.id || l.machineName === machine.name
+        (l) => l.machineId === machine.id || (!machine.isTemp && l.machineName === machine.name)
       );
       const activeLogs = machLogs.filter((l) => Number(l.stdOutput) > 0);
       const isOperating = activeLogs.length > 0;

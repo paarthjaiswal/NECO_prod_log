@@ -2,12 +2,12 @@
 
 import React, { useState, useEffect, useRef, useTransition, useMemo } from "react";
 import dynamic from "next/dynamic";
-import { CheckCircle2 } from "lucide-react";
 import Header from "@/components/Header";
 import { DailyShiftSheet } from "@/components/DailyShiftSheet";
 import { OperatorKiosk } from "@/components/OperatorKiosk";
 import {
   ActiveTab,
+  MachineMaster,
   MachineShiftRow,
   MasterDataState,
   ShiftType,
@@ -25,7 +25,6 @@ import {
 import {
   PRODUCTION_LINES,
   SHIFTS,
-  generateDefaultShiftRows,
 } from "@/data/initialData";
 import { exportShiftToExcel } from "@/services/excelExport";
 import {
@@ -93,6 +92,144 @@ const formatMsToIstString = (ms: number): string => {
   const second = getPart("second");
   return `${year}-${month}-${day}T${hour}:${minute}:${second}+05:30`;
 };
+
+/**
+ * Ensures that every permanent machine belonging to the target line in Master Data
+ * (with status !== "disabled") exists in the rows array.
+ * - Preserves existing machine runs and their user-entered data, ordered by runNo.
+ * - Generates 1 default blank row with runNo: 1 for any line machine lacking rows.
+ * - Normalizes srNo sequentially (1, 2, 3...) based on line machines order.
+ * - Appends valid temporary machines (isTempMachine or machineId starts with "temp_") for this line.
+ */
+export function ensureAllLineMachinesInRows(
+  currentRows: MachineShiftRow[],
+  lineMachines: MachineMaster[],
+  date: string,
+  shift: ShiftType,
+  line: string,
+  shiftWorkingMinutes: number
+): MachineShiftRow[] {
+  const result: MachineShiftRow[] = [];
+  const assignedRowIds = new Set<string>();
+
+  // 1. Permanent machines in lineMachines order
+  lineMachines.forEach((machine, mIdx) => {
+    const srNo = mIdx + 1;
+    const matchingRows = (currentRows || []).filter(
+      (r) =>
+        !r.isTempMachine &&
+        !String(r.machineId || "").startsWith("temp_") &&
+        (r.machineId === machine.id ||
+          (r.machineName &&
+            machine.name &&
+            r.machineName.trim().toLowerCase() === machine.name.trim().toLowerCase()))
+    );
+
+    if (matchingRows.length > 0) {
+      const sortedRuns = [...matchingRows].sort(
+        (a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1)
+      );
+      sortedRuns.forEach((r, runIdx) => {
+        if (r.id) assignedRowIds.add(r.id);
+        result.push({
+          ...r,
+          date: date || r.date,
+          shift: shift || r.shift,
+          line: line || r.line,
+          srNo,
+          runNo: Number(r.runNo) || runIdx + 1,
+          isTempMachine: false,
+          machineId: machine.id,
+          machineName: machine.name,
+          machineCode: machine.code || r.machineCode || undefined,
+          totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes || 1305,
+          shiftWorkingMinutes: shiftWorkingMinutes || r.shiftWorkingMinutes || 1305,
+        });
+      });
+    } else {
+      result.push({
+        id: `${date}_${shift}_${line}_${machine.id}`,
+        date,
+        shift,
+        line,
+        srNo,
+        runNo: 1,
+        isTempMachine: false,
+        machineId: machine.id,
+        machineName: machine.name,
+        machineCode: machine.code || undefined,
+        operatorName: "",
+        itemId: "",
+        itemName: "",
+        operation: "",
+        cycleTime: 0,
+        totalWorkingMinutes: shiftWorkingMinutes || 1305,
+        shiftWorkingMinutes: shiftWorkingMinutes || 1305,
+        stdOutput: 0,
+        actualOutput: 0,
+        rework: 0,
+        breakdown: {
+          noDisc: 0,
+          change: 0,
+          power: 0,
+          operator: 0,
+          machineBreakdown: 0,
+          fixProgSettings: 0,
+        },
+        breakdownPct: {
+          noDiscPct: 0,
+          changePct: 0,
+          powerPct: 0,
+          operatorPct: 0,
+          machineBreakdownPct: 0,
+          fixProgSettingsPct: 0,
+          totalBdMinutes: 0,
+          totalBdPct: 0,
+        },
+        remarks: "",
+      });
+    }
+  });
+
+  // 2. Temporary machines for this line
+  const targetLine = (line || "Line 1").trim().toLowerCase();
+  const tempRows = (currentRows || []).filter(
+    (r) =>
+      !assignedRowIds.has(r.id) &&
+      (Boolean(r.isTempMachine) === true || String(r.machineId || "").startsWith("temp_")) &&
+      (r.line || line || "Line 1").trim().toLowerCase() === targetLine
+  );
+
+  const tempGroups = new Map<string, MachineShiftRow[]>();
+  for (const r of tempRows) {
+    const key = r.machineId;
+    if (!tempGroups.has(key)) {
+      tempGroups.set(key, []);
+    }
+    tempGroups.get(key)!.push(r);
+  }
+
+  let nextSrNo = lineMachines.length + 1;
+  for (const [, runs] of tempGroups.entries()) {
+    runs.sort((a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1));
+    runs.forEach((r, runIdx) => {
+      result.push({
+        ...r,
+        date: date || r.date,
+        shift: shift || r.shift,
+        line: line || r.line,
+        srNo: nextSrNo,
+        runNo: Number(r.runNo) || runIdx + 1,
+        isTempMachine: true,
+        totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes || 1305,
+        shiftWorkingMinutes: shiftWorkingMinutes || r.shiftWorkingMinutes || 1305,
+      });
+    });
+    nextSrNo++;
+  }
+
+  return result;
+}
 
 export interface DashboardClientProps {
   initialMasterData: MasterDataState;
@@ -218,14 +355,6 @@ export default function DashboardClient({
     };
   }, [selectedDate, selectedShift, isAdmin, shiftLock.isEditable]);
 
-  const [currentShiftRows, setCurrentShiftRows] =
-    useState<MachineShiftRow[]>(initialRows);
-  const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
-  const [isPending] = useTransition();
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-
-  const { runWithFeedback } = useFeedback();
-
   // Derive active production lines from masterData (fallback to PRODUCTION_LINES)
   const availableLines = useMemo(() => {
     const active = masterData.lines
@@ -241,6 +370,97 @@ export default function DashboardClient({
       .map((s) => s.displayName as ShiftType);
     return active && active.length > 0 ? active : (SHIFTS as ShiftType[]);
   }, [masterData.shifts]);
+
+  // Derive active machines for the currently selected line
+  const currentLineMachines = useMemo(() => {
+    const targetLine = (selectedLine || "Line 1").trim().toLowerCase();
+    return (masterData.machines || [])
+      .filter((m) => {
+        const mLine = (m.line || "Line 1").trim().toLowerCase();
+        if (mLine !== targetLine) return false;
+        const status = (m.status || "").trim().toLowerCase();
+        return status !== "disabled";
+      })
+      .sort((a, b) => {
+        const orderA = typeof a.sortOrder === "number" ? a.sortOrder : 9999;
+        const orderB = typeof b.sortOrder === "number" ? b.sortOrder : 9999;
+        if (orderA !== orderB) return orderA - orderB;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+  }, [masterData.machines, selectedLine]);
+
+  const activeShiftWorkingMinutes = useMemo(() => {
+    const shiftCode = selectedShift.startsWith("Shift")
+      ? selectedShift.split(" ")[0] + " " + selectedShift.split(" ")[1]
+      : selectedShift;
+    const matchedShift = masterData.shifts?.find(
+      (s) =>
+        s.displayName === selectedShift ||
+        s.shiftCode === selectedShift ||
+        s.shiftCode === shiftCode
+    );
+    return matchedShift?.shiftWorkingMinutes ?? 1305;
+  }, [masterData.shifts, selectedShift]);
+
+  const [currentShiftRows, setCurrentShiftRows] = useState<MachineShiftRow[]>(() => {
+    const targetLine = (initialLine || "Line 1").trim().toLowerCase();
+    const initialLineMachines = (initialMasterData.machines || [])
+      .filter((m) => {
+        const mLine = (m.line || "Line 1").trim().toLowerCase();
+        if (mLine !== targetLine) return false;
+        const status = (m.status || "").trim().toLowerCase();
+        return status !== "disabled";
+      })
+      .sort((a, b) => {
+        const orderA = typeof a.sortOrder === "number" ? a.sortOrder : 9999;
+        const orderB = typeof b.sortOrder === "number" ? b.sortOrder : 9999;
+        if (orderA !== orderB) return orderA - orderB;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+
+    const shiftCode = initialShift.startsWith("Shift")
+      ? initialShift.split(" ")[0] + " " + initialShift.split(" ")[1]
+      : initialShift;
+    const matchedShift = initialMasterData.shifts?.find(
+      (s) =>
+        s.displayName === initialShift ||
+        s.shiftCode === initialShift ||
+        s.shiftCode === shiftCode
+    );
+    const shiftMins = matchedShift?.shiftWorkingMinutes ?? 1305;
+
+    return ensureAllLineMachinesInRows(
+      initialRows,
+      initialLineMachines,
+      initialDate,
+      initialShift,
+      initialLine,
+      shiftMins
+    );
+  });
+
+  const displayRows = useMemo(() => {
+    return ensureAllLineMachinesInRows(
+      currentShiftRows,
+      currentLineMachines,
+      selectedDate,
+      selectedShift,
+      selectedLine,
+      activeShiftWorkingMinutes
+    );
+  }, [
+    currentShiftRows,
+    currentLineMachines,
+    selectedDate,
+    selectedShift,
+    selectedLine,
+    activeShiftWorkingMinutes,
+  ]);
+
+  const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
+  const [isPending] = useTransition();
+
+  const { runWithFeedback } = useFeedback();
 
   const draftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
   const isFirstLoad = useRef(true);
@@ -294,10 +514,29 @@ export default function DashboardClient({
             Array.isArray(parsed.rows) &&
             parsed.rows.length > 0
           ) {
-            setCurrentShiftRows(parsed.rows);
-            setHasUnsavedDraft(true);
-            isFirstLoad.current = false;
-            return;
+            const validMachineIds = new Set(masterData.machines.map((m) => m.id));
+            const validRows = parsed.rows.filter(
+              (r: MachineShiftRow) =>
+                validMachineIds.has(r.machineId) ||
+                (Boolean(r.isTempMachine) === true && String(r.machineId || "").startsWith("temp_"))
+            );
+
+            if (validRows.length > 0) {
+              const reconciled = ensureAllLineMachinesInRows(
+                validRows,
+                currentLineMachines,
+                selectedDate,
+                selectedShift,
+                selectedLine,
+                activeShiftWorkingMinutes
+              );
+              setCurrentShiftRows(reconciled);
+              setHasUnsavedDraft(true);
+              isFirstLoad.current = false;
+              return;
+            } else {
+              localStorage.removeItem(draftKey);
+            }
           }
         }
       } catch {
@@ -308,6 +547,16 @@ export default function DashboardClient({
     if (isFirstLoad.current) {
       isFirstLoad.current = false;
       setHasUnsavedDraft(false);
+      setCurrentShiftRows((prev) =>
+        ensureAllLineMachinesInRows(
+          prev,
+          currentLineMachines,
+          selectedDate,
+          selectedShift,
+          selectedLine,
+          activeShiftWorkingMinutes
+        )
+      );
       return;
     }
 
@@ -319,7 +568,15 @@ export default function DashboardClient({
           selectedLine
         );
         if (isMounted) {
-          setCurrentShiftRows(freshRows);
+          const reconciled = ensureAllLineMachinesInRows(
+            freshRows,
+            currentLineMachines,
+            selectedDate,
+            selectedShift,
+            selectedLine,
+            activeShiftWorkingMinutes
+          );
+          setCurrentShiftRows(reconciled);
           setHasUnsavedDraft(false);
         }
         return freshRows;
@@ -334,7 +591,7 @@ export default function DashboardClient({
       isMounted = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate, selectedShift, selectedLine, isShiftLocked]);
+  }, [selectedDate, selectedShift, selectedLine, isShiftLocked, currentLineMachines, activeShiftWorkingMinutes]);
 
   const handleRowsChange = (updatedRows: MachineShiftRow[]) => {
     if (isShiftLocked) return;
@@ -358,8 +615,16 @@ export default function DashboardClient({
           selectedShift,
           selectedLine
         );
-        setCurrentShiftRows(freshRows);
-        return freshRows;
+        const reconciled = ensureAllLineMachinesInRows(
+          freshRows,
+          currentLineMachines,
+          selectedDate,
+          selectedShift,
+          selectedLine,
+          activeShiftWorkingMinutes
+        );
+        setCurrentShiftRows(reconciled);
+        return reconciled;
       },
       {
         loadingMessage: "Reloading from server...",
@@ -453,7 +718,15 @@ export default function DashboardClient({
       async () => {
         const result = await saveShiftSheetRows(sanitizedRows);
         if (result?.success && result?.rows) {
-          setCurrentShiftRows(result.rows);
+          const reconciled = ensureAllLineMachinesInRows(
+            result.rows,
+            currentLineMachines,
+            selectedDate,
+            selectedShift,
+            selectedLine,
+            activeShiftWorkingMinutes
+          );
+          setCurrentShiftRows(reconciled);
           setHasUnsavedDraft(false);
           try {
             localStorage.removeItem(draftKey);
@@ -490,13 +763,26 @@ export default function DashboardClient({
       async () => {
         const result = await updateSingleMachineLog(rowToSave);
         if (result?.success && result?.row) {
-          const updatedRows = currentShiftRows.map((r) =>
-            r.machineId === result.row.machineId && (r.runNo || 1) === (result.row.runNo || 1)
-              ? result.row
-              : r
+          const exists = displayRows.some(
+            (r) => r.machineId === result.row.machineId && (r.runNo || 1) === (result.row.runNo || 1)
           );
-          setCurrentShiftRows(updatedRows);
-          if (hasUnsavedDraft) writeDraft(updatedRows);
+          const updatedRows = exists
+            ? displayRows.map((r) =>
+                r.machineId === result.row.machineId && (r.runNo || 1) === (result.row.runNo || 1)
+                  ? result.row
+                  : r
+              )
+            : [...displayRows, result.row];
+          const reconciled = ensureAllLineMachinesInRows(
+            updatedRows,
+            currentLineMachines,
+            selectedDate,
+            selectedShift,
+            selectedLine,
+            activeShiftWorkingMinutes
+          );
+          setCurrentShiftRows(reconciled);
+          if (hasUnsavedDraft) writeDraft(reconciled);
           return result;
         }
         throw new Error("Failed to save kiosk machine log.");
@@ -529,22 +815,30 @@ export default function DashboardClient({
         const result = await saveMachineRuns(sanitizedRuns);
         if (result?.success && result?.rows) {
           const targetMachineId = sanitizedRuns[0].machineId;
-          const firstTargetIdx = currentShiftRows.findIndex(
+          const firstTargetIdx = displayRows.findIndex(
             (r) => r.machineId === targetMachineId
           );
-          const currentCount = currentShiftRows.filter(
+          const currentCount = displayRows.filter(
             (r) => r.machineId === targetMachineId
           ).length;
 
-          const newRows = [...currentShiftRows];
+          const newRows = [...displayRows];
           if (firstTargetIdx >= 0) {
             newRows.splice(firstTargetIdx, currentCount, ...result.rows);
           } else {
             newRows.push(...result.rows);
           }
 
-          setCurrentShiftRows(newRows);
-          if (hasUnsavedDraft) writeDraft(newRows);
+          const reconciled = ensureAllLineMachinesInRows(
+            newRows,
+            currentLineMachines,
+            selectedDate,
+            selectedShift,
+            selectedLine,
+            activeShiftWorkingMinutes
+          );
+          setCurrentShiftRows(reconciled);
+          if (hasUnsavedDraft) writeDraft(reconciled);
           return result;
         }
         throw new Error("Failed to save machine runs.");
@@ -563,6 +857,35 @@ export default function DashboardClient({
       async () => {
         const freshMaster = await getMasterData();
         setMasterData(freshMaster);
+        const freshRows = await getShiftSheetRows(
+          selectedDate,
+          selectedShift,
+          selectedLine
+        );
+        const targetLine = (selectedLine || "Line 1").trim().toLowerCase();
+        const updatedLineMachines = (freshMaster.machines || [])
+          .filter((m) => {
+            const mLine = (m.line || "Line 1").trim().toLowerCase();
+            if (mLine !== targetLine) return false;
+            const status = (m.status || "").trim().toLowerCase();
+            return status !== "disabled";
+          })
+          .sort((a, b) => {
+            const orderA = typeof a.sortOrder === "number" ? a.sortOrder : 9999;
+            const orderB = typeof b.sortOrder === "number" ? b.sortOrder : 9999;
+            if (orderA !== orderB) return orderA - orderB;
+            return (a.name || "").localeCompare(b.name || "");
+          });
+        const reconciled = ensureAllLineMachinesInRows(
+          freshRows,
+          updatedLineMachines,
+          selectedDate,
+          selectedShift,
+          selectedLine,
+          activeShiftWorkingMinutes
+        );
+        setCurrentShiftRows(reconciled);
+        setHasUnsavedDraft(false);
         return freshMaster;
       },
       {
@@ -574,7 +897,7 @@ export default function DashboardClient({
 
   const handleExportExcel = () => {
     exportShiftToExcel(
-      currentShiftRows,
+      displayRows,
       `${selectedDate}_${selectedLine}`,
       selectedShift,
       selectedLine,
@@ -583,27 +906,43 @@ export default function DashboardClient({
     );
   };
 
-  const handleResetDemo = () => {
+  const handleResetDemo = async () => {
     if (isShiftLocked) {
       alert(shiftLock.reason || "Shift is locked. Data cannot be reset.");
       return;
     }
-    if (!window.confirm("Reset current shift rows to sample demo baseline?")) return;
+    if (!window.confirm("Reload shift rows fresh from database and clear local draft?")) return;
     try {
       localStorage.removeItem(draftKey);
     } catch {
       // ignore
     }
-    const defaultRows = generateDefaultShiftRows(
-      selectedDate,
-      selectedShift,
-      selectedLine
+    await runWithFeedback(
+      async () => {
+        const freshRows = await getShiftSheetRows(
+          selectedDate,
+          selectedShift,
+          selectedLine
+        );
+        const reconciled = ensureAllLineMachinesInRows(
+          freshRows,
+          currentLineMachines,
+          selectedDate,
+          selectedShift,
+          selectedLine,
+          activeShiftWorkingMinutes
+        );
+        setCurrentShiftRows(reconciled);
+        setHasUnsavedDraft(false);
+        return reconciled;
+      },
+      {
+        loadingMessage: "Reloading from database...",
+        successTitle: "Shift Reloaded",
+        successDetail: "Loaded fresh machines from database",
+        errorTitle: "Failed to reload",
+      }
     );
-    setCurrentShiftRows(defaultRows);
-    setHasUnsavedDraft(true);
-    writeDraft(defaultRows);
-    setStatusMessage("Shift reset to demo baseline. Click 'Save Shift Log *' to sync to cloud.");
-    setTimeout(() => setStatusMessage(null), 4000);
   };
 
   return (
@@ -620,7 +959,7 @@ export default function DashboardClient({
         productionLines={availableLines}
         shifts={availableShifts}
         hasUnsavedChanges={hasUnsavedDraft}
-        onSaveShiftLog={() => handleSaveShiftSheet(currentShiftRows)}
+        onSaveShiftLog={() => handleSaveShiftSheet(displayRows)}
         onExportExcel={handleExportExcel}
         onResetDemo={handleResetDemo}
         isSaving={isPending}
@@ -638,7 +977,7 @@ export default function DashboardClient({
       >
         {activeTab === "sheet" && (
           <DailyShiftSheet
-            rows={currentShiftRows}
+            rows={displayRows}
             masterData={masterData}
             onRowsChange={handleRowsChange}
             onSave={handleSaveShiftSheet}
@@ -667,7 +1006,7 @@ export default function DashboardClient({
 
         {activeTab === "kiosk" && (
           <OperatorKiosk
-            rows={currentShiftRows}
+            rows={displayRows}
             masterData={masterData}
             selectedDate={selectedDate}
             selectedShift={selectedShift}
@@ -688,7 +1027,7 @@ export default function DashboardClient({
 
         {activeTab === "analytics" && (
           <AnalyticsPreview
-            rows={currentShiftRows}
+            rows={displayRows}
             selectedDate={selectedDate}
             selectedShift={selectedShift}
             selectedLine={selectedLine}
@@ -706,14 +1045,6 @@ export default function DashboardClient({
           />
         )}
       </main>
-
-      {/* Floating Non-Intrusive Toast */}
-      {statusMessage && (
-        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white text-xs px-4 py-2.5 rounded-lg shadow-2xl border border-slate-700 flex items-center gap-2 pointer-events-none transition-all animate-bounce">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{statusMessage}</span>
-        </div>
-      )}
     </div>
   );
 }

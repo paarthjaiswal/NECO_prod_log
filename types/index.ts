@@ -85,6 +85,7 @@ export interface MachineShiftRow {
   productionLine?: string; // Line alias
   srNo: number;
   runNo?: number;              // Multi-Run / Split Row index (1, 2, 3...)
+  isTempMachine?: boolean;     // Temporary machine for this shift (not in Master Data)
   machineId: string;
   machineCode?: string;
   machineName: string;
@@ -110,7 +111,8 @@ export interface MachineMaster {
   code: string;
   line?: string;
   type?: string;
-  status?: 'active' | 'maintenance' | 'idle';
+  status?: 'active' | 'maintenance' | 'idle' | 'disabled' | string;
+  sortOrder?: number;
 }
 
 export interface MasterDataState {

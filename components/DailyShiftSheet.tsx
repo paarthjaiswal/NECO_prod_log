@@ -325,6 +325,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         productionLine: baseRow.productionLine,
         srNo: baseRow.srNo,
         runNo: nextRunNo,
+        isTempMachine: Boolean(baseRow.isTempMachine || baseRow.machineId?.startsWith("temp_")),
         machineId: baseRow.machineId,
         machineCode: baseRow.machineCode,
         machineName: baseRow.machineName,
@@ -400,6 +401,33 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       onRowsChange(balancedRows);
     },
     [isShiftLocked, rows, shiftWorkingMinutes, onRowsChange]
+  );
+
+  // Remove an entire temporary machine (all runs for that machineId)
+  const handleRemoveTempMachine = useCallback(
+    (rowIndex: number) => {
+      if (isShiftLocked) return;
+      const targetRow = rows[rowIndex];
+      if (!targetRow || (!targetRow.isTempMachine && !targetRow.machineId?.startsWith("temp_"))) return;
+
+      const remainingRows = rows.filter((r) => r.machineId !== targetRow.machineId);
+      // Renumber srNo sequentially per distinct machine
+      let currentSrNo = 0;
+      let lastSeenMachineId = "";
+      const renumbered = remainingRows.map((r) => {
+        if (r.machineId !== lastSeenMachineId) {
+          lastSeenMachineId = r.machineId;
+          currentSrNo++;
+        }
+        return {
+          ...r,
+          srNo: currentSrNo,
+        };
+      });
+
+      onRowsChange(renumbered);
+    },
+    [isShiftLocked, rows, onRowsChange]
   );
 
   // Apply patches to many rows at once (avoids stale-closure overwrites from looping updateRow)
@@ -537,7 +565,17 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
   const handleCycleTimeBlurOrCommit = async (index: number, newCt: number) => {
     const row = rows[index];
-    if (!row.machineId || !row.itemId || !row.operation || newCt <= 0) return;
+    if (
+      !row ||
+      !row.machineId ||
+      row.machineId.startsWith("temp_") ||
+      row.isTempMachine ||
+      !row.itemId ||
+      !row.operation ||
+      newCt <= 0
+    ) {
+      return;
+    }
 
     const newStd = calculateDynamicStdOutput(newCt, shiftWorkingMinutes);
     await runWithFeedback(
@@ -576,6 +614,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const [newMachineName, setNewMachineName] = useState("");
   const [newMachineCode, setNewMachineCode] = useState("");
   const [newMachineType, setNewMachineType] = useState("CNC");
+
+  const [showAddTempMachineBar, setShowAddTempMachineBar] = useState(false);
+  const [tempMachineName, setTempMachineName] = useState("");
+  const [tempMachineCode, setTempMachineCode] = useState("");
 
   const [editingMachineId, setEditingMachineId] = useState<string | null>(null);
   const [editMachineName, setEditMachineName] = useState("");
@@ -701,7 +743,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             }
           }
 
-          if (currentRow.machineId) {
+          if (
+            currentRow.machineId &&
+            !currentRow.machineId.startsWith("temp_") &&
+            !currentRow.isTempMachine &&
+            currentRow.itemId &&
+            (currentRow.cycleTime || 0) > 0
+          ) {
             await upsertMachineItemCycleTime({
               machineId: currentRow.machineId,
               itemId: currentRow.itemId,
@@ -840,7 +888,84 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     }
   };
 
-  // 5. Cycle Time Change Handler (Live stdOutput Recalculation)
+  // 5. Add Temporary Machine for this shift (not saved to Master Data)
+  const handleAddTempMachine = useCallback(() => {
+    if (isShiftLocked) return;
+    const trimmedName = tempMachineName.trim();
+    if (!trimmedName) {
+      alert("Please enter a Temporary Machine Name");
+      return;
+    }
+
+    const lineSlug = currentLine.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    const tempId = `temp_${lineSlug}_${Date.now()}`;
+    const maxSrNo = rows.reduce((max, r) => Math.max(max, Number(r.srNo) || 0), 0);
+    const rowShiftMins =
+      shiftWorkingMinutes ||
+      rows[0]?.shiftWorkingMinutes ||
+      rows[0]?.totalWorkingMinutes ||
+      1305;
+
+    const newRow: MachineShiftRow = {
+      id: `${currentDate}_${currentShift}_${currentLine}_${tempId}`,
+      date: currentDate,
+      shift: currentShift,
+      line: currentLine,
+      productionLine: currentLine,
+      srNo: maxSrNo + 1,
+      runNo: 1,
+      isTempMachine: true,
+      machineId: tempId,
+      machineCode: tempMachineCode.trim() || undefined,
+      machineName: trimmedName,
+      operatorName: "",
+      itemId: "",
+      itemName: "",
+      operation: "",
+      cycleTime: 0,
+      totalWorkingMinutes: rowShiftMins,
+      shiftWorkingMinutes: rowShiftMins,
+      stdOutput: 0,
+      actualOutput: 0,
+      rework: 0,
+      breakdown: {
+        noDisc: 0,
+        change: 0,
+        power: 0,
+        operator: 0,
+        machineBreakdown: 0,
+        fixProgSettings: 0,
+      },
+      breakdownPct: {
+        noDiscPct: 0,
+        changePct: 0,
+        powerPct: 0,
+        operatorPct: 0,
+        machineBreakdownPct: 0,
+        fixProgSettingsPct: 0,
+        totalBdMinutes: 0,
+        totalBdPct: 0,
+      },
+      remarks: "",
+    };
+
+    onRowsChange([...rows, newRow]);
+    setTempMachineName("");
+    setTempMachineCode("");
+    setShowAddTempMachineBar(false);
+  }, [
+    isShiftLocked,
+    tempMachineName,
+    tempMachineCode,
+    currentLine,
+    currentDate,
+    currentShift,
+    rows,
+    shiftWorkingMinutes,
+    onRowsChange,
+  ]);
+
+  // 6. Cycle Time Change Handler (Live stdOutput Recalculation)
   const handleCycleTimeChange = (rowIndex: number, rawVal: string) => {
     const newCt = Math.max(0, Number(rawVal) || 0);
     const row = rows[rowIndex];
@@ -1296,6 +1421,15 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => setShowAddTempMachineBar((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded bg-amber-600 text-white hover:bg-amber-500 shadow-2xs"
+                title="Add temporary machine for this shift (not saved in Master Data)"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                + Add Temp Machine
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setQuickAddOperatorRowIdx(0);
                   setNewOperatorName('');
@@ -1605,6 +1739,50 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
           </button>
         </div>
       )}
+
+      {/* Inline Add Temp Machine Bar */}
+      {showAddTempMachineBar && !isShiftLocked && (
+        <div className="flex flex-wrap items-center gap-2 p-2.5 bg-amber-50/90 border border-amber-300 rounded-md mb-2 shadow-2xs">
+          <span className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+            <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500 text-slate-950 font-black tracking-wider uppercase">
+              TEMP
+            </span>
+            <span>Add Temp Machine ({currentLine}):</span>
+          </span>
+          <input
+            type="text"
+            placeholder="Machine Name * (e.g. CNC-EXTRA-01)"
+            value={tempMachineName}
+            onChange={(e) => setTempMachineName(e.target.value)}
+            className="px-2 py-1 text-xs border border-amber-300 rounded bg-white font-medium text-slate-900 placeholder-slate-400 focus:outline-none focus:border-amber-600"
+          />
+          <input
+            type="text"
+            placeholder="Code / Note (Optional)"
+            value={tempMachineCode}
+            onChange={(e) => setTempMachineCode(e.target.value)}
+            className="px-2 py-1 text-xs border border-amber-300 rounded bg-white font-mono text-slate-900 placeholder-slate-400 w-36 focus:outline-none focus:border-amber-600"
+          />
+          <button
+            type="button"
+            onClick={handleAddTempMachine}
+            className="px-3 py-1 text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white rounded transition-colors shadow-2xs cursor-pointer"
+          >
+            + Add to Sheet
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setShowAddTempMachineBar(false);
+              setTempMachineName("");
+              setTempMachineCode("");
+            }}
+            className="px-2 py-1 text-xs text-slate-600 hover:text-slate-900 cursor-pointer"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
       </div>
 
       {/* Interactive Paper Log Sheet (Grouped Table) */}
@@ -1789,7 +1967,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       ) : (row.runNo || 1) === 1 ? (
                         <div className="flex items-center justify-between gap-1 group">
                           <div>
-                            <div className="text-xs font-semibold leading-tight">{row.machineName}</div>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold leading-tight">{row.machineName}</span>
+                              {(row.isTempMachine || row.machineId.startsWith("temp_")) && (
+                                <span className="px-1.5 py-0.5 rounded text-[9px] font-black tracking-wider uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                                  TEMP
+                                </span>
+                              )}
+                            </div>
                             <div className="text-[10px] text-slate-400">{row.machineCode}</div>
                           </div>
                           <div className="flex items-center gap-1">
@@ -1804,7 +1989,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                                 <span>Split</span>
                               </button>
                             )}
-                            {!isShiftLocked && (
+                            {!isShiftLocked && !(row.isTempMachine || row.machineId.startsWith("temp_")) && (
                               <button
                                 type="button"
                                 title="Edit machine name/code/type"
@@ -1820,14 +2005,29 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                                 <Pencil className="w-3 h-3" />
                               </button>
                             )}
+                            {!isShiftLocked && (row.isTempMachine || row.machineId.startsWith("temp_")) && (
+                              <button
+                                type="button"
+                                title={`Remove Temporary Machine "${row.machineName}"`}
+                                onClick={() => handleRemoveTempMachine(index)}
+                                className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded cursor-pointer"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         </div>
                       ) : (
                         <div className="flex items-center justify-between gap-1 pl-2 border-l-2 border-blue-400">
                           <div>
-                            <div className="text-xs font-bold text-blue-800 flex items-center gap-1">
+                            <div className="text-xs font-bold text-blue-800 flex items-center gap-1 flex-wrap">
                               <span>↳ Run #{row.runNo}</span>
                               <span className="text-[10px] font-normal text-slate-500">({row.machineName})</span>
+                              {(row.isTempMachine || row.machineId.startsWith("temp_")) && (
+                                <span className="px-1.5 py-0.2 rounded text-[8px] font-black tracking-wider uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                                  TEMP
+                                </span>
+                              )}
                             </div>
                           </div>
                           {!isShiftLocked && (

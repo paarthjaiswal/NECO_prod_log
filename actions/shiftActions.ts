@@ -47,6 +47,7 @@ export interface DbShiftLogRow {
   bd_operator: number | null;
   bd_machine?: number | null;
   bd_fix_prog?: number | null;
+  is_temp_machine?: boolean | null;
   // Read-only PostgreSQL GENERATED ALWAYS columns (present on SELECT, excluded on UPSERT)
   total_bd_minutes?: number | null;
   bd_no_disc_pct?: number | null;
@@ -66,7 +67,7 @@ export interface DbMachineRow {
   code: string;
   line: string | null;
   type: string | null;
-  status: "active" | "maintenance" | "idle" | null;
+  status: "active" | "maintenance" | "idle" | "disabled" | string | null;
   created_at?: string | null;
   sort_order: number | null;
 }
@@ -245,6 +246,7 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
     line: dbRow.line,
     srNo: Number(dbRow.sr_no ?? 0),
     runNo: Number(dbRow.run_no ?? 1),
+    isTempMachine: Boolean(dbRow.is_temp_machine ?? dbRow.machine_id?.startsWith("temp_")),
     machineId: dbRow.machine_id ?? "",
     machineName: dbRow.machine_name ?? "",
     operatorName: dbRow.operator_name ?? "",
@@ -301,6 +303,7 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     shift: cleanShift,
     line: uiRow.line,
     sr_no: Math.round(Number(uiRow.srNo) || 0),
+    is_temp_machine: Boolean(uiRow.isTempMachine || uiRow.machineId?.startsWith("temp_")),
     machine_id: uiRow.machineId,
     machine_name: uiRow.machineName,
     operator_name: uiRow.operatorName?.trim() ?? "",
@@ -331,6 +334,7 @@ function mapDbMachineToUi(dbMachine: DbMachineRow): MachineMaster {
     line: dbMachine.line ?? "Line 1",
     type: dbMachine.type ?? undefined,
     status: dbMachine.status ?? "active",
+    sortOrder: typeof dbMachine.sort_order === "number" ? dbMachine.sort_order : undefined,
   };
 }
 
@@ -455,23 +459,49 @@ function hydrateShiftSheetRows(
   line: string,
   shiftWorkingMinutes: number // Fetched dynamically from public.shifts
 ): MachineShiftRow[] {
-  // Group saved logs by machine_id, sorted by run_no ASC
+  // Step A: Group saved logs for permanent machines by matching machine.id or machine.name, sorted by run_no ASC
   const logsByMachine = new Map<string, DbShiftLogRow[]>();
+  // Step B: Group saved logs for Temporary Machines (ONLY is_temp_machine === true AND machine_id starts with "temp_")
+  const tempLogsByMachine = new Map<string, DbShiftLogRow[]>();
+
   for (const log of savedDbLogs) {
-    if (!log.machine_id) continue;
-    if (!logsByMachine.has(log.machine_id)) {
-      logsByMachine.set(log.machine_id, []);
+    if (!log.machine_id && !log.machine_name) continue;
+
+    const matchedPermMachine = sortedLineMachines.find(
+      (m) =>
+        (log.machine_id && m.id === log.machine_id) ||
+        (log.machine_name &&
+          m.name &&
+          log.machine_name.trim().toLowerCase() === m.name.trim().toLowerCase())
+    );
+
+    if (matchedPermMachine) {
+      if (!logsByMachine.has(matchedPermMachine.id)) {
+        logsByMachine.set(matchedPermMachine.id, []);
+      }
+      logsByMachine.get(matchedPermMachine.id)!.push(log);
+    } else if (
+      Boolean(log.is_temp_machine) === true &&
+      String(log.machine_id || "").startsWith("temp_")
+    ) {
+      if (!tempLogsByMachine.has(log.machine_id!)) {
+        tempLogsByMachine.set(log.machine_id!, []);
+      }
+      tempLogsByMachine.get(log.machine_id!)!.push(log);
+    } else {
+      // CRITICAL: Stale / deleted machine from past logs - IGNORE / SKIP COMPLETELY
+      continue;
     }
-    logsByMachine.get(log.machine_id)!.push(log);
   }
 
-  // Sort each machine's logs by run_no ascending
+  // Sort each permanent machine's logs by run_no ascending
   for (const logs of logsByMachine.values()) {
     logs.sort((a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1));
   }
 
   const result: MachineShiftRow[] = [];
 
+  // Step A: Hydrate all DB machines for that line
   sortedLineMachines.forEach((machine, index) => {
     const machineLogs = logsByMachine.get(machine.id);
     if (machineLogs && machineLogs.length > 0) {
@@ -481,10 +511,16 @@ function hydrateShiftSheetRows(
           ...uiRow,
           srNo: index + 1,
           runNo: Number(log.run_no) || runIdx + 1,
+          isTempMachine: false,
+          machineId: machine.id,
+          machineName: machine.name,
+          machineCode: machine.code || undefined,
           totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes || 1305,
+          shiftWorkingMinutes: shiftWorkingMinutes || 1305,
         });
       });
     } else {
+      // 1 blank run with runNo = 1
       result.push({
         id: `${date}_${shift}_${line}_${machine.id}`,
         date,
@@ -492,14 +528,17 @@ function hydrateShiftSheetRows(
         line,
         srNo: index + 1,
         runNo: 1,
+        isTempMachine: false,
         machineId: machine.id,
         machineName: machine.name,
+        machineCode: machine.code || undefined,
         operatorName: "",
         itemId: "",
         itemName: "",
         operation: "",
         cycleTime: 0,
         totalWorkingMinutes: shiftWorkingMinutes || 1305,
+        shiftWorkingMinutes: shiftWorkingMinutes || 1305,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -525,6 +564,32 @@ function hydrateShiftSheetRows(
       });
     }
   });
+
+  // Step B: Hydrate ONLY valid temporary machines
+  const tempMachineEntries = Array.from(tempLogsByMachine.entries()).sort(
+    ([, logsA], [, logsB]) => {
+      const minSrA = Math.min(...logsA.map((l) => Number(l.sr_no) || 9999));
+      const minSrB = Math.min(...logsB.map((l) => Number(l.sr_no) || 9999));
+      return minSrA - minSrB;
+    }
+  );
+
+  let nextSrNo = sortedLineMachines.length + 1;
+  for (const [, logs] of tempMachineEntries) {
+    logs.sort((a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1));
+    logs.forEach((log, runIdx) => {
+      const uiRow = mapDbRowToUiRow(log);
+      result.push({
+        ...uiRow,
+        srNo: nextSrNo,
+        runNo: Number(log.run_no) || runIdx + 1,
+        isTempMachine: true,
+        totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes || 1305,
+        shiftWorkingMinutes: shiftWorkingMinutes || 1305,
+      });
+    });
+    nextSrNo++;
+  }
 
   return result;
 }
@@ -730,7 +795,8 @@ export async function getMasterData(): Promise<MasterDataState> {
     supabase
       .from("machines")
       .select("*")
-      .order("sort_order", { ascending: true }),
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true }),
     supabase
       .from("operators")
       .select("*")
@@ -801,15 +867,12 @@ export async function getShiftSheetRows(
     supabase
       .from("machines")
       .select("*")
-      .eq("line", line)
-      .neq("status", "idle")
-      .order("sort_order", { ascending: true }),
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true }),
     supabase
       .from("shift_logs")
       .select("*")
       .eq("log_date", date)
-      .eq("shift", shift)
-      .eq("line", line)
       .order("sr_no", { ascending: true })
       .order("run_no", { ascending: true }),
     supabase
@@ -823,11 +886,40 @@ export async function getShiftSheetRows(
   if (logsRes.error) throw new Error(logsRes.error.message);
   if (shiftConfigRes.error) throw new Error(shiftConfigRes.error.message);
 
+  const targetLine = (line || "Line 1").trim().toLowerCase();
+  const allDbMachines = (machinesRes.data as DbMachineRow[]) ?? [];
+
+  // Filter machines for line: case-insensitive trimmed match, and exclude ONLY if status is disabled
+  const lineMachines = allDbMachines.filter((m) => {
+    const mLine = (m.line || "Line 1").trim().toLowerCase();
+    if (mLine !== targetLine) return false;
+    const status = (m.status || "").trim().toLowerCase();
+    return status !== "disabled";
+  });
+
+  const targetShift = (shift || "").trim().toLowerCase();
+  const targetShiftCode = extractShiftCode(shift).trim().toLowerCase();
+
+  // Filter logs for this line & shift
+  const allDbLogs = (logsRes.data as DbShiftLogRow[]) ?? [];
+  const lineLogs = allDbLogs.filter((log) => {
+    const logLine = (log.line || "Line 1").trim().toLowerCase();
+    if (logLine !== targetLine) return false;
+    const logShift = (log.shift || "").trim().toLowerCase();
+    const logShiftCode = extractShiftCode(log.shift || "").trim().toLowerCase();
+    return (
+      logShift === targetShift ||
+      logShiftCode === targetShiftCode ||
+      (logShiftCode && logShift.startsWith(logShiftCode)) ||
+      (targetShiftCode && targetShift.startsWith(logShiftCode))
+    );
+  });
+
   const dbShiftMinutes = Number(shiftConfigRes.data?.shift_working_minutes ?? 1305);
 
   return hydrateShiftSheetRows(
-    machinesRes.data as DbMachineRow[],
-    logsRes.data as DbShiftLogRow[],
+    lineMachines,
+    lineLogs,
     date,
     shift,
     line,
@@ -846,6 +938,7 @@ async function syncMachineItemCycleTimes(
   // Count how many times each (machineId, itemId, operation) appears in rows
   const comboCounts = new Map<string, number>();
   for (const row of rows) {
+    if (row.isTempMachine || row.machineId?.startsWith("temp_")) continue;
     const ct = Number(row.cycleTime);
     const op = row.operation?.trim();
     if (row.machineId && row.itemId && op && ct > 0) {
@@ -868,6 +961,7 @@ async function syncMachineItemCycleTimes(
   >();
 
   for (const row of rows) {
+    if (row.isTempMachine || row.machineId?.startsWith("temp_")) continue;
     const ct = Number(row.cycleTime);
     const op = row.operation?.trim();
     if (row.machineId && row.itemId && op && ct > 0) {
@@ -892,15 +986,34 @@ async function syncMachineItemCycleTimes(
 
   if (validPairs.size === 0) return;
 
+  const candidateList = Array.from(validPairs.values());
+  const distinctMachineIds = Array.from(new Set(candidateList.map((p) => p.machine_id)));
+  const distinctItemIds = Array.from(new Set(candidateList.map((p) => p.item_id)));
+
+  // Strict Foreign-Key Guard: Query DB to verify all machine_ids and item_ids exist before upserting
+  const [{ data: dbMachines }, { data: dbItems }] = await Promise.all([
+    supabase.from("machines").select("id").in("id", distinctMachineIds),
+    supabase.from("items").select("id").in("id", distinctItemIds),
+  ]);
+
+  const validMachineIdSet = new Set(dbMachines?.map((m) => m.id) ?? []);
+  const validItemIdSet = new Set(dbItems?.map((i) => i.id) ?? []);
+
+  const safePairs = candidateList.filter(
+    (p) => validMachineIdSet.has(p.machine_id) && validItemIdSet.has(p.item_id)
+  );
+
+  if (safePairs.length === 0) return;
+
   const { error } = await supabase
     .from("machine_item_cycle_times")
-    .upsert(Array.from(validPairs.values()), {
+    .upsert(safePairs, {
       onConflict: "machine_id,item_id,operation",
     });
 
   if (error) {
     // If the database id column has an integer/serial constraint, retry omitting the string id
-    const withoutId = Array.from(validPairs.values()).map((p) => ({
+    const withoutId = safePairs.map((p) => ({
       machine_id: p.machine_id,
       item_id: p.item_id,
       operation: p.operation,
@@ -914,7 +1027,7 @@ async function syncMachineItemCycleTimes(
         onConflict: "machine_id,item_id,operation",
       });
     if (retry.error) {
-      console.error("Failed to auto-sync machine_item_cycle_times:", retry.error.message);
+      console.warn("Failed to auto-sync machine_item_cycle_times:", retry.error.message);
     }
   }
 }
@@ -1226,7 +1339,45 @@ export async function removeOperatorMaster(operatorName: string) {
 }
 
 export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
+  if (
+    !entry.machineId ||
+    entry.machineId.startsWith("temp_") ||
+    !entry.itemId ||
+    !entry.operation?.trim()
+  ) {
+    return { success: true, skipped: true };
+  }
+
   const supabase = createAdminClient();
+
+  // Strict Foreign-Key Guard: verify machine_id exists in public.machines
+  const { data: macData, error: macErr } = await supabase
+    .from("machines")
+    .select("id")
+    .eq("id", entry.machineId)
+    .maybeSingle();
+
+  if (macErr || !macData) {
+    console.warn(
+      `[upsertMachineItemCycleTime] Machine ID "${entry.machineId}" does not exist in public.machines. Skipping to prevent FK violation.`
+    );
+    return { success: true, skipped: true, reason: "machine_not_found" };
+  }
+
+  // Also verify item_id exists in public.items
+  const { data: itmData, error: itmErr } = await supabase
+    .from("items")
+    .select("id")
+    .eq("id", entry.itemId)
+    .maybeSingle();
+
+  if (itmErr || !itmData) {
+    console.warn(
+      `[upsertMachineItemCycleTime] Item ID "${entry.itemId}" does not exist in public.items. Skipping to prevent FK violation.`
+    );
+    return { success: true, skipped: true, reason: "item_not_found" };
+  }
+
   const { error } = await supabase.from("machine_item_cycle_times").upsert(
     {
       machine_id: entry.machineId,
@@ -1239,7 +1390,10 @@ export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
     { onConflict: "machine_id,item_id,operation" }
   );
 
-  if (error) throw new Error(error.message);
+  if (error) {
+    console.warn("Failed to upsert machine_item_cycle_times:", error.message);
+    return { success: false, error: error.message };
+  }
   revalidatePath("/");
   return { success: true };
 }
