@@ -349,6 +349,31 @@ function buildItemProductionData(
   itemRollups?: ItemProductionRollup[],
   masterData?: MasterDataState
 ): Record<string, string | number>[] {
+  // Canonical item index for consistent resolution across masterData, rollups, and shift logs
+  const itemLookup = new Map<string, { id?: string; itemCode: string; itemName: string }>();
+  for (const it of (masterData?.items || [])) {
+    const info = { id: it.id, itemCode: it.itemCode || "", itemName: it.itemName || "" };
+    if (it.id) itemLookup.set(it.id.trim().toLowerCase(), info);
+    if (it.itemCode) itemLookup.set(it.itemCode.trim().toLowerCase(), info);
+    if (it.itemName) itemLookup.set(it.itemName.trim().toLowerCase(), info);
+  }
+
+  const resolve = (rawId?: string, rawCode?: string, rawName?: string) => {
+    const id = (rawId || "").trim();
+    const code = (rawCode || "").trim();
+    const name = (rawName || "").trim();
+    const matched =
+      (id ? itemLookup.get(id.toLowerCase()) : null) ||
+      (code ? itemLookup.get(code.toLowerCase()) : null) ||
+      (name ? itemLookup.get(name.toLowerCase()) : null);
+
+    const itemCode = matched?.itemCode || code || (id && !id.startsWith("item_") && !id.startsWith("it_") ? id : "—");
+    const itemName = matched?.itemName || name || (itemCode !== "—" ? itemCode : "Unknown Part");
+    const itemId = matched?.id || id || "";
+    const canonicalKey = (itemCode !== "—" ? itemCode : itemId || itemName).toLowerCase();
+    return { canonicalKey, itemId, itemCode, itemName };
+  };
+
   const map = new Map<
     string,
     {
@@ -369,35 +394,40 @@ function buildItemProductionData(
   // 1. Seed from itemRollups if available
   if (itemRollups && itemRollups.length > 0) {
     for (const roll of itemRollups) {
-      const key = (roll.itemCode || roll.itemId || roll.itemName).trim().toLowerCase();
-      map.set(key, {
-        itemId: roll.itemId,
-        itemCode: roll.itemCode || "—",
-        itemName: roll.itemName,
-        periodAct: 0,
-        periodStd: 0,
-        periodRework: 0,
-        todayQty: roll.todayOutput,
-        mtdQty: roll.mtdOutput,
-        tillNowQty: roll.tillNowOutput,
-        tillNowStd: roll.tillNowStd,
-        tillNowRework: roll.tillNowRework,
-      });
+      const resolved = resolve(roll.itemId, roll.itemCode, roll.itemName);
+      if (!map.has(resolved.canonicalKey)) {
+        map.set(resolved.canonicalKey, {
+          itemId: resolved.itemId,
+          itemCode: resolved.itemCode || "—",
+          itemName: resolved.itemName,
+          periodAct: 0,
+          periodStd: 0,
+          periodRework: 0,
+          todayQty: 0,
+          mtdQty: 0,
+          tillNowQty: 0,
+          tillNowStd: 0,
+          tillNowRework: 0,
+        });
+      }
+      const entry = map.get(resolved.canonicalKey)!;
+      entry.todayQty += Number(roll.todayOutput) || 0;
+      entry.mtdQty += Number(roll.mtdOutput) || 0;
+      entry.tillNowQty += Number(roll.tillNowOutput) || 0;
+      entry.tillNowStd += Number(roll.tillNowStd) || 0;
+      entry.tillNowRework += Number(roll.tillNowRework) || 0;
     }
   }
 
   // 2. Accumulate period quantities from current rows
   for (const r of rows) {
     if (!r.itemId && !r.itemName) continue;
-    const key = (r.itemId || r.itemName).trim().toLowerCase();
-    if (!map.has(key)) {
-      const masterItem = masterData?.items?.find(
-        (it) => it.id === r.itemId || it.itemCode === r.itemId || it.itemName === r.itemName
-      );
-      map.set(key, {
-        itemId: r.itemId,
-        itemCode: masterItem?.itemCode || r.itemId || "—",
-        itemName: masterItem?.itemName || r.itemName || "Unknown Part",
+    const resolved = resolve(r.itemId, undefined, r.itemName);
+    if (!map.has(resolved.canonicalKey)) {
+      map.set(resolved.canonicalKey, {
+        itemId: resolved.itemId,
+        itemCode: resolved.itemCode || "—",
+        itemName: resolved.itemName || "Unknown Part",
         periodAct: 0,
         periodStd: 0,
         periodRework: 0,
@@ -409,7 +439,13 @@ function buildItemProductionData(
       });
     }
 
-    const entry = map.get(key)!;
+    const entry = map.get(resolved.canonicalKey)!;
+    if (entry.itemCode === "—" && resolved.itemCode !== "—") {
+      entry.itemCode = resolved.itemCode;
+    }
+    if ((!entry.itemName || entry.itemName === "Unknown Part") && resolved.itemName) {
+      entry.itemName = resolved.itemName;
+    }
     entry.periodAct += Number(r.actualOutput) || 0;
     entry.periodStd += Number(r.stdOutput) || 0;
     entry.periodRework += Number(r.rework) || 0;

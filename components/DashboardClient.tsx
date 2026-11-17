@@ -463,7 +463,57 @@ export default function DashboardClient({
   const { runWithFeedback } = useFeedback();
 
   const draftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
-  const isFirstLoad = useRef(true);
+  const prevFilterRef = useRef<{
+    date: string;
+    shift: ShiftType;
+    line: string;
+  }>({
+    date: selectedDate,
+    shift: selectedShift,
+    line: selectedLine,
+  });
+
+  // On mount, restore unsaved local draft if one exists for the initial selection (runs strictly on client after hydration)
+  useEffect(() => {
+    if (isShiftLocked) return;
+    try {
+      const initialDraftKey = getDraftKey(initialDate, initialShift, initialLine);
+      const rawDraft = localStorage.getItem(initialDraftKey);
+      if (rawDraft) {
+        const parsed = JSON.parse(rawDraft);
+        if (
+          parsed.date === initialDate &&
+          parsed.shift === initialShift &&
+          parsed.line === initialLine &&
+          Array.isArray(parsed.rows) &&
+          parsed.rows.length > 0
+        ) {
+          const validMachineIds = new Set(masterData.machines.map((m) => m.id));
+          const validRows = parsed.rows.filter(
+            (r: MachineShiftRow) =>
+              validMachineIds.has(r.machineId) ||
+              (Boolean(r.isTempMachine) === true && String(r.machineId || "").startsWith("temp_"))
+          );
+
+          if (validRows.length > 0) {
+            const reconciled = ensureAllLineMachinesInRows(
+              validRows,
+              currentLineMachines,
+              selectedDate,
+              selectedShift,
+              selectedLine,
+              activeShiftWorkingMinutes
+            );
+            setCurrentShiftRows(reconciled);
+            setHasUnsavedDraft(true);
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const writeDraftTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const writeDraft = (rows: MachineShiftRow[]) => {
@@ -497,8 +547,24 @@ export default function DashboardClient({
     };
   }, []);
 
-  // Restore matching local draft, otherwise fetch fresh rows from Supabase, when filters change
+  // Restore matching local draft, otherwise fetch fresh rows from Supabase, ONLY when filters (date, shift, line) change
   useEffect(() => {
+    // Strictly verify if date, shift, or line genuinely changed
+    const filterChanged =
+      selectedDate !== prevFilterRef.current.date ||
+      selectedShift !== prevFilterRef.current.shift ||
+      selectedLine !== prevFilterRef.current.line;
+
+    if (!filterChanged) {
+      return;
+    }
+
+    prevFilterRef.current = {
+      date: selectedDate,
+      shift: selectedShift,
+      line: selectedLine,
+    };
+
     let isMounted = true;
 
     // Do NOT restore unsaved localStorage draft if shift is locked
@@ -532,7 +598,6 @@ export default function DashboardClient({
               );
               setCurrentShiftRows(reconciled);
               setHasUnsavedDraft(true);
-              isFirstLoad.current = false;
               return;
             } else {
               localStorage.removeItem(draftKey);
@@ -542,22 +607,6 @@ export default function DashboardClient({
       } catch {
         // Ignore malformed localStorage data
       }
-    }
-
-    if (isFirstLoad.current) {
-      isFirstLoad.current = false;
-      setHasUnsavedDraft(false);
-      setCurrentShiftRows((prev) =>
-        ensureAllLineMachinesInRows(
-          prev,
-          currentLineMachines,
-          selectedDate,
-          selectedShift,
-          selectedLine,
-          activeShiftWorkingMinutes
-        )
-      );
-      return;
     }
 
     runWithFeedback(
@@ -590,8 +639,17 @@ export default function DashboardClient({
     return () => {
       isMounted = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate, selectedShift, selectedLine, isShiftLocked, currentLineMachines, activeShiftWorkingMinutes]);
+  }, [
+    selectedDate,
+    selectedShift,
+    selectedLine,
+    isShiftLocked,
+    draftKey,
+    masterData.machines,
+    currentLineMachines,
+    activeShiftWorkingMinutes,
+    runWithFeedback,
+  ]);
 
   const handleRowsChange = (updatedRows: MachineShiftRow[]) => {
     if (isShiftLocked) return;
@@ -857,11 +915,7 @@ export default function DashboardClient({
       async () => {
         const freshMaster = await getMasterData();
         setMasterData(freshMaster);
-        const freshRows = await getShiftSheetRows(
-          selectedDate,
-          selectedShift,
-          selectedLine
-        );
+        // Non-destructively merge masterData.machines into currentShiftRows (preserving all user inputs and unsaved edits)
         const targetLine = (selectedLine || "Line 1").trim().toLowerCase();
         const updatedLineMachines = (freshMaster.machines || [])
           .filter((m) => {
@@ -876,16 +930,16 @@ export default function DashboardClient({
             if (orderA !== orderB) return orderA - orderB;
             return (a.name || "").localeCompare(b.name || "");
           });
-        const reconciled = ensureAllLineMachinesInRows(
-          freshRows,
-          updatedLineMachines,
-          selectedDate,
-          selectedShift,
-          selectedLine,
-          activeShiftWorkingMinutes
+        setCurrentShiftRows((prevRows) =>
+          ensureAllLineMachinesInRows(
+            prevRows,
+            updatedLineMachines,
+            selectedDate,
+            selectedShift,
+            selectedLine,
+            activeShiftWorkingMinutes
+          )
         );
-        setCurrentShiftRows(reconciled);
-        setHasUnsavedDraft(false);
         return freshMaster;
       },
       {

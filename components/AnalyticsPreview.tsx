@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   TrendingUp,
   AlertOctagon,
@@ -90,11 +90,17 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     };
   }, [selectedDate, runWithFeedback]);
 
-  // Merge current shift rows with historical logs (deduplicated by row.id)
+  // Merge current shift rows with historical logs (deduplicated by row.id or unique composite key)
   const allLogs = useMemo(() => {
     const logMap = new Map<string, MachineShiftRow>();
-    historicalLogs.forEach((log) => logMap.set(log.id, log));
-    rows.forEach((row) => logMap.set(row.id, row)); // Latest current shift rows win
+    historicalLogs.forEach((log) => {
+      const key = log.id || `${log.date}_${log.shift}_${log.line}_${log.machineId}_${log.runNo || 1}`;
+      logMap.set(key, log);
+    });
+    rows.forEach((row) => {
+      const key = row.id || `${row.date}_${row.shift}_${row.line}_${row.machineId}_${row.runNo || 1}`;
+      logMap.set(key, row); // Latest current shift rows win
+    });
     return Array.from(logMap.values());
   }, [historicalLogs, rows]);
 
@@ -108,43 +114,127 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [itemDropdownFilter, setItemDropdownFilter] = useState<string>('all');
   const [showIdleMachines, setShowIdleMachines] = useState<boolean>(false);
 
-  // Unique parts for dropdown
+  // Canonical item index for consistent resolution across masterData, rollups, and shift logs
+  const itemLookup = useMemo(() => {
+    const lookup = new Map<
+      string,
+      { canonicalKey: string; itemId: string; itemCode: string; itemName: string }
+    >();
+
+    // 1. Index from masterData.items first (highest priority)
+    (masterData?.items || []).forEach((item) => {
+      const id = (item.id || '').trim();
+      const code = (item.itemCode || '').trim();
+      const name = (item.itemName || '').trim();
+      const canonicalKey = (code || id || name).toLowerCase();
+      if (!canonicalKey) return;
+
+      const canonicalItem = {
+        canonicalKey,
+        itemId: id || canonicalKey,
+        itemCode: code || '—',
+        itemName: name || code || 'Unknown Part',
+      };
+
+      if (id) lookup.set(id.toLowerCase(), canonicalItem);
+      if (code) lookup.set(code.toLowerCase(), canonicalItem);
+      if (name) lookup.set(name.toLowerCase(), canonicalItem);
+      lookup.set(canonicalKey, canonicalItem);
+    });
+
+    // 2. Index from itemRollups (for items present in DB shift_logs)
+    itemRollups.forEach((r) => {
+      const id = (r.itemId || '').trim();
+      const code = (r.itemCode || '').trim();
+      const name = (r.itemName || '').trim();
+
+      const existing =
+        (id ? lookup.get(id.toLowerCase()) : null) ||
+        (code ? lookup.get(code.toLowerCase()) : null) ||
+        (name ? lookup.get(name.toLowerCase()) : null);
+
+      const canonicalKey = existing?.canonicalKey || (code || id || name).toLowerCase();
+      if (!canonicalKey) return;
+
+      const canonicalItem = existing || {
+        canonicalKey,
+        itemId: id || canonicalKey,
+        itemCode: code || (id && !id.startsWith('item_') && !id.startsWith('it_') ? id : '—'),
+        itemName: name || code || 'Unknown Part',
+      };
+
+      if (id && !lookup.has(id.toLowerCase())) lookup.set(id.toLowerCase(), canonicalItem);
+      if (code && !lookup.has(code.toLowerCase())) lookup.set(code.toLowerCase(), canonicalItem);
+      if (name && !lookup.has(name.toLowerCase())) lookup.set(name.toLowerCase(), canonicalItem);
+      if (!lookup.has(canonicalKey)) lookup.set(canonicalKey, canonicalItem);
+    });
+
+    return lookup;
+  }, [masterData?.items, itemRollups]);
+
+  // Resolve any raw item reference into canonical item info
+  const resolveItem = useCallback(
+    (rawId?: string, rawCode?: string, rawName?: string) => {
+      const id = (rawId || '').trim();
+      const code = (rawCode || '').trim();
+      const name = (rawName || '').trim();
+
+      const matched =
+        (id ? itemLookup.get(id.toLowerCase()) : null) ||
+        (code ? itemLookup.get(code.toLowerCase()) : null) ||
+        (name ? itemLookup.get(name.toLowerCase()) : null);
+
+      if (matched) return matched;
+
+      const fallbackCode = code || (id && !id.startsWith('item_') && !id.startsWith('it_') ? id : '');
+      const canonicalKey = (fallbackCode || id || name || 'unknown').toLowerCase();
+      return {
+        canonicalKey,
+        itemId: id || canonicalKey,
+        itemCode: fallbackCode || '—',
+        itemName: name || fallbackCode || id || 'Unknown Part',
+      };
+    },
+    [itemLookup]
+  );
+
+  // Unique parts for dropdown with canonical deduplication
   const uniquePartOptions = useMemo(() => {
     const map = new Map<string, { value: string; label: string }>();
 
-    masterData?.items?.forEach((it) => {
-      const code = (it.itemCode || '').trim();
-      const name = (it.itemName || '').trim();
+    (masterData?.items || []).forEach((it) => {
+      const resolved = resolveItem(it.id, it.itemCode, it.itemName);
+      const code = resolved.itemCode !== '—' ? resolved.itemCode : '';
+      const name = resolved.itemName;
       const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
-      const val = (it.id || code || name).trim().toLowerCase();
-      if (val && !map.has(val)) {
-        map.set(val, { value: it.id || code || name, label });
+      if (resolved.canonicalKey && !map.has(resolved.canonicalKey)) {
+        map.set(resolved.canonicalKey, { value: resolved.canonicalKey, label });
       }
     });
 
     itemRollups.forEach((r) => {
-      const code = (r.itemCode || '').trim();
-      const name = (r.itemName || '').trim();
+      const resolved = resolveItem(r.itemId, r.itemCode, r.itemName);
+      const code = resolved.itemCode !== '—' ? resolved.itemCode : '';
+      const name = resolved.itemName;
       const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
-      const val = (r.itemId || code || name).trim().toLowerCase();
-      if (val && !map.has(val)) {
-        map.set(val, { value: r.itemId || code || name, label });
+      if (resolved.canonicalKey && !map.has(resolved.canonicalKey)) {
+        map.set(resolved.canonicalKey, { value: resolved.canonicalKey, label });
       }
     });
 
     allLogs.forEach((l) => {
       if (!l.itemName && !l.itemId) return;
-      const code = (l.itemId && !l.itemId.startsWith('item_') ? l.itemId : '').trim();
-      const name = (l.itemName || '').trim();
+      const resolved = resolveItem(l.itemId, undefined, l.itemName);
+      const code = resolved.itemCode !== '—' ? resolved.itemCode : '';
+      const name = resolved.itemName;
       const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
-      const val = (l.itemId || code || name).trim().toLowerCase();
-      if (val && !map.has(val)) {
-        map.set(val, { value: l.itemId || code || name, label });
+      if (resolved.canonicalKey && !map.has(resolved.canonicalKey)) {
+        map.set(resolved.canonicalKey, { value: resolved.canonicalKey, label });
       }
     });
 
     return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
-  }, [masterData?.items, itemRollups, allLogs]);
+  }, [masterData?.items, itemRollups, allLogs, resolveItem]);
 
   // Custom Date Range State (defaults to past 30 days up to today)
   const [fromDate, setFromDate] = useState<string>(() => {
@@ -565,6 +655,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     const map = new Map<
       string,
       {
+        canonicalKey: string;
         itemId: string;
         itemCode: string;
         itemName: string;
@@ -579,33 +670,15 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       }
     >();
 
-    // Seed master definitions from itemRollups
+    // 1. Seed master definitions and historical rollups from itemRollups
     for (const roll of itemRollups) {
-      const key = (roll.itemCode || roll.itemId || roll.itemName).trim().toLowerCase();
-      map.set(key, {
-        itemId: roll.itemId,
-        itemCode: roll.itemCode || '—',
-        itemName: roll.itemName,
-        periodQty: 0,
-        periodStd: 0,
-        periodRework: 0,
-        todayQty: roll.todayOutput,
-        mtdQty: roll.mtdOutput,
-        tillNowQty: roll.tillNowOutput,
-        tillNowStd: roll.tillNowStd,
-        tillNowRework: roll.tillNowRework,
-      });
-    }
-
-    // Accumulate period quantities from current filteredLogs
-    for (const log of filteredLogs) {
-      if (!log.itemId && !log.itemName) continue;
-      const key = (log.itemId || log.itemName).trim().toLowerCase();
-      if (!map.has(key)) {
-        map.set(key, {
-          itemId: log.itemId,
-          itemCode: log.itemId || '—',
-          itemName: log.itemName || 'Unknown Part',
+      const resolved = resolveItem(roll.itemId, roll.itemCode, roll.itemName);
+      if (!map.has(resolved.canonicalKey)) {
+        map.set(resolved.canonicalKey, {
+          canonicalKey: resolved.canonicalKey,
+          itemId: resolved.itemId,
+          itemCode: resolved.itemCode || '—',
+          itemName: resolved.itemName,
           periodQty: 0,
           periodStd: 0,
           periodRework: 0,
@@ -616,7 +689,41 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           tillNowRework: 0,
         });
       }
-      const entry = map.get(key)!;
+      const entry = map.get(resolved.canonicalKey)!;
+      entry.todayQty += Number(roll.todayOutput) || 0;
+      entry.mtdQty += Number(roll.mtdOutput) || 0;
+      entry.tillNowQty += Number(roll.tillNowOutput) || 0;
+      entry.tillNowStd += Number(roll.tillNowStd) || 0;
+      entry.tillNowRework += Number(roll.tillNowRework) || 0;
+    }
+
+    // 2. Accumulate period quantities from current filteredLogs
+    for (const log of filteredLogs) {
+      if (!log.itemId && !log.itemName) continue;
+      const resolved = resolveItem(log.itemId, undefined, log.itemName);
+      if (!map.has(resolved.canonicalKey)) {
+        map.set(resolved.canonicalKey, {
+          canonicalKey: resolved.canonicalKey,
+          itemId: resolved.itemId,
+          itemCode: resolved.itemCode || '—',
+          itemName: resolved.itemName || 'Unknown Part',
+          periodQty: 0,
+          periodStd: 0,
+          periodRework: 0,
+          todayQty: 0,
+          mtdQty: 0,
+          tillNowQty: 0,
+          tillNowStd: 0,
+          tillNowRework: 0,
+        });
+      }
+      const entry = map.get(resolved.canonicalKey)!;
+      if (entry.itemCode === '—' && resolved.itemCode !== '—') {
+        entry.itemCode = resolved.itemCode;
+      }
+      if ((!entry.itemName || entry.itemName === 'Unknown Part') && resolved.itemName) {
+        entry.itemName = resolved.itemName;
+      }
       entry.periodQty += Number(log.actualOutput) || 0;
       entry.periodStd += Number(log.stdOutput) || 0;
       entry.periodRework += Number(log.rework) || 0;
@@ -628,6 +735,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       const target = itemDropdownFilter.trim().toLowerCase();
       list = list.filter(
         (it) =>
+          it.canonicalKey === target ||
           it.itemId.trim().toLowerCase() === target ||
           it.itemCode.trim().toLowerCase() === target ||
           it.itemName.trim().toLowerCase() === target
@@ -638,6 +746,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       const q = itemSearchQuery.trim().toLowerCase();
       list = list.filter(
         (it) =>
+          it.canonicalKey.includes(q) ||
           it.itemName.toLowerCase().includes(q) ||
           it.itemCode.toLowerCase().includes(q) ||
           it.itemId.toLowerCase().includes(q)
@@ -645,7 +754,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     }
 
     return list.sort((a, b) => b.periodQty - a.periodQty || b.tillNowQty - a.tillNowQty);
-  }, [itemRollups, filteredLogs, itemDropdownFilter, itemSearchQuery]);
+  }, [itemRollups, filteredLogs, resolveItem, itemDropdownFilter, itemSearchQuery]);
 
   // Aggregate totals for the filtered item summary rows
   const itemSummaryTotals = useMemo(() => {
@@ -1176,7 +1285,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 itemSummaryRows.map((it) => {
                   const eff = it.periodStd > 0 ? Math.round((it.periodQty / it.periodStd) * 100) : null;
                   return (
-                    <tr key={it.itemId || it.itemName} className="hover:bg-slate-50">
+                    <tr key={it.canonicalKey || it.itemId || it.itemName} className="hover:bg-slate-50">
                       <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap font-semibold">
                         {it.itemCode}
                       </td>
@@ -1923,7 +2032,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredLogs.map((row) => {
+                filteredLogs.map((row, index) => {
                   const bdTotal = calculateTotalBreakdown(row.breakdown);
                   const eff = row.stdOutput > 0 ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
                   const bdPct =
@@ -1934,7 +2043,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       : '0.0%';
 
                   return (
-                    <tr key={row.id} className="hover:bg-slate-50">
+                    <tr key={row.id || `${row.date}_${row.shift}_${row.machineId}_${row.runNo || 1}_${index}`} className="hover:bg-slate-50">
                       <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{row.date}</td>
                       <td className="px-2.5 py-1.5 text-slate-800 font-sans font-semibold whitespace-nowrap text-[11px]">
                         {row.line || 'Line 1'}

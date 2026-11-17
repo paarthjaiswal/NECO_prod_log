@@ -29,7 +29,6 @@ import {
   getOperationsForItem,
   getUniqueItems,
   getCanonicalItemId,
-  calculateDynamicStdOutput,
   calculateDowntimePct,
   calculateMachineGroupTimeBalance,
   calculateSplitRowSuggestedStd,
@@ -562,41 +561,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     updateRow(index, { [field]: value });
   };
   const handleItemSelect = handleItemChange;
-
-  const handleCycleTimeBlurOrCommit = async (index: number, newCt: number) => {
-    const row = rows[index];
-    if (
-      !row ||
-      !row.machineId ||
-      row.machineId.startsWith("temp_") ||
-      row.isTempMachine ||
-      !row.itemId ||
-      !row.operation ||
-      newCt <= 0
-    ) {
-      return;
-    }
-
-    const newStd = calculateDynamicStdOutput(newCt, shiftWorkingMinutes);
-    await runWithFeedback(
-      async () => {
-        await upsertMachineItemCycleTime({
-          machineId: row.machineId,
-          itemId: row.itemId,
-          operation: row.operation,
-          cycleTime: newCt,
-          stdOutput: newStd,
-        });
-        await onRefreshMasterData?.();
-      },
-      {
-        loadingMessage: "Saving cycle time...",
-        successTitle: "Cycle Time Synced",
-        successDetail: `${row.machineName} • ${newCt}m`,
-        errorTitle: "Failed to Sync Cycle Time",
-      }
-    );
-  };
 
   // Inline "+ Add" & Machine Edit states
   const [quickAddOperatorRowIdx, setQuickAddOperatorRowIdx] = useState<number | null>(null);
@@ -2324,7 +2288,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         onFocus={(e) => e.target.select()}
                         onClick={(e) => (e.target as HTMLInputElement).select()}
                         onChange={(e) => handleCycleTimeChange(index, e.target.value)}
-                        onBlur={(e) => handleCycleTimeBlurOrCommit(index, Number(e.target.value) || 0)}
                         className="w-16 text-right text-xs px-1.5 py-1 border border-slate-200 rounded bg-white disabled:bg-slate-100"
                       />
                     </td>

@@ -1547,7 +1547,7 @@ export async function getItemProductionRollups(
       : refDate;
 
   // 1. Build Item Master map for item code & canonical names
-  const itemCodeMap = new Map<string, { itemCode: string; itemName: string }>();
+  const itemCodeMap = new Map<string, { id?: string; itemCode: string; itemName: string }>();
   try {
     const { data: dbItems } = await supabase
       .from("items")
@@ -1555,6 +1555,7 @@ export async function getItemProductionRollups(
     if (dbItems) {
       for (const it of dbItems) {
         const info = {
+          id: it.id || "",
           itemCode: it.item_code || "",
           itemName: it.item_name || "",
         };
@@ -1591,13 +1592,14 @@ export async function getItemProductionRollups(
       (rawId ? itemCodeMap.get(rawId.toLowerCase()) : null) ||
       (rawName ? itemCodeMap.get(rawName.toLowerCase()) : null);
 
-    const itemCode = masterInfo?.itemCode || (rawId.startsWith("item_") ? "" : rawId);
+    const itemCode = masterInfo?.itemCode || (rawId.startsWith("item_") || rawId.startsWith("it_") ? "" : rawId);
     const itemName = masterInfo?.itemName || rawName || itemCode || "Unknown Part";
-    const groupKey = (itemCode || rawId || rawName).toLowerCase();
+    const itemId = masterInfo?.id || rawId || "";
+    const groupKey = (itemCode || itemId || rawName).toLowerCase();
 
     if (!rollupsMap.has(groupKey)) {
       rollupsMap.set(groupKey, {
-        itemId: rawId || groupKey,
+        itemId: itemId || groupKey,
         itemCode,
         itemName,
         todayOutput: 0,
