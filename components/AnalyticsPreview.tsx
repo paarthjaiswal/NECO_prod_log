@@ -1,7 +1,6 @@
 "use client";
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  BarChart3,
   TrendingUp,
   AlertOctagon,
   Clock,
@@ -12,8 +11,6 @@ import {
   Layers,
   Package,
   Activity,
-  AlertTriangle,
-  CheckCircle2,
 } from 'lucide-react';
 import {
   MachineMaster,
@@ -26,6 +23,7 @@ import { INITIAL_MACHINES, PRODUCTION_LINES } from '@/data/initialData';
 import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
 import { exportHistoricalToCSV, exportShiftToExcel } from '@/services/excelExport';
 import { getAnalyticsLogs, getItemProductionRollups } from '@/actions/shiftActions';
+import { useFeedback } from '@/context/FeedbackContext';
 
 interface AnalyticsPreviewProps {
   rows: MachineShiftRow[];
@@ -44,6 +42,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 }) => {
   // Use live machines from masterData if passed, otherwise fallback to INITIAL_MACHINES
   const machines: MachineMaster[] = masterData?.machines ?? INITIAL_MACHINES;
+
+  const { runWithFeedback } = useFeedback();
 
   // Start with current shift rows, then merge 30-day history from Supabase on mount
   const [historicalLogs, setHistoricalLogs] = useState<MachineShiftRow[]>([]);
@@ -69,21 +69,26 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   useEffect(() => {
     let isMounted = true;
     setIsLoadingRollups(true);
-    getItemProductionRollups(selectedDate)
-      .then((data) => {
+    runWithFeedback(
+      async () => {
+        const data = await getItemProductionRollups(selectedDate);
         if (isMounted && data) {
           setItemRollups(data);
         }
-      })
-      .catch((err) => console.error('Failed to load item production rollups:', err))
-      .finally(() => {
-        if (isMounted) setIsLoadingRollups(false);
-      });
+        return data;
+      },
+      {
+        loadingMessage: "Fetching analytics data...",
+        errorTitle: "Analytics Fetch Failed",
+      }
+    ).finally(() => {
+      if (isMounted) setIsLoadingRollups(false);
+    });
 
     return () => {
       isMounted = false;
     };
-  }, [selectedDate]);
+  }, [selectedDate, runWithFeedback]);
 
   // Merge current shift rows with historical logs (deduplicated by row.id)
   const allLogs = useMemo(() => {
@@ -102,7 +107,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
   const [itemDropdownFilter, setItemDropdownFilter] = useState<string>('all');
   const [showIdleMachines, setShowIdleMachines] = useState<boolean>(false);
-  const [hoveredMachineId, setHoveredMachineId] = useState<string | null>(null);
 
   // Unique parts for dropdown
   const uniquePartOptions = useMemo(() => {
@@ -174,17 +178,26 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     setAppliedCustomRange({ from: fromDate, to: toDate });
     setIsLoadingCustom(true);
     try {
-      const customLogs = await getAnalyticsLogs({ startDate: fromDate, endDate: toDate });
-      if (customLogs && customLogs.length > 0) {
-        setHistoricalLogs((prev) => {
-          const map = new Map<string, MachineShiftRow>();
-          prev.forEach((l) => map.set(l.id, l));
-          customLogs.forEach((l) => map.set(l.id, l));
-          return Array.from(map.values());
-        });
-      }
-    } catch (err) {
-      console.error('Failed to load custom date range logs:', err);
+      await runWithFeedback(
+        async () => {
+          const customLogs = await getAnalyticsLogs({ startDate: fromDate, endDate: toDate });
+          if (customLogs && customLogs.length > 0) {
+            setHistoricalLogs((prev) => {
+              const map = new Map<string, MachineShiftRow>();
+              prev.forEach((l) => map.set(l.id, l));
+              customLogs.forEach((l) => map.set(l.id, l));
+              return Array.from(map.values());
+            });
+          }
+          return customLogs;
+        },
+        {
+          loadingMessage: "Fetching analytics data...",
+          successTitle: "Analytics Updated",
+          successDetail: `Loaded historical logs for ${fromDate} to ${toDate}`,
+          errorTitle: "Analytics Fetch Failed",
+        }
+      );
     } finally {
       setIsLoadingCustom(false);
     }

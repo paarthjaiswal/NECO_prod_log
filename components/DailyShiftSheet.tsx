@@ -31,7 +31,6 @@ import {
   getCanonicalItemId,
   calculateDynamicStdOutput,
   calculateDowntimePct,
-  calculateShiftTimeBalance,
   calculateMachineGroupTimeBalance,
   calculateSplitRowSuggestedStd,
   recalculateMachineGroupStdOutputs,
@@ -43,6 +42,7 @@ import {
   upsertItemMaster,
   upsertMachineMaster,
 } from '@/actions/shiftActions';
+import { useFeedback } from '@/context/FeedbackContext';
 
 type BreakdownKey =
   | 'noDisc'
@@ -177,6 +177,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const selectedLine = currentLine;
   const isReadOnly = propReadOnly !== undefined ? propReadOnly : externalShiftLocked;
   const isShiftLocked = isReadOnly;
+  const { runWithFeedback } = useFeedback();
   const onSaveShift = propOnSaveShift ?? propOnSave ?? (async () => {});
   const onSave = onSaveShift;
   const operators = useMemo(() => masterData?.operators ?? [], [masterData?.operators]);
@@ -539,18 +540,24 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (!row.machineId || !row.itemId || !row.operation || newCt <= 0) return;
 
     const newStd = calculateDynamicStdOutput(newCt, shiftWorkingMinutes);
-    try {
-      await upsertMachineItemCycleTime({
-        machineId: row.machineId,
-        itemId: row.itemId,
-        operation: row.operation,
-        cycleTime: newCt,
-        stdOutput: newStd,
-      });
-      await onRefreshMasterData?.();
-    } catch (err) {
-      console.error("Failed to auto-save cycle time:", err);
-    }
+    await runWithFeedback(
+      async () => {
+        await upsertMachineItemCycleTime({
+          machineId: row.machineId,
+          itemId: row.itemId,
+          operation: row.operation,
+          cycleTime: newCt,
+          stdOutput: newStd,
+        });
+        await onRefreshMasterData?.();
+      },
+      {
+        loadingMessage: "Saving cycle time...",
+        successTitle: "Cycle Time Synced",
+        successDetail: `${row.machineName} • ${newCt}m`,
+        errorTitle: "Failed to Sync Cycle Time",
+      }
+    );
   };
 
   // Inline "+ Add" & Machine Edit states
@@ -584,13 +591,24 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     setIsInlineSaving(true);
     setQuickAddError(null);
     try {
-      const res = await addOperatorMaster(newOperatorName);
-      await onRefreshMasterData();
-      const updated = [...rows];
-      updated[rowIndex] = { ...updated[rowIndex], operatorName: res.operator.name };
-      onRowsChange(updated);
-      setNewOperatorName("");
-      setQuickAddOperatorRowIdx(null);
+      await runWithFeedback(
+        async () => {
+          const res = await addOperatorMaster(newOperatorName);
+          await onRefreshMasterData();
+          const updated = [...rows];
+          updated[rowIndex] = { ...updated[rowIndex], operatorName: res.operator.name };
+          onRowsChange(updated);
+          setNewOperatorName("");
+          setQuickAddOperatorRowIdx(null);
+          return res;
+        },
+        {
+          loadingMessage: "Adding operator...",
+          successTitle: "Operator Added",
+          successDetail: `"${newOperatorName.trim()}" registered`,
+          errorTitle: "Failed to Add Operator",
+        }
+      );
     } catch (err) {
       console.error("Failed to create operator inline:", err);
       setQuickAddError(err instanceof Error ? err.message : "Error creating operator");
@@ -605,32 +623,43 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     setIsInlineSaving(true);
     setQuickAddError(null);
     try {
-      const res = await upsertItemMaster({
-        itemName: newItemName,
-        itemCode: newItemCode,
-        operation: newItemOperation,
-      });
-      await onRefreshMasterData();
-      const updated = [...rows];
-      const targetRow = updated[rowIndex];
-      const ct = Number(targetRow.cycleTime) || 0;
-      const shiftMins =
-        Number(targetRow.shiftWorkingMinutes ?? targetRow.totalWorkingMinutes) ||
-        shiftWorkingMinutes ||
-        465;
+      await runWithFeedback(
+        async () => {
+          const res = await upsertItemMaster({
+            itemName: newItemName,
+            itemCode: newItemCode,
+            operation: newItemOperation,
+          });
+          await onRefreshMasterData();
+          const updated = [...rows];
+          const targetRow = updated[rowIndex];
+          const ct = Number(targetRow.cycleTime) || 0;
+          const shiftMins =
+            Number(targetRow.shiftWorkingMinutes ?? targetRow.totalWorkingMinutes) ||
+            shiftWorkingMinutes ||
+            465;
 
-      updated[rowIndex] = {
-        ...targetRow,
-        itemId: res.item.id,
-        itemName: res.item.itemName,
-        operation: res.item.operation,
-        stdOutput: ct > 0 ? Math.floor(shiftMins / ct) : targetRow.stdOutput,
-      };
-      onRowsChange(updated);
-      setNewItemName("");
-      setNewItemCode("");
-      setNewItemOperation("");
-      setQuickAddItemRowIdx(null);
+          updated[rowIndex] = {
+            ...targetRow,
+            itemId: res.item.id,
+            itemName: res.item.itemName,
+            operation: res.item.operation,
+            stdOutput: ct > 0 ? Math.floor(shiftMins / ct) : targetRow.stdOutput,
+          };
+          onRowsChange(updated);
+          setNewItemName("");
+          setNewItemCode("");
+          setNewItemOperation("");
+          setQuickAddItemRowIdx(null);
+          return res;
+        },
+        {
+          loadingMessage: "Adding component item...",
+          successTitle: "Item Added",
+          successDetail: `"${newItemName.trim()}" registered`,
+          errorTitle: "Failed to Add Item",
+        }
+      );
     } catch (err) {
       console.error("Failed to create item inline:", err);
       setQuickAddError(err instanceof Error ? err.message : "Error creating item");
@@ -652,38 +681,48 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     setIsInlineSaving(true);
     setQuickAddError(null);
     try {
-      const currentItem = items.find((i) => i.id === currentRow.itemId);
-      if (currentItem) {
-        const existingOps = (currentItem.operation || "")
-          .split(/[,/]/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        if (!existingOps.includes(opName)) {
-          const updatedOps =
-            existingOps.length > 0
-              ? `${currentItem.operation}, ${opName}`
-              : opName;
-          await upsertItemMaster({
-            ...currentItem,
-            operation: updatedOps,
-          });
+      await runWithFeedback(
+        async () => {
+          const currentItem = items.find((i) => i.id === currentRow.itemId);
+          if (currentItem) {
+            const existingOps = (currentItem.operation || "")
+              .split(/[,/]/)
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (!existingOps.includes(opName)) {
+              const updatedOps =
+                existingOps.length > 0
+                  ? `${currentItem.operation}, ${opName}`
+                  : opName;
+              await upsertItemMaster({
+                ...currentItem,
+                operation: updatedOps,
+              });
+            }
+          }
+
+          if (currentRow.machineId) {
+            await upsertMachineItemCycleTime({
+              machineId: currentRow.machineId,
+              itemId: currentRow.itemId,
+              operation: opName,
+              cycleTime: currentRow.cycleTime || 0,
+              stdOutput: currentRow.stdOutput || 0,
+            });
+          }
+
+          await onRefreshMasterData();
+          handleOperationChange(rowIndex, opName);
+          setQuickAddOpRowIdx(null);
+          setNewOperationName("");
+        },
+        {
+          loadingMessage: "Adding operation...",
+          successTitle: "Operation Added",
+          successDetail: `"${opName}" saved`,
+          errorTitle: "Failed to Add Operation",
         }
-      }
-
-      if (currentRow.machineId) {
-        await upsertMachineItemCycleTime({
-          machineId: currentRow.machineId,
-          itemId: currentRow.itemId,
-          operation: opName,
-          cycleTime: currentRow.cycleTime || 0,
-          stdOutput: currentRow.stdOutput || 0,
-        });
-      }
-
-      await onRefreshMasterData();
-      handleOperationChange(rowIndex, opName);
-      setQuickAddOpRowIdx(null);
-      setNewOperationName("");
+      );
     } catch (err) {
       console.error("Failed to add operation inline:", err);
       setQuickAddError(err instanceof Error ? err.message : "Error adding operation");
@@ -697,53 +736,64 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (!newMachineName.trim() || !newMachineCode.trim()) return;
     setIsInlineSaving(true);
     try {
-      const res = await upsertMachineMaster({
-        name: newMachineName,
-        code: newMachineCode,
-        machineType: newMachineType,
-        productionLine: currentLine,
-        sortOrder: rows.length + 1,
-      });
-      await onRefreshMasterData();
+      await runWithFeedback(
+        async () => {
+          const res = await upsertMachineMaster({
+            name: newMachineName,
+            code: newMachineCode,
+            machineType: newMachineType,
+            productionLine: currentLine,
+            sortOrder: rows.length + 1,
+          });
+          await onRefreshMasterData();
 
-      const activeShiftObj = masterData.shifts?.find(
-        (s) => s.displayName === currentShift || s.shiftCode === currentShift
+          const activeShiftObj = masterData.shifts?.find(
+            (s) => s.displayName === currentShift || s.shiftCode === currentShift
+          );
+          const shiftWorkingMinutesVal = activeShiftObj?.shiftWorkingMinutes ?? 465;
+          const lineObj = masterData.lines?.find(
+            (l) => l.name === currentLine || l.id === currentLine
+          );
+          const totalWorkingMinutes = lineObj?.dailyWorkingMinutes ?? 1305;
+
+          const newRow: MachineShiftRow = {
+            id: `${currentDate}_${currentShift}_${currentLine}_${res.machine.id}`,
+            date: currentDate,
+            shift: currentShift,
+            productionLine: currentLine,
+            line: currentLine,
+            srNo: rows.length + 1,
+            machineId: res.machine.id,
+            machineCode: res.machine.code,
+            machineName: res.machine.name,
+            operatorName: "",
+            itemId: "",
+            itemName: "",
+            operation: "",
+            cycleTime: 0,
+            stdOutput: 0,
+            actualOutput: 0,
+            rework: 0,
+            breakdown: { noDisc: 0, change: 0, power: 0, operator: 0, machineBreakdown: 0, fixProgSettings: 0 },
+            remarks: "",
+            shiftWorkingMinutes: shiftWorkingMinutesVal,
+            totalWorkingMinutes,
+          };
+
+          onRowsChange([...rows, newRow]);
+          setNewMachineName("");
+          setNewMachineCode("");
+          setNewMachineType("CNC");
+          setShowAddMachineBar(false);
+          return res;
+        },
+        {
+          loadingMessage: "Adding machine...",
+          successTitle: "Machine Added",
+          successDetail: `"${newMachineName.trim()}" added to ${currentLine}`,
+          errorTitle: "Failed to Add Machine",
+        }
       );
-      const shiftWorkingMinutesVal = activeShiftObj?.shiftWorkingMinutes ?? 465;
-      const lineObj = masterData.lines?.find(
-        (l) => l.name === currentLine || l.id === currentLine
-      );
-      const totalWorkingMinutes = lineObj?.dailyWorkingMinutes ?? 1305;
-
-      const newRow: MachineShiftRow = {
-        id: `${currentDate}_${currentShift}_${currentLine}_${res.machine.id}`,
-        date: currentDate,
-        shift: currentShift,
-        productionLine: currentLine,
-        line: currentLine,
-        srNo: rows.length + 1,
-        machineId: res.machine.id,
-        machineCode: res.machine.code,
-        machineName: res.machine.name,
-        operatorName: "",
-        itemId: "",
-        itemName: "",
-        operation: "",
-        cycleTime: 0,
-        stdOutput: 0,
-        actualOutput: 0,
-        rework: 0,
-        breakdown: { noDisc: 0, change: 0, power: 0, operator: 0, machineBreakdown: 0, fixProgSettings: 0 },
-        remarks: "",
-        shiftWorkingMinutes: shiftWorkingMinutesVal,
-        totalWorkingMinutes,
-      };
-
-      onRowsChange([...rows, newRow]);
-      setNewMachineName("");
-      setNewMachineCode("");
-      setNewMachineType("CNC");
-      setShowAddMachineBar(false);
     } catch (err) {
       console.error("Failed to create machine inline:", err);
     } finally {
@@ -756,22 +806,33 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (!editMachineName.trim() || !editMachineCode.trim()) return;
     setIsInlineSaving(true);
     try {
-      const res = await upsertMachineMaster({
-        id: machineId,
-        name: editMachineName,
-        code: editMachineCode,
-        machineType: editMachineType,
-        productionLine: currentLine,
-      });
-      await onRefreshMasterData();
+      await runWithFeedback(
+        async () => {
+          const res = await upsertMachineMaster({
+            id: machineId,
+            name: editMachineName,
+            code: editMachineCode,
+            machineType: editMachineType,
+            productionLine: currentLine,
+          });
+          await onRefreshMasterData();
 
-      const updated = rows.map((r) =>
-        r.machineId === machineId
-          ? { ...r, machineName: res.machine.name, machineCode: res.machine.code }
-          : r
+          const updated = rows.map((r) =>
+            r.machineId === machineId
+              ? { ...r, machineName: res.machine.name, machineCode: res.machine.code }
+              : r
+          );
+          onRowsChange(updated);
+          setEditingMachineId(null);
+          return res;
+        },
+        {
+          loadingMessage: "Saving machine...",
+          successTitle: "Machine Updated",
+          successDetail: `Updated ${editMachineName.trim()}`,
+          errorTitle: "Failed to Update Machine",
+        }
       );
-      onRowsChange(updated);
-      setEditingMachineId(null);
     } catch (err) {
       console.error("Failed to edit machine inline:", err);
     } finally {

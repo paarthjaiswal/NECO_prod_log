@@ -5,7 +5,6 @@ import {
   Plus,
   Trash2,
   RotateCcw,
-  CheckCircle2,
   User,
   Factory,
   Package,
@@ -40,6 +39,7 @@ import {
   getCanonicalItemId,
   getSiblingItemIds,
 } from "@/services/storageService";
+import { useFeedback } from "@/context/FeedbackContext";
 
 interface MasterDataSettingsProps {
   masterData: MasterDataState;
@@ -54,7 +54,6 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   onRefreshMasterData,
   onResetAllDemoData,
   isAdmin = false,
-  isReadOnly: _isReadOnly = false,
 }) => {
   const machines = masterData.machines.filter((m) => m.status !== "idle");
   const { operators, items } = masterData;
@@ -73,18 +72,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   >("machines");
 
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [feedback, setFeedback] = useState<string | null>(null);
-  const [savedNotice, setSavedNotice] = useState<string | null>(null);
-
-  const showFeedback = (msg: string) => {
-    setFeedback(msg);
-    setTimeout(() => setFeedback(null), 3500);
-  };
-
-  const triggerNotice = (msg: string) => {
-    setSavedNotice(msg);
-    setTimeout(() => setSavedNotice(null), 3000);
-  };
+  const { runWithFeedback } = useFeedback();
 
   // ==========================================================================
   // SUB-TAB 1, 2, 3 STATE & HANDLERS (MACHINES, OPERATORS, ITEMS)
@@ -115,16 +103,20 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       status: "active",
     };
 
-    try {
-      await upsertMachineMaster(newMachine, nextNumber);
-      await onRefreshMasterData();
-      setNewMachineName("");
-      setNewMachineCode("");
-      triggerNotice(`Added machine "${newMachine.name}" to plant directory.`);
-    } catch (err) {
-      console.error("Failed to add machine:", err);
-      alert("Failed to save machine to database.");
-    }
+    await runWithFeedback(
+      async () => {
+        await upsertMachineMaster(newMachine, nextNumber);
+        await onRefreshMasterData();
+        setNewMachineName("");
+        setNewMachineCode("");
+      },
+      {
+        loadingMessage: "Adding machine to matrix...",
+        successTitle: "Machine Added",
+        successDetail: `Added "${newMachine.name}" to plant directory`,
+        errorTitle: "Failed to Add Machine",
+      }
+    );
   };
 
   const handleDeleteMachine = async (id: string, name: string) => {
@@ -133,14 +125,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       return;
     }
     if (window.confirm(`Delete machine "${name}" from master data?`)) {
-      try {
-        await disableMachineMaster(id);
-        await onRefreshMasterData();
-        triggerNotice(`Machine "${name}" removed.`);
-      } catch (err) {
-        console.error("Failed to disable machine:", err);
-        alert("Failed to remove machine.");
-      }
+      await runWithFeedback(
+        async () => {
+          await disableMachineMaster(id);
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Removing machine...",
+          successTitle: "Machine Removed",
+          successDetail: `Machine "${name}" removed from directory`,
+          errorTitle: "Failed to Remove Machine",
+        }
+      );
     }
   };
 
@@ -153,15 +149,19 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       return;
     }
 
-    try {
-      await addOperatorMaster(cleanName);
-      await onRefreshMasterData();
-      setNewOperatorName("");
-      triggerNotice(`Operator "${cleanName}" registered.`);
-    } catch (err) {
-      console.error("Failed to add operator:", err);
-      alert("Failed to save operator to database.");
-    }
+    await runWithFeedback(
+      async () => {
+        await addOperatorMaster(cleanName);
+        await onRefreshMasterData();
+        setNewOperatorName("");
+      },
+      {
+        loadingMessage: "Registering operator...",
+        successTitle: "Operator Added",
+        successDetail: `Operator "${cleanName}" registered`,
+        errorTitle: "Failed to Add Operator",
+      }
+    );
   };
 
   const handleDeleteOperator = async (opName: string) => {
@@ -170,14 +170,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       return;
     }
     if (window.confirm(`Remove operator "${opName}"?`)) {
-      try {
-        await removeOperatorMaster(opName);
-        await onRefreshMasterData();
-        triggerNotice(`Operator "${opName}" deleted.`);
-      } catch (err) {
-        console.error("Failed to remove operator:", err);
-        alert("Failed to remove operator.");
-      }
+      await runWithFeedback(
+        async () => {
+          await removeOperatorMaster(opName);
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Removing operator...",
+          successTitle: "Operator Removed",
+          successDetail: `Operator "${opName}" deleted`,
+          errorTitle: "Failed to Remove Operator",
+        }
+      );
     }
   };
 
@@ -192,17 +196,21 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       operation: newOperation.trim(),
     };
 
-    try {
-      await upsertItemMaster(newItem);
-      await onRefreshMasterData();
-      setNewItemName("");
-      setNewItemCode("");
-      setNewOperation("");
-      triggerNotice(`Component "${newItem.itemName}" registered.`);
-    } catch (err) {
-      console.error("Failed to add item:", err);
-      alert("Failed to save component to database.");
-    }
+    await runWithFeedback(
+      async () => {
+        await upsertItemMaster(newItem);
+        await onRefreshMasterData();
+        setNewItemName("");
+        setNewItemCode("");
+        setNewOperation("");
+      },
+      {
+        loadingMessage: "Registering component...",
+        successTitle: "Component Added",
+        successDetail: `Component "${newItem.itemName}" registered`,
+        errorTitle: "Failed to Add Component",
+      }
+    );
   };
 
   const handleDeleteItem = async (id: string, name: string) => {
@@ -211,14 +219,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       return;
     }
     if (window.confirm(`Delete part item "${name}"?`)) {
-      try {
-        await deleteItemMaster(id);
-        await onRefreshMasterData();
-        triggerNotice(`Item "${name}" removed.`);
-      } catch (err) {
-        console.error("Failed to delete item:", err);
-        alert("Failed to delete item.");
-      }
+      await runWithFeedback(
+        async () => {
+          await deleteItemMaster(id);
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Deleting component item...",
+          successTitle: "Item Deleted",
+          successDetail: `Component "${name}" removed`,
+          errorTitle: "Failed to Delete Item",
+        }
+      );
     }
   };
 
@@ -331,23 +343,29 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
     e.preventDefault();
     const numericCycleTime = parseFloat(ctCycleTime);
     if (!ctMachineId || !ctItemId || !ctOperation.trim() || isNaN(numericCycleTime) || numericCycleTime <= 0) {
-      showFeedback("Error: Please enter a valid Cycle Time greater than 0.");
+      alert("Error: Please enter a valid Cycle Time greater than 0.");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await upsertMachineItemCycleTime({
-        machineId: ctMachineId,
-        itemId: ctItemId,
-        operation: ctOperation.trim(),
-        cycleTime: numericCycleTime,
-      });
-      await onRefreshMasterData();
-      showFeedback("Saved Machine × Item cycle time.");
-    } catch (err) {
-      console.error("Failed to save cycle time:", err);
-      showFeedback("Error saving cycle time.");
+      await runWithFeedback(
+        async () => {
+          await upsertMachineItemCycleTime({
+            machineId: ctMachineId,
+            itemId: ctItemId,
+            operation: ctOperation.trim(),
+            cycleTime: numericCycleTime,
+          });
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Saving cycle time...",
+          successTitle: "Cycle Time Saved",
+          successDetail: `Cycle time configured for ${ctOperation.trim()}`,
+          errorTitle: "Failed to Save Cycle Time",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -359,12 +377,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
     setIsSubmitting(true);
     try {
-      await deleteMachineItemCycleTime(id);
-      await onRefreshMasterData();
-      showFeedback("Removed cycle time entry.");
-    } catch (err) {
-      console.error("Failed to delete cycle time:", err);
-      showFeedback("Error deleting cycle time.");
+      await runWithFeedback(
+        async () => {
+          await deleteMachineItemCycleTime(id);
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Removing cycle time...",
+          successTitle: "Cycle Time Removed",
+          successDetail: "Entry deleted from lookup table",
+          errorTitle: "Failed to Remove Cycle Time",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -404,22 +428,28 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
     try {
       const cleanName = newLineName.trim();
       const generatedId = cleanName.toLowerCase().replace(/\s+/g, "_");
-      await upsertProductionLine({
-        id: generatedId,
-        name: cleanName,
-        description: newLineDesc.trim(),
-        dailyWorkingMinutes: parseFloat(newLineMinutes) || 1305,
-        isActive: true,
-        sortOrder: (masterData.lines?.length ?? 3) + 1,
-      });
-      setNewLineName("");
-      setNewLineDesc("");
-      setNewLineMinutes("1305");
-      await onRefreshMasterData();
-      showFeedback(`Added ${cleanName}.`);
-    } catch (err) {
-      console.error("Failed to add line:", err);
-      showFeedback("Error adding production line.");
+      await runWithFeedback(
+        async () => {
+          await upsertProductionLine({
+            id: generatedId,
+            name: cleanName,
+            description: newLineDesc.trim(),
+            dailyWorkingMinutes: parseFloat(newLineMinutes) || 1305,
+            isActive: true,
+            sortOrder: (masterData.lines?.length ?? 3) + 1,
+          });
+          setNewLineName("");
+          setNewLineDesc("");
+          setNewLineMinutes("1305");
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Adding production line...",
+          successTitle: "Line Added",
+          successDetail: `Added line "${cleanName}"`,
+          errorTitle: "Failed to Add Line",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -431,19 +461,25 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
     setIsSubmitting(true);
     try {
-      await upsertProductionLine({
-        id: line.id,
-        name: line.name,
-        description: line.description ?? "",
-        dailyWorkingMinutes: updatedMins || 1305,
-        isActive: line.isActive,
-        sortOrder: line.sortOrder,
-      });
-      await onRefreshMasterData();
-      showFeedback(`Updated ${line.name} working time to ${updatedMins || 1305} mins.`);
-    } catch (err) {
-      console.error("Failed to update line:", err);
-      showFeedback("Error updating line working minutes.");
+      await runWithFeedback(
+        async () => {
+          await upsertProductionLine({
+            id: line.id,
+            name: line.name,
+            description: line.description ?? "",
+            dailyWorkingMinutes: updatedMins || 1305,
+            isActive: line.isActive,
+            sortOrder: line.sortOrder,
+          });
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Updating line hours...",
+          successTitle: "Line Updated",
+          successDetail: `Updated ${line.name} working time to ${updatedMins || 1305} mins`,
+          errorTitle: "Failed to Update Line",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -458,12 +494,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
     setIsSubmitting(true);
     try {
-      await deleteProductionLine(line.id);
-      await onRefreshMasterData();
-      showFeedback(`Deleted ${line.name}.`);
-    } catch (err) {
-      console.error("Failed to delete line:", err);
-      showFeedback("Error deleting production line.");
+      await runWithFeedback(
+        async () => {
+          await deleteProductionLine(line.id);
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Deleting production line...",
+          successTitle: "Line Deleted",
+          successDetail: `Deleted line "${line.name}"`,
+          errorTitle: "Failed to Delete Line",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -480,27 +522,33 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
     setIsSubmitting(true);
     try {
-      await upsertShiftMaster({
-        id: generatedId,
-        shiftCode: code,
-        displayName: display as ShiftType,
-        startTime: `${newShiftStart}:00`,
-        endTime: `${newShiftEnd}:00`,
-        restBreakMinutes: 30,
-        cleaningBreakMinutes: 15,
-        shiftWorkingMinutes: parseFloat(newShiftMins) || 465,
-        totalWorkingMinutesRef: 1305,
-        isActive: true,
-        sortOrder: (masterData.shifts?.length ?? 3) + 1,
-      });
-      setNewShiftCode("");
-      setNewShiftDisplay("");
-      setNewShiftMins("465");
-      await onRefreshMasterData();
-      showFeedback(`Added shift "${display}".`);
-    } catch (err) {
-      console.error("Failed to add shift:", err);
-      showFeedback("Error adding shift.");
+      await runWithFeedback(
+        async () => {
+          await upsertShiftMaster({
+            id: generatedId,
+            shiftCode: code,
+            displayName: display as ShiftType,
+            startTime: `${newShiftStart}:00`,
+            endTime: `${newShiftEnd}:00`,
+            restBreakMinutes: 30,
+            cleaningBreakMinutes: 15,
+            shiftWorkingMinutes: parseFloat(newShiftMins) || 465,
+            totalWorkingMinutesRef: 1305,
+            isActive: true,
+            sortOrder: (masterData.shifts?.length ?? 3) + 1,
+          });
+          setNewShiftCode("");
+          setNewShiftDisplay("");
+          setNewShiftMins("465");
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Adding shift...",
+          successTitle: "Shift Added",
+          successDetail: `Added shift "${display}"`,
+          errorTitle: "Failed to Add Shift",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -515,24 +563,30 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
     setIsSubmitting(true);
     try {
-      await upsertShiftMaster({
-        id: shift.id,
-        shiftCode: shift.shiftCode,
-        displayName: shift.displayName as ShiftType,
-        startTime: draft.startTime,
-        endTime: draft.endTime,
-        restBreakMinutes: shift.restBreakMinutes ?? 30,
-        cleaningBreakMinutes: shift.cleaningBreakMinutes ?? 15,
-        shiftWorkingMinutes: parseFloat(draft.shiftWorkingMinutes) || 465,
-        totalWorkingMinutesRef: shift.totalWorkingMinutesRef ?? 1305,
-        isActive: shift.isActive,
-        sortOrder: shift.sortOrder,
-      });
-      await onRefreshMasterData();
-      showFeedback(`Updated ${shift.displayName}.`);
-    } catch (err) {
-      console.error("Failed to update shift:", err);
-      showFeedback("Error updating shift timing.");
+      await runWithFeedback(
+        async () => {
+          await upsertShiftMaster({
+            id: shift.id,
+            shiftCode: shift.shiftCode,
+            displayName: shift.displayName as ShiftType,
+            startTime: draft.startTime,
+            endTime: draft.endTime,
+            restBreakMinutes: shift.restBreakMinutes ?? 30,
+            cleaningBreakMinutes: shift.cleaningBreakMinutes ?? 15,
+            shiftWorkingMinutes: parseFloat(draft.shiftWorkingMinutes) || 465,
+            totalWorkingMinutesRef: shift.totalWorkingMinutesRef ?? 1305,
+            isActive: shift.isActive,
+            sortOrder: shift.sortOrder,
+          });
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Updating shift timing...",
+          successTitle: "Shift Updated",
+          successDetail: `Updated ${shift.displayName}`,
+          errorTitle: "Failed to Update Shift",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -547,12 +601,18 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
 
     setIsSubmitting(true);
     try {
-      await deleteShiftMaster(shift.id);
-      await onRefreshMasterData();
-      showFeedback(`Deleted ${shift.displayName}.`);
-    } catch (err) {
-      console.error("Failed to delete shift:", err);
-      showFeedback("Error deleting shift.");
+      await runWithFeedback(
+        async () => {
+          await deleteShiftMaster(shift.id);
+          await onRefreshMasterData();
+        },
+        {
+          loadingMessage: "Deleting shift...",
+          successTitle: "Shift Deleted",
+          successDetail: `Deleted shift "${shift.displayName}"`,
+          errorTitle: "Failed to Delete Shift",
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -582,31 +642,6 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
           </button>
         )}
       </div>
-
-      {/* Notifications */}
-      {savedNotice && (
-        <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs">
-          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-          <span>{savedNotice}</span>
-        </div>
-      )}
-
-      {feedback && (
-        <div
-          className={`px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs border ${
-            feedback.startsWith("Error")
-              ? "bg-rose-50 border-rose-300 text-rose-900"
-              : "bg-emerald-50 border-emerald-300 text-emerald-900"
-          }`}
-        >
-          <CheckCircle2
-            className={`w-4 h-4 ${
-              feedback.startsWith("Error") ? "text-rose-600" : "text-emerald-600"
-            }`}
-          />
-          <span>{feedback}</span>
-        </div>
-      )}
 
       {/* Sub Tabs */}
       <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-2">

@@ -17,6 +17,7 @@ import {
 import { ActiveTab, ShiftType, ShiftLockInfo } from '@/types';
 import { SHIFTS } from '@/data/initialData';
 import { logoutUnitHead } from '@/actions/authActions';
+import { useFeedback } from '@/context/FeedbackContext';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -61,6 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const availableShifts = shifts && shifts.length > 0 ? shifts : (SHIFTS as ShiftType[]);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const { runWithFeedback } = useFeedback();
   const dateInputRef = useRef<HTMLInputElement>(null);
 
   const handleOpenDatePicker = () => {
@@ -80,14 +82,18 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   const handleLogout = async () => {
-    try {
-      setIsLoggingOut(true);
-      await logoutUnitHead();
-      window.location.reload();
-    } catch (err) {
-      console.error("Logout error:", err);
-      window.location.reload();
-    }
+    setIsLoggingOut(true);
+    await runWithFeedback(
+      async () => {
+        await logoutUnitHead();
+        window.location.reload();
+      },
+      {
+        loadingMessage: "Locking session...",
+        successTitle: "Returned to Open-Book Mode",
+        errorTitle: "Failed to Sign Out",
+      }
+    );
   };
 
   return (

@@ -42,6 +42,7 @@ import {
   upsertMachineMaster,
   upsertMachineItemCycleTime,
 } from '@/actions/shiftActions';
+import { useFeedback } from '@/context/FeedbackContext';
 
 interface OperatorKioskProps {
   masterData: MasterDataState;
@@ -81,6 +82,7 @@ export function OperatorKiosk({
   shiftLock,
 }: OperatorKioskProps) {
   const isShiftLocked = isReadOnly !== undefined ? isReadOnly : externalShiftLocked;
+  const { runWithFeedback } = useFeedback();
   const { machines, operators, items } = masterData;
   const cycleTimes = useMemo(() => masterData.cycleTimes ?? [], [masterData.cycleTimes]);
   const uniqueItems = useMemo(() => getUniqueItems(items ?? []), [items]);
@@ -550,20 +552,31 @@ export function OperatorKiosk({
     setIsInlineSaving(true);
     setQuickAddError(null);
     try {
-      const res = await addOperatorMaster(newOperatorName);
-      if (onRefreshMasterData) await onRefreshMasterData();
+      await runWithFeedback(
+        async () => {
+          const res = await addOperatorMaster(newOperatorName);
+          if (onRefreshMasterData) await onRefreshMasterData();
 
-      if (draft) {
-        setDraft((prev) => (prev ? { ...prev, operatorName: res.operator.name } : null));
-        if (onRowsChange) {
-          const updated = rows.map((r) =>
-            r.machineId === draft.machineId ? { ...r, operatorName: res.operator.name } : r
-          );
-          onRowsChange(updated);
+          if (draft) {
+            setDraft((prev) => (prev ? { ...prev, operatorName: res.operator.name } : null));
+            if (onRowsChange) {
+              const updated = rows.map((r) =>
+                r.machineId === draft.machineId ? { ...r, operatorName: res.operator.name } : r
+              );
+              onRowsChange(updated);
+            }
+          }
+          setNewOperatorName("");
+          setShowAddOperatorModal(false);
+          return res;
+        },
+        {
+          loadingMessage: "Adding operator...",
+          successTitle: "Operator Added",
+          successDetail: `"${newOperatorName.trim()}" registered`,
+          errorTitle: "Failed to Add Operator",
         }
-      }
-      setNewOperatorName("");
-      setShowAddOperatorModal(false);
+      );
     } catch (err) {
       console.error("Failed to create operator:", err);
       setQuickAddError(err instanceof Error ? err.message : "Error creating operator");
@@ -578,41 +591,52 @@ export function OperatorKiosk({
     setIsInlineSaving(true);
     setQuickAddError(null);
     try {
-      const res = await upsertItemMaster({
-        itemName: newItemName,
-        itemCode: newItemCode,
-        operation: newItemOperation,
-      });
-      if (onRefreshMasterData) await onRefreshMasterData();
+      await runWithFeedback(
+        async () => {
+          const res = await upsertItemMaster({
+            itemName: newItemName,
+            itemCode: newItemCode,
+            operation: newItemOperation,
+          });
+          if (onRefreshMasterData) await onRefreshMasterData();
 
-      if (draft) {
-        const ct = Number(draft.cycleTime) || 0;
-        const shiftMins =
-          Number(draft.shiftWorkingMinutes ?? draft.totalWorkingMinutes) ||
-          shiftWorkingMinutes ||
-          465;
-        const std = ct > 0 ? Math.floor(shiftMins / ct) : draft.stdOutput;
+          if (draft) {
+            const ct = Number(draft.cycleTime) || 0;
+            const shiftMins =
+              Number(draft.shiftWorkingMinutes ?? draft.totalWorkingMinutes) ||
+              shiftWorkingMinutes ||
+              465;
+            const std = ct > 0 ? Math.floor(shiftMins / ct) : draft.stdOutput;
 
-        const updatedDraft = {
-          ...draft,
-          itemId: res.item.id,
-          itemName: res.item.itemName,
-          operation: res.item.operation,
-          stdOutput: std,
-        };
-        setDraft(updatedDraft);
+            const updatedDraft = {
+              ...draft,
+              itemId: res.item.id,
+              itemName: res.item.itemName,
+              operation: res.item.operation,
+              stdOutput: std,
+            };
+            setDraft(updatedDraft);
 
-        if (onRowsChange) {
-          const updated = rows.map((r) =>
-            r.machineId === draft.machineId ? { ...r, ...updatedDraft } : r
-          );
-          onRowsChange(updated);
+            if (onRowsChange) {
+              const updated = rows.map((r) =>
+                r.machineId === draft.machineId ? { ...r, ...updatedDraft } : r
+              );
+              onRowsChange(updated);
+            }
+          }
+          setNewItemName("");
+          setNewItemCode("");
+          setNewItemOperation("");
+          setShowAddItemModal(false);
+          return res;
+        },
+        {
+          loadingMessage: "Adding component item...",
+          successTitle: "Item Added",
+          successDetail: `"${newItemName.trim()}" registered`,
+          errorTitle: "Failed to Add Item",
         }
-      }
-      setNewItemName("");
-      setNewItemCode("");
-      setNewItemOperation("");
-      setShowAddItemModal(false);
+      );
     } catch (err) {
       console.error("Failed to create item:", err);
       setQuickAddError(err instanceof Error ? err.message : "Error creating item");
@@ -629,36 +653,46 @@ export function OperatorKiosk({
     setIsInlineSaving(true);
     setQuickAddError(null);
     try {
-      const currentItem = items.find((i) => i.id === draft.itemId);
-      if (currentItem) {
-        const existingOps = (currentItem.operation || "")
-          .split(/[,/]/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        if (!existingOps.includes(opName)) {
-          const updatedOps =
-            existingOps.length > 0 ? `${currentItem.operation}, ${opName}` : opName;
-          await upsertItemMaster({
-            ...currentItem,
-            operation: updatedOps,
-          });
+      await runWithFeedback(
+        async () => {
+          const currentItem = items.find((i) => i.id === draft.itemId);
+          if (currentItem) {
+            const existingOps = (currentItem.operation || "")
+              .split(/[,/]/)
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (!existingOps.includes(opName)) {
+              const updatedOps =
+                existingOps.length > 0 ? `${currentItem.operation}, ${opName}` : opName;
+              await upsertItemMaster({
+                ...currentItem,
+                operation: updatedOps,
+              });
+            }
+          }
+
+          if (draft.machineId) {
+            await upsertMachineItemCycleTime({
+              machineId: draft.machineId,
+              itemId: draft.itemId,
+              operation: opName,
+              cycleTime: draft.cycleTime || 0,
+              stdOutput: draft.stdOutput || 0,
+            });
+          }
+
+          if (onRefreshMasterData) await onRefreshMasterData();
+          handleOperationSelect(opName);
+          setShowAddOpInput(false);
+          setNewOperationName("");
+        },
+        {
+          loadingMessage: "Adding operation...",
+          successTitle: "Operation Added",
+          successDetail: `"${opName}" saved`,
+          errorTitle: "Failed to Add Operation",
         }
-      }
-
-      if (draft.machineId) {
-        await upsertMachineItemCycleTime({
-          machineId: draft.machineId,
-          itemId: draft.itemId,
-          operation: opName,
-          cycleTime: draft.cycleTime || 0,
-          stdOutput: draft.stdOutput || 0,
-        });
-      }
-
-      if (onRefreshMasterData) await onRefreshMasterData();
-      handleOperationSelect(opName);
-      setShowAddOpInput(false);
-      setNewOperationName("");
+      );
     } catch (err) {
       console.error("Failed to add operation:", err);
       setQuickAddError(err instanceof Error ? err.message : "Error adding operation");
@@ -672,54 +706,74 @@ export function OperatorKiosk({
     if (!newMachineName.trim() || !newMachineCode.trim()) return;
     setIsInlineSaving(true);
     try {
-      const res = await upsertMachineMaster({
-        name: newMachineName,
-        code: newMachineCode,
-        machineType: newMachineType,
-        productionLine: selectedLine,
-        sortOrder: lineMachines.length + 1,
-      });
-      if (onRefreshMasterData) await onRefreshMasterData();
+      await runWithFeedback(
+        async () => {
+          const res = await upsertMachineMaster({
+            name: newMachineName,
+            code: newMachineCode,
+            machineType: newMachineType,
+            productionLine: selectedLine,
+            sortOrder: lineMachines.length + 1,
+          });
+          if (onRefreshMasterData) await onRefreshMasterData();
 
-      if (onRowsChange) {
-        const newRow: MachineShiftRow = {
-          id: `${selectedDate}_${selectedShift}_${selectedLine}_${res.machine.id}`,
-          date: selectedDate,
-          shift: selectedShift,
-          productionLine: selectedLine,
-          line: selectedLine,
-          srNo: rows.length + 1,
-          machineId: res.machine.id,
-          machineCode: res.machine.code,
-          machineName: res.machine.name,
-          operatorName: "",
-          itemId: "",
-          itemName: "",
-          operation: "",
-          cycleTime: 0,
-          totalWorkingMinutes: shiftWorkingMinutes || 465,
-          stdOutput: 0,
-          actualOutput: 0,
-          rework: 0,
-          breakdown: {
-            noDisc: 0,
-            change: 0,
-            power: 0,
-            operator: 0,
-            machineBreakdown: 0,
-            fixProgSettings: 0,
-          },
-          remarks: "",
-        };
-        onRowsChange([...rows, newRow]);
-      }
-
-      setNewMachineName("");
-      setNewMachineCode("");
-      setShowAddMachineBar(false);
+          if (onRowsChange) {
+            const newRow: MachineShiftRow = {
+              id: `${selectedDate}_${selectedShift}_${selectedLine}_${res.machine.id}`,
+              date: selectedDate,
+              shift: selectedShift,
+              productionLine: selectedLine,
+              line: selectedLine,
+              srNo: rows.length + 1,
+              machineId: res.machine.id,
+              machineCode: res.machine.code,
+              machineName: res.machine.name,
+              operatorName: "",
+              itemId: "",
+              itemName: "",
+              operation: "",
+              cycleTime: 0,
+              totalWorkingMinutes: shiftWorkingMinutes || 465,
+              stdOutput: 0,
+              actualOutput: 0,
+              rework: 0,
+              breakdown: {
+                noDisc: 0,
+                change: 0,
+                power: 0,
+                operator: 0,
+                machineBreakdown: 0,
+                fixProgSettings: 0,
+              },
+              breakdownPct: {
+                noDiscPct: 0,
+                changePct: 0,
+                powerPct: 0,
+                operatorPct: 0,
+                machineBreakdownPct: 0,
+                fixProgSettingsPct: 0,
+                totalBdMinutes: 0,
+                totalBdPct: 0,
+              },
+              remarks: "",
+            };
+            onRowsChange([...rows, newRow]);
+          }
+          setNewMachineName("");
+          setNewMachineCode("");
+          setNewMachineType("CNC");
+          setShowAddMachineBar(false);
+          return res;
+        },
+        {
+          loadingMessage: "Adding machine...",
+          successTitle: "Machine Added",
+          successDetail: `"${newMachineName.trim()}" added to ${selectedLine}`,
+          errorTitle: "Failed to Add Machine",
+        }
+      );
     } catch (err) {
-      console.error("Failed to create machine:", err);
-      alert(err instanceof Error ? err.message : "Failed to add machine");
+      console.error("Failed to create machine inline:", err);
     } finally {
       setIsInlineSaving(false);
     }
@@ -730,35 +784,46 @@ export function OperatorKiosk({
     if (!draft || !editMachineName.trim() || !editMachineCode.trim()) return;
     setIsInlineSaving(true);
     try {
-      const res = await upsertMachineMaster({
-        id: draft.machineId,
-        name: editMachineName.trim(),
-        code: editMachineCode.trim(),
-        machineType: editMachineType,
-        productionLine: selectedLine,
-      });
-      if (onRefreshMasterData) await onRefreshMasterData();
+      await runWithFeedback(
+        async () => {
+          const res = await upsertMachineMaster({
+            id: draft.machineId,
+            name: editMachineName.trim(),
+            code: editMachineCode.trim(),
+            machineType: editMachineType,
+            productionLine: selectedLine,
+          });
+          if (onRefreshMasterData) await onRefreshMasterData();
 
-      setDraft((prev) =>
-        prev
-          ? {
-              ...prev,
-              machineName: res.machine.name,
-              machineCode: res.machine.code,
-            }
-          : null
+          setDraft((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  machineName: res.machine.name,
+                  machineCode: res.machine.code,
+                }
+              : null
+          );
+
+          if (onRowsChange) {
+            const updated = rows.map((r) =>
+              r.machineId === draft.machineId
+                ? { ...r, machineName: res.machine.name, machineCode: res.machine.code }
+                : r
+            );
+            onRowsChange(updated);
+          }
+
+          setIsEditingMachine(false);
+          return res;
+        },
+        {
+          loadingMessage: "Saving machine...",
+          successTitle: "Machine Updated",
+          successDetail: `Updated ${editMachineName.trim()}`,
+          errorTitle: "Failed to Update Machine",
+        }
       );
-
-      if (onRowsChange) {
-        const updated = rows.map((r) =>
-          r.machineId === draft.machineId
-            ? { ...r, machineName: res.machine.name, machineCode: res.machine.code }
-            : r
-        );
-        onRowsChange(updated);
-      }
-
-      setIsEditingMachine(false);
     } catch (err) {
       console.error("Failed to update machine:", err);
       alert(err instanceof Error ? err.message : "Failed to update machine");

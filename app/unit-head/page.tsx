@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ShieldAlert, Lock, Mail, ArrowLeft, AlertTriangle, Loader2 } from "lucide-react";
 import { loginUnitHead } from "@/actions/authActions";
+import { useFeedback } from "@/context/FeedbackContext";
 
 export default function UnitHeadLoginPage() {
   const router = useRouter();
@@ -12,6 +13,7 @@ export default function UnitHeadLoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const { runWithFeedback } = useFeedback();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -23,20 +25,28 @@ export default function UnitHeadLoginPage() {
     setError(null);
     setIsSubmitting(true);
 
-    try {
-      const res = await loginUnitHead(password, email);
-      if (!res.success) {
-        setError(res.error || "Invalid Unit Head credentials.");
-        setIsSubmitting(false);
-        return;
+    const res = await runWithFeedback(
+      async () => {
+        const result = await loginUnitHead(password, email);
+        if (!result.success) {
+          throw new Error(result.error || "Invalid Unit Head credentials.");
+        }
+        return result;
+      },
+      {
+        loadingMessage: "Verifying Unit Head credentials...",
+        successTitle: "Unit Head Override Active",
+        successDetail: "Administrative privileges granted.",
+        errorTitle: "Authentication Failed",
       }
+    );
 
+    setIsSubmitting(false);
+    if (res?.success) {
       router.push("/");
       router.refresh();
-    } catch (err) {
-      console.error("Login submission error:", err);
-      setError("An unexpected error occurred. Please try again.");
-      setIsSubmitting(false);
+    } else {
+      setError("Invalid Unit Head credentials.");
     }
   };
 

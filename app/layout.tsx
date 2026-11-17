@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { FeedbackProvider } from "@/context/FeedbackContext";
 
 export const metadata: Metadata = {
   title: "NECO AMD — Shop Floor Production & Downtime Tracker",
@@ -14,7 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen bg-slate-50 text-slate-900 antialiased selection:bg-blue-600 selection:text-white">
-        {children}
+        <FeedbackProvider>{children}</FeedbackProvider>
       </body>
     </html>
   );

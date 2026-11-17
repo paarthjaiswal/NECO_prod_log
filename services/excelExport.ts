@@ -102,7 +102,7 @@ function buildLineEfficiencyData(
   const result: Record<string, string | number>[] = [];
 
   let grandTotalMachines = 0;
-  let grandActiveMachinesSet = new Set<string>();
+  const grandActiveMachinesSet = new Set<string>();
   let grandStd = 0;
   let grandAct = 0;
   let grandShiftAStd = 0;

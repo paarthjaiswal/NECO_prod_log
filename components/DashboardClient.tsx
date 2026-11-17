@@ -29,11 +29,11 @@ import {
 } from "@/data/initialData";
 import { exportShiftToExcel } from "@/services/excelExport";
 import {
-  calculateShiftTimeBalance,
   calculateMachineGroupTimeBalance,
   calculateTotalBreakdown,
   evaluateShiftLock,
 } from "@/services/storageService";
+import { useFeedback } from "@/context/FeedbackContext";
 
 // Lazy-loaded: zero RAM impact on shop-floor PCs unless clicked
 const AnalyticsPreview = dynamic(
@@ -218,12 +218,13 @@ export default function DashboardClient({
     };
   }, [selectedDate, selectedShift, isAdmin, shiftLock.isEditable]);
 
-  // Holds ONLY the rows for the current Date + Shift + Line
   const [currentShiftRows, setCurrentShiftRows] =
     useState<MachineShiftRow[]>(initialRows);
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
-  const [isPending, startTransition] = useTransition();
+  const [isPending] = useTransition();
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  const { runWithFeedback } = useFeedback();
 
   // Derive active production lines from masterData (fallback to PRODUCTION_LINES)
   const availableLines = useMemo(() => {
@@ -310,8 +311,8 @@ export default function DashboardClient({
       return;
     }
 
-    startTransition(async () => {
-      try {
+    runWithFeedback(
+      async () => {
         const freshRows = await getShiftSheetRows(
           selectedDate,
           selectedShift,
@@ -321,14 +322,13 @@ export default function DashboardClient({
           setCurrentShiftRows(freshRows);
           setHasUnsavedDraft(false);
         }
-      } catch (err) {
-        console.error("Failed to load shift rows:", err);
-        if (isMounted) {
-          setStatusMessage("Could not load shift data — showing last known state.");
-          setTimeout(() => setStatusMessage(null), 4000);
-        }
+        return freshRows;
+      },
+      {
+        loadingMessage: `Loading ${selectedLine} (${selectedShift})...`,
+        errorTitle: "Failed to load shift sheet",
       }
-    });
+    );
 
     return () => {
       isMounted = false;
@@ -343,27 +343,31 @@ export default function DashboardClient({
     writeDraft(updatedRows);
   };
 
-  const handleDiscardDraft = () => {
+  const handleDiscardDraft = async () => {
     try {
       localStorage.removeItem(draftKey);
     } catch {
       // ignore
     }
     setHasUnsavedDraft(false);
-    startTransition(async () => {
-      try {
+
+    await runWithFeedback(
+      async () => {
         const freshRows = await getShiftSheetRows(
           selectedDate,
           selectedShift,
           selectedLine
         );
         setCurrentShiftRows(freshRows);
-      } catch (err) {
-        console.error("Failed to reload shift rows:", err);
-        setStatusMessage("Could not reload from Supabase. Your draft is still safe.");
-        setTimeout(() => setStatusMessage(null), 4000);
+        return freshRows;
+      },
+      {
+        loadingMessage: "Reloading from server...",
+        successTitle: "Draft Discarded",
+        successDetail: "Restored last saved server data",
+        errorTitle: "Could not reload shift rows",
       }
-    });
+    );
   };
 
   const handleSaveShiftSheet = async (rowsToSave: MachineShiftRow[]) => {
@@ -445,35 +449,33 @@ export default function DashboardClient({
       line: selectedLine || r.line,
     }));
 
-    startTransition(async () => {
-      try {
+    await runWithFeedback(
+      async () => {
         const result = await saveShiftSheetRows(sanitizedRows);
-        if (result.success && result.rows) {
+        if (result?.success && result?.rows) {
           setCurrentShiftRows(result.rows);
           setHasUnsavedDraft(false);
-          try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
-          setStatusMessage("Shift logs saved to cloud.");
-          setTimeout(() => setStatusMessage(null), 3000);
-        } else {
-          setStatusMessage("Save failed. Your local draft is safe.");
-          setTimeout(() => setStatusMessage(null), 5000);
+          try {
+            localStorage.removeItem(draftKey);
+          } catch {
+            /* ignore */
+          }
+          return result;
         }
-      } catch (err: unknown) {
-        console.error("Error saving shift sheet:", err);
-        const msg =
-          err instanceof Error
-            ? err.message
-            : "Error saving logs. Your local draft is safe.";
-        setStatusMessage(msg);
-        setTimeout(() => setStatusMessage(null), 5000);
+        throw new Error("Save operation failed on server.");
+      },
+      {
+        loadingMessage: "Saving shift log...",
+        successTitle: "Shift Log Saved",
+        successDetail: `${selectedLine} • ${selectedShift} synced to database`,
+        errorTitle: "Could Not Save Shift Log",
       }
-    });
+    );
   };
 
   const handleSaveSingleKioskRow = async (singleRow: MachineShiftRow) => {
     if (isShiftLocked) {
-      setStatusMessage("Shift is locked — changes cannot be saved.");
-      setTimeout(() => setStatusMessage(null), 3000);
+      alert("Shift is locked — changes cannot be saved.");
       return;
     }
 
@@ -484,10 +486,10 @@ export default function DashboardClient({
       line: selectedLine || singleRow.line,
     };
 
-    startTransition(async () => {
-      try {
+    await runWithFeedback(
+      async () => {
         const result = await updateSingleMachineLog(rowToSave);
-        if (result.success && result.row) {
+        if (result?.success && result?.row) {
           const updatedRows = currentShiftRows.map((r) =>
             r.machineId === result.row.machineId && (r.runNo || 1) === (result.row.runNo || 1)
               ? result.row
@@ -495,23 +497,22 @@ export default function DashboardClient({
           );
           setCurrentShiftRows(updatedRows);
           if (hasUnsavedDraft) writeDraft(updatedRows);
-          setStatusMessage(`Saved ${result.row.machineName} (Run #${result.row.runNo || 1})`);
-          setTimeout(() => setStatusMessage(null), 2500);
+          return result;
         }
-      } catch (err: unknown) {
-        console.error("Error saving kiosk log:", err);
-        const msg =
-          err instanceof Error ? err.message : "Failed to save machine log.";
-        setStatusMessage(msg);
-        setTimeout(() => setStatusMessage(null), 5000);
+        throw new Error("Failed to save kiosk machine log.");
+      },
+      {
+        loadingMessage: "Saving machine entry...",
+        successTitle: "Machine Entry Saved",
+        successDetail: `${singleRow.machineName} updated successfully`,
+        errorTitle: "Could Not Save Machine Entry",
       }
-    });
+    );
   };
 
   const handleSaveMachineRuns = async (machineRuns: MachineShiftRow[]) => {
     if (isShiftLocked) {
-      setStatusMessage("Shift is locked — changes cannot be saved.");
-      setTimeout(() => setStatusMessage(null), 3000);
+      alert("Shift is locked — changes cannot be saved.");
       return;
     }
     if (!machineRuns || machineRuns.length === 0) return;
@@ -523,10 +524,10 @@ export default function DashboardClient({
       line: selectedLine || r.line,
     }));
 
-    startTransition(async () => {
-      try {
+    await runWithFeedback(
+      async () => {
         const result = await saveMachineRuns(sanitizedRuns);
-        if (result.success && result.rows) {
+        if (result?.success && result?.rows) {
           const targetMachineId = sanitizedRuns[0].machineId;
           const firstTargetIdx = currentShiftRows.findIndex(
             (r) => r.machineId === targetMachineId
@@ -544,28 +545,31 @@ export default function DashboardClient({
 
           setCurrentShiftRows(newRows);
           if (hasUnsavedDraft) writeDraft(newRows);
-          setStatusMessage(`Saved ${result.rows[0]?.machineName || "machine runs"}`);
-          setTimeout(() => setStatusMessage(null), 2500);
+          return result;
         }
-      } catch (err: unknown) {
-        console.error("Error saving kiosk machine runs:", err);
-        const msg =
-          err instanceof Error ? err.message : "Failed to save machine runs.";
-        setStatusMessage(msg);
-        setTimeout(() => setStatusMessage(null), 5000);
+        throw new Error("Failed to save machine runs.");
+      },
+      {
+        loadingMessage: "Saving machine runs...",
+        successTitle: "Machine Runs Saved",
+        successDetail: `${sanitizedRuns[0]?.machineName || "Machine"} runs synced to database`,
+        errorTitle: "Could Not Save Machine Runs",
       }
-    });
+    );
   };
 
   const handleRefreshMasterData = async () => {
-    try {
-      const freshMaster = await getMasterData();
-      setMasterData(freshMaster);
-    } catch (err) {
-      console.error("Failed to refresh master data:", err);
-      setStatusMessage("Could not sync master data. Check your connection.");
-      setTimeout(() => setStatusMessage(null), 4000);
-    }
+    await runWithFeedback(
+      async () => {
+        const freshMaster = await getMasterData();
+        setMasterData(freshMaster);
+        return freshMaster;
+      },
+      {
+        loadingMessage: "Syncing master data...",
+        errorTitle: "Could not sync master data",
+      }
+    );
   };
 
   const handleExportExcel = () => {
