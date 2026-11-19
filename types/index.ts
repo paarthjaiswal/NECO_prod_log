@@ -128,6 +128,14 @@ export interface MasterDataState {
 
 export type ActiveTab = 'sheet' | 'kiosk' | 'analytics' | 'settings';
 
+export interface OpenMachineParams {
+  machineId: string;
+  date?: string;
+  shift?: ShiftType;
+  line?: string;
+  fromTab?: ActiveTab | 'master' | string;
+}
+
 export interface ShiftLockInfo {
   isEditable: boolean;
   status: 'open' | 'grace_period' | 'locked' | 'future' | 'admin_override';

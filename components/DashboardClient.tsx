@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useTransition, useMemo } from "react";
+import React, { useState, useEffect, useRef, useTransition, useMemo, useCallback } from "react";
 import dynamic from "next/dynamic";
 import Header from "@/components/Header";
 import { DailyShiftSheet } from "@/components/DailyShiftSheet";
@@ -12,6 +12,7 @@ import {
   MasterDataState,
   ShiftType,
   ShiftLockInfo,
+  OpenMachineParams,
 } from "@/types";
 import {
   getShiftSheetRows,
@@ -351,7 +352,8 @@ export default function DashboardClient({
   serverNowIst = "",
 }: DashboardClientProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>("sheet");
-  const [kioskMachineId, setKioskMachineId] = useState<string | null>(null);
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
+  const [returnTab, setReturnTab] = useState<ActiveTab | "master" | string | null>(null);
   const [masterData, setMasterData] =
     useState<MasterDataState>(initialMasterData);
 
@@ -359,6 +361,78 @@ export default function DashboardClient({
   const [selectedDate, setSelectedDate] = useState<string>(initialDate);
   const [selectedShift, setSelectedShift] = useState<ShiftType>(initialShift);
   const [selectedLine, setSelectedLine] = useState<string>(initialLine);
+
+  // Read URL query parameters on initial mount (client-only to prevent hydration mismatch)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const qTab = searchParams.get("tab") as ActiveTab | null;
+      const qDate = searchParams.get("date");
+      const qShift = searchParams.get("shift") as ShiftType | null;
+      const qLine = searchParams.get("line");
+      const qMachineId = searchParams.get("machineId");
+
+      if (qTab && ["sheet", "kiosk", "analytics", "settings"].includes(qTab)) {
+        setActiveTab(qTab);
+      }
+      if (qDate && /^\d{4}-\d{2}-\d{2}$/.test(qDate)) {
+        setSelectedDate(qDate);
+      }
+      if (qShift && SHIFTS.includes(qShift)) {
+        setSelectedShift(qShift);
+      }
+      if (qLine && PRODUCTION_LINES.includes(qLine)) {
+        setSelectedLine(qLine);
+      }
+      if (qMachineId) {
+        setSelectedMachineId(qMachineId);
+      }
+    } catch {
+      // Ignore URL parsing errors on restricted environments
+    }
+  }, []);
+
+  // Keep URL query parameters synced via window.history.replaceState
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const params = new URLSearchParams();
+      if (activeTab && activeTab !== "sheet") params.set("tab", activeTab);
+      if (selectedDate) params.set("date", selectedDate);
+      if (selectedShift) params.set("shift", selectedShift);
+      if (selectedLine) params.set("line", selectedLine);
+      if (activeTab === "kiosk" && selectedMachineId) {
+        params.set("machineId", selectedMachineId);
+      }
+
+      const queryString = params.toString();
+      const newUrl = queryString ? `${window.location.pathname}?${queryString}` : window.location.pathname;
+      window.history.replaceState(null, "", newUrl);
+    } catch {
+      // Ignore replaceState errors on older/sandboxed browsers
+    }
+  }, [activeTab, selectedDate, selectedShift, selectedLine, selectedMachineId]);
+
+  // Unified callback to navigate directly to a machine detail view in OperatorKiosk
+  const handleOpenMachinePage = useCallback(
+    (params: OpenMachineParams) => {
+      if (params.date && params.date !== selectedDate) setSelectedDate(params.date);
+      if (params.shift && params.shift !== selectedShift) setSelectedShift(params.shift);
+      if (params.line && params.line !== selectedLine) setSelectedLine(params.line);
+      setSelectedMachineId(params.machineId);
+      setReturnTab(params.fromTab ?? activeTab);
+      setActiveTab("kiosk");
+    },
+    [selectedDate, selectedShift, selectedLine, activeTab]
+  );
+
+  // Tab switch handler: clears machine drilldown & returnTab
+  const handleTabChange = useCallback((newTab: ActiveTab) => {
+    setSelectedMachineId(null);
+    setReturnTab(null);
+    setActiveTab(newTab);
+  }, []);
 
   // Live server-anchored clock state
   const [currentServerNowIst, setCurrentServerNowIst] = useState<string>(
@@ -1116,7 +1190,7 @@ export default function DashboardClient({
     <div className="min-h-screen bg-slate-50 text-slate-900 overflow-x-clip">
       <Header
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={handleTabChange}
         selectedDate={selectedDate}
         setSelectedDate={setSelectedDate}
         selectedShift={selectedShift}
@@ -1161,9 +1235,9 @@ export default function DashboardClient({
             onDiscardDraft={handleDiscardDraft}
             onExportExcel={handleExportExcel}
             onOpenMachineInKiosk={(machineId?: string) => {
-              if (machineId) setKioskMachineId(machineId);
-              setActiveTab("kiosk");
+              if (machineId) handleOpenMachinePage({ machineId, fromTab: "sheet" });
             }}
+            onOpenMachine={handleOpenMachinePage}
             onRefreshMasterData={handleRefreshMasterData}
             isAdmin={isAdmin}
             isReadOnly={isShiftLocked}
@@ -1180,8 +1254,18 @@ export default function DashboardClient({
             selectedDate={selectedDate}
             selectedShift={selectedShift}
             selectedLine={selectedLine}
-            selectedMachineId={kioskMachineId}
-            onSelectMachineId={setKioskMachineId}
+            selectedMachineId={selectedMachineId}
+            onSelectMachine={setSelectedMachineId}
+            onSelectMachineId={setSelectedMachineId}
+            returnTab={returnTab}
+            onReturnBack={() => {
+              if (returnTab) {
+                const targetTab: ActiveTab = returnTab === "master" ? "settings" : (returnTab as ActiveTab);
+                setActiveTab(targetTab);
+                setSelectedMachineId(null);
+                setReturnTab(null);
+              }
+            }}
             onSaveMachine={handleSaveSingleKioskRow}
             onSaveMachineRuns={handleSaveMachineRuns}
             onRefreshMasterData={handleRefreshMasterData}
@@ -1201,6 +1285,7 @@ export default function DashboardClient({
             selectedShift={selectedShift}
             selectedLine={selectedLine}
             masterData={masterData}
+            onOpenMachine={handleOpenMachinePage}
           />
         )}
 
@@ -1211,6 +1296,7 @@ export default function DashboardClient({
             onResetAllDemoData={handleResetDemo}
             isAdmin={isAdmin}
             isReadOnly={isShiftLocked}
+            onOpenMachine={handleOpenMachinePage}
           />
         )}
       </main>

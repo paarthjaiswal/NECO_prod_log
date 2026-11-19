@@ -18,6 +18,7 @@ import {
   MasterDataState,
   ShiftType,
   ItemProductionRollup,
+  OpenMachineParams,
 } from '@/types';
 import { INITIAL_MACHINES, PRODUCTION_LINES } from '@/data/initialData';
 import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
@@ -31,6 +32,7 @@ interface AnalyticsPreviewProps {
   selectedShift: ShiftType;
   selectedLine: string;
   masterData?: MasterDataState;
+  onOpenMachine?: (params: OpenMachineParams) => void;
 }
 
 export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
@@ -39,6 +41,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   selectedShift,
   selectedLine,
   masterData,
+  onOpenMachine,
 }) => {
   // Use live machines from masterData if passed, otherwise fallback to INITIAL_MACHINES
   const machines: MachineMaster[] = masterData?.machines ?? INITIAL_MACHINES;
@@ -245,6 +248,20 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [appliedCustomRange, setAppliedCustomRange] = useState<{ from: string; to: string } | null>(null);
   const [isLoadingCustom, setIsLoadingCustom] = useState(false);
+
+  const activeToDateOrToday = useMemo(() => {
+    if (dateFilter === 'selected' && selectedDate) return selectedDate;
+    if (dateFilter === 'today') return new Date().toISOString().slice(0, 10);
+    if (dateFilter === 'yesterday') {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      return d.toISOString().slice(0, 10);
+    }
+    if (dateFilter === 'custom') {
+      return appliedCustomRange?.to || toDate || selectedDate || new Date().toISOString().slice(0, 10);
+    }
+    return selectedDate || new Date().toISOString().slice(0, 10);
+  }, [dateFilter, selectedDate, appliedCustomRange, toDate]);
 
   // Prevent invalid ranges: clamp toDate if fromDate > toDate, or vice versa
   const handleFromDateChange = (val: string) => {
@@ -1660,7 +1677,26 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 visibleMachineMetrics.map((m) => (
                   <tr key={m.id} className="hover:bg-slate-50">
                     <td className="px-3 py-1.5 font-sans font-bold text-slate-900 whitespace-nowrap">
-                      {m.name}
+                      {onOpenMachine ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenMachine({
+                              machineId: m.id,
+                              line: m.line,
+                              date: activeToDateOrToday,
+                              shift: selectedShift,
+                              fromTab: 'analytics',
+                            })
+                          }
+                          className="text-left font-bold text-slate-900 hover:text-blue-700 hover:underline cursor-pointer"
+                          title={`Open ${m.name} in Operator Kiosk`}
+                        >
+                          {m.name}
+                        </button>
+                      ) : (
+                        m.name
+                      )}
                     </td>
                     <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{m.code}</td>
                     <td className="px-2.5 py-1.5 font-sans text-slate-700 whitespace-nowrap">{m.line}</td>
@@ -2083,7 +2119,26 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       </td>
                       <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{row.shift.split(' ')[0]}</td>
                       <td className="px-3 py-1.5 font-bold font-sans text-slate-900 whitespace-nowrap">
-                        {row.machineName}
+                        {onOpenMachine ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onOpenMachine({
+                                machineId: row.machineId,
+                                line: row.line,
+                                date: row.date,
+                                shift: row.shift,
+                                fromTab: 'analytics',
+                              })
+                            }
+                            className="text-left font-bold text-slate-900 hover:text-blue-700 hover:underline cursor-pointer"
+                            title={`Open ${row.machineName} in Operator Kiosk for ${row.date} (${row.shift})`}
+                          >
+                            {row.machineName}
+                          </button>
+                        ) : (
+                          row.machineName
+                        )}
                       </td>
                       <td className="px-2 py-1.5 text-center text-slate-700 font-semibold whitespace-nowrap">
                         #{row.runNo || 1}

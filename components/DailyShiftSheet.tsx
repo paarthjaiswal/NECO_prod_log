@@ -21,6 +21,7 @@ import {
   MasterDataState,
   ShiftType,
   ShiftLockInfo,
+  OpenMachineParams,
 } from '@/types';
 import {
   calculateEfficiency,
@@ -150,6 +151,7 @@ interface DailyShiftSheetProps {
   onDiscardDraft?: () => void;
   onExportExcel?: () => void;
   onOpenMachineInKiosk?: (machineId: string) => void;
+  onOpenMachine?: (params: OpenMachineParams) => void;
   isReadOnly?: boolean;
   shiftLock?: ShiftLockInfo;
 }
@@ -174,6 +176,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   onDiscardDraft,
   onExportExcel,
   onOpenMachineInKiosk,
+  onOpenMachine,
   isReadOnly: propReadOnly,
   shiftLock,
 }) => {
@@ -2079,7 +2082,20 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         <div className="flex items-center justify-between gap-1 group">
                           <div>
                             <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-xs font-semibold leading-tight">{row.machineName}</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onOpenMachine) {
+                                    onOpenMachine({ machineId: row.machineId, date: currentDate, shift: currentShift, line: currentLine, fromTab: "sheet" });
+                                  } else {
+                                    onOpenMachineInKiosk?.(row.machineId);
+                                  }
+                                }}
+                                className="text-left font-semibold text-slate-900 hover:text-blue-700 hover:underline cursor-pointer text-xs leading-tight"
+                                title="Open machine page for this date & shift"
+                              >
+                                {row.machineName}
+                              </button>
                               {(row.isTempMachine || row.machineId.startsWith("temp_")) && (
                                 <span className="px-1.5 py-0.5 rounded text-[9px] font-black tracking-wider uppercase bg-amber-100 text-amber-900 border border-amber-300">
                                   TEMP
@@ -2093,7 +2109,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               <button
                                 type="button"
                                 title="Split row / add another run on this machine"
-                                onClick={() => handleSplitMachineRow(index)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSplitMachineRow(index);
+                                }}
                                 className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 flex items-center gap-0.5 transition-colors cursor-pointer"
                               >
                                 <Plus className="w-2.5 h-2.5 text-blue-600" />
@@ -2104,7 +2123,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               <button
                                 type="button"
                                 title="Edit machine name/code/type"
-                                onClick={() => {
+                                onClick={(e) => {
+                                  e.stopPropagation();
                                   const mMeta = masterData.machines?.find((m) => m.id === row.machineId);
                                   setEditingMachineId(row.machineId);
                                   setEditMachineName(row.machineName);
@@ -2120,7 +2140,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               <button
                                 type="button"
                                 title={`Remove Temporary Machine "${row.machineName}"`}
-                                onClick={() => handleRemoveTempMachine(index)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleRemoveTempMachine(index);
+                                }}
                                 className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded cursor-pointer"
                               >
                                 <X className="w-3.5 h-3.5" />
@@ -2133,7 +2156,20 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           <div>
                             <div className="text-xs font-bold text-blue-800 flex items-center gap-1 flex-wrap">
                               <span>↳ Run #{row.runNo}</span>
-                              <span className="text-[10px] font-normal text-slate-500">({row.machineName})</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onOpenMachine) {
+                                    onOpenMachine({ machineId: row.machineId, date: currentDate, shift: currentShift, line: currentLine, fromTab: "sheet" });
+                                  } else {
+                                    onOpenMachineInKiosk?.(row.machineId);
+                                  }
+                                }}
+                                className="text-left font-normal text-slate-500 hover:text-blue-700 hover:underline cursor-pointer text-[10px]"
+                                title="Open machine page for this date & shift"
+                              >
+                                ({row.machineName})
+                              </button>
                               {(row.isTempMachine || row.machineId.startsWith("temp_")) && (
                                 <span className="px-1.5 py-0.2 rounded text-[8px] font-black tracking-wider uppercase bg-amber-100 text-amber-900 border border-amber-300">
                                   TEMP
@@ -2146,7 +2182,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               <button
                                 type="button"
                                 title="Add another split run on this machine"
-                                onClick={() => handleSplitMachineRow(index)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSplitMachineRow(index);
+                                }}
                                 className="p-1 text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer"
                               >
                                 <Plus className="w-3 h-3" />
@@ -2154,10 +2193,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               <button
                                 type="button"
                                 title={`Remove Run #${row.runNo}`}
-                                onClick={() => handleRemoveSplitRow(index)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleRemoveSplitRow(index);
+                                }}
                                 className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded cursor-pointer"
                               >
-                                <X className="w-3 h-3" />
+                                <X className="w-3.5 h-3.5" />
                               </button>
                             </div>
                           )}
@@ -2759,7 +2801,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                     <td className="px-2 py-2 text-center">
                       <button
                         type="button"
-                        onClick={() => onOpenMachineInKiosk?.(row.machineId)}
+                        onClick={() => {
+                          if (onOpenMachine) {
+                            onOpenMachine({ machineId: row.machineId, date: currentDate, shift: currentShift, line: currentLine, fromTab: "sheet" });
+                          } else {
+                            onOpenMachineInKiosk?.(row.machineId);
+                          }
+                        }}
                         title={`Open ${row.machineName} in Operator Kiosk`}
                         className="p-1 text-slate-400 hover:text-slate-900 hover:bg-slate-200 rounded transition-colors"
                       >
