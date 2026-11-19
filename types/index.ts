@@ -64,6 +64,7 @@ export interface BreakdownMinutes {
   operator: number;
   machineBreakdown: number;
   fixProgSettings: number;
+  miscellaneous: number;
 }
 
 export interface BreakdownPercentages {
@@ -73,6 +74,7 @@ export interface BreakdownPercentages {
   operatorPct: number;
   machineBreakdownPct?: number;
   fixProgSettingsPct?: number;
+  miscellaneousPct?: number;
   totalBdMinutes: number;
   totalBdPct: number;
 }

@@ -47,6 +47,7 @@ export interface DbShiftLogRow {
   bd_operator: number | null;
   bd_machine?: number | null;
   bd_fix_prog?: number | null;
+  bd_misc?: number | null;
   is_temp_machine?: boolean | null;
   // Read-only PostgreSQL GENERATED ALWAYS columns (present on SELECT, excluded on UPSERT)
   total_bd_minutes?: number | null;
@@ -56,6 +57,7 @@ export interface DbShiftLogRow {
   bd_operator_pct?: number | null;
   bd_machine_pct?: number | null;
   bd_fix_prog_pct?: number | null;
+  bd_misc_pct?: number | null;
   total_bd_pct?: number | null;
   remarks: string | null;
   updated_at?: string | null;
@@ -229,10 +231,11 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
   const operator = Number(Number(dbRow.bd_operator ?? 0).toFixed(2));
   const machineBreakdown = Number(Number(dbRow.bd_machine ?? 0).toFixed(2));
   const fixProgSettings = Number(Number(dbRow.bd_fix_prog ?? 0).toFixed(2));
+  const miscellaneous = Number(Number(dbRow.bd_misc ?? 0).toFixed(2));
   const totalBd = Number(
     (
       Number(dbRow.total_bd_minutes) ||
-      (noDisc + change + power + operator + machineBreakdown + fixProgSettings)
+      (noDisc + change + power + operator + machineBreakdown + fixProgSettings + miscellaneous)
     ).toFixed(2)
   );
   const rawShift = dbRow.shift ?? "Shift A";
@@ -265,6 +268,7 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
       operator,
       machineBreakdown,
       fixProgSettings,
+      miscellaneous,
     },
     breakdownPct: {
       noDiscPct: Number(dbRow.bd_no_disc_pct ?? 0),
@@ -273,6 +277,7 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
       operatorPct: Number(dbRow.bd_operator_pct ?? 0),
       machineBreakdownPct: Number(dbRow.bd_machine_pct ?? 0),
       fixProgSettingsPct: Number(dbRow.bd_fix_prog_pct ?? 0),
+      miscellaneousPct: Number(dbRow.bd_misc_pct ?? 0),
       totalBdMinutes: totalBd,
       totalBdPct: Number(dbRow.total_bd_pct ?? 0),
     },
@@ -321,6 +326,7 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     bd_operator: Number(Math.max(0, Number(uiRow.breakdown?.operator) || 0).toFixed(2)),
     bd_machine: Number(Math.max(0, Number(uiRow.breakdown?.machineBreakdown) || 0).toFixed(2)),
     bd_fix_prog: Number(Math.max(0, Number(uiRow.breakdown?.fixProgSettings) || 0).toFixed(2)),
+    bd_misc: Number(Math.max(0, Number(uiRow.breakdown?.miscellaneous) || 0).toFixed(2)),
     remarks: uiRow.remarks?.trim() ?? "",
     updated_at: new Date().toISOString(),
   };
@@ -458,7 +464,8 @@ function isPopulatedDbLogRow(log: DbShiftLogRow): boolean {
     (Number(log.bd_power) || 0) +
     (Number(log.bd_operator) || 0) +
     (Number(log.bd_machine) || 0) +
-    (Number(log.bd_fix_prog) || 0);
+    (Number(log.bd_fix_prog) || 0) +
+    (Number(log.bd_misc) || 0);
 
   return (
     (Number(log.actual_output) || 0) > 0 ||
@@ -604,6 +611,7 @@ function hydrateShiftSheetRows(
           operator: 0,
           machineBreakdown: 0,
           fixProgSettings: 0,
+          miscellaneous: 0,
         },
         breakdownPct: {
           noDiscPct: 0,
@@ -612,6 +620,7 @@ function hydrateShiftSheetRows(
           operatorPct: 0,
           machineBreakdownPct: 0,
           fixProgSettingsPct: 0,
+          miscellaneousPct: 0,
           totalBdMinutes: 0,
           totalBdPct: 0,
         },

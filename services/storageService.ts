@@ -24,7 +24,8 @@ export function calculateTotalBreakdown(
     (Number(b.power) || 0) +
     (Number(b.operator) || 0) +
     (Number(b.machineBreakdown) || 0) +
-    (Number(b.fixProgSettings) || 0);
+    (Number(b.fixProgSettings) || 0) +
+    (Number(b.miscellaneous) || 0);
 
   return Number(total.toFixed(2));
 }

@@ -102,13 +102,7 @@ const formatMsToIstString = (ms: number): string => {
  * - Appends valid temporary machines (isTempMachine or machineId starts with "temp_") for this line.
  */
 function isPopulatedUiRow(r: MachineShiftRow): boolean {
-  const bdTotal =
-    (Number(r.breakdown?.noDisc) || 0) +
-    (Number(r.breakdown?.change) || 0) +
-    (Number(r.breakdown?.power) || 0) +
-    (Number(r.breakdown?.operator) || 0) +
-    (Number(r.breakdown?.machineBreakdown) || 0) +
-    (Number(r.breakdown?.fixProgSettings) || 0);
+  const bdTotal = calculateTotalBreakdown(r.breakdown);
 
   return (
     (Number(r.actualOutput) || 0) > 0 ||
@@ -231,6 +225,7 @@ export function ensureAllLineMachinesInRows(
           operator: 0,
           machineBreakdown: 0,
           fixProgSettings: 0,
+          miscellaneous: 0,
         },
         breakdownPct: {
           noDiscPct: 0,
@@ -239,6 +234,7 @@ export function ensureAllLineMachinesInRows(
           operatorPct: 0,
           machineBreakdownPct: 0,
           fixProgSettingsPct: 0,
+          miscellaneousPct: 0,
           totalBdMinutes: 0,
           totalBdPct: 0,
         },

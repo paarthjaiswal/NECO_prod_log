@@ -289,6 +289,7 @@ export function OperatorKiosk({
             operator: 0,
             machineBreakdown: 0,
             fixProgSettings: 0,
+            miscellaneous: 0,
           },
           remarks: '',
         };
@@ -405,6 +406,7 @@ export function OperatorKiosk({
         operator: 0,
         machineBreakdown: 0,
         fixProgSettings: 0,
+        miscellaneous: 0,
       },
       remarks: '',
     };
@@ -793,6 +795,7 @@ export function OperatorKiosk({
                 operator: 0,
                 machineBreakdown: 0,
                 fixProgSettings: 0,
+                miscellaneous: 0,
               },
               breakdownPct: {
                 noDiscPct: 0,
@@ -801,6 +804,7 @@ export function OperatorKiosk({
                 operatorPct: 0,
                 machineBreakdownPct: 0,
                 fixProgSettingsPct: 0,
+                miscellaneousPct: 0,
                 totalBdMinutes: 0,
                 totalBdPct: 0,
               },
@@ -871,6 +875,7 @@ export function OperatorKiosk({
         operator: 0,
         machineBreakdown: 0,
         fixProgSettings: 0,
+        miscellaneous: 0,
       },
       breakdownPct: {
         noDiscPct: 0,
@@ -879,6 +884,7 @@ export function OperatorKiosk({
         operatorPct: 0,
         machineBreakdownPct: 0,
         fixProgSettingsPct: 0,
+        miscellaneousPct: 0,
         totalBdMinutes: 0,
         totalBdPct: 0,
       },
@@ -978,7 +984,8 @@ export function OperatorKiosk({
       | 'power'
       | 'operator'
       | 'machineBreakdown'
-      | 'fixProgSettings',
+      | 'fixProgSettings'
+      | 'miscellaneous',
     delta: number
   ) => {
     if (isShiftLocked || !draft) return;
@@ -1000,7 +1007,8 @@ export function OperatorKiosk({
       | 'power'
       | 'operator'
       | 'machineBreakdown'
-      | 'fixProgSettings',
+      | 'fixProgSettings'
+      | 'miscellaneous',
     unaccountedMins: number
   ) => {
     if (isShiftLocked || !draft || unaccountedMins <= 0) return;
@@ -1714,7 +1722,8 @@ export function OperatorKiosk({
       | 'power'
       | 'operator'
       | 'machineBreakdown'
-      | 'fixProgSettings';
+      | 'fixProgSettings'
+      | 'miscellaneous';
     title: string;
     subtitle: string;
     step1: number;
@@ -1768,6 +1777,14 @@ export function OperatorKiosk({
       step1: 10,
       step2: 20,
       badgeClass: 'bg-indigo-50 text-indigo-800 border-indigo-200',
+    },
+    {
+      key: 'miscellaneous',
+      title: 'MISCELLANEOUS',
+      subtitle: 'Other / miscellaneous downtime',
+      step1: 10,
+      step2: 20,
+      badgeClass: 'bg-teal-50 text-teal-800 border-teal-200',
     },
   ];
 
