@@ -10,6 +10,9 @@ import {
   Package,
   Timer,
   Layers,
+  Edit2,
+  Check,
+  X,
 } from "lucide-react";
 import {
   MasterDataState,
@@ -25,8 +28,10 @@ import {
   upsertMachineMaster,
   disableMachineMaster,
   upsertItemMaster,
+  updateItemMaster,
   deleteItemMaster,
   addOperatorMaster,
+  updateOperatorMaster,
   removeOperatorMaster,
   upsertMachineItemCycleTime,
   deleteMachineItemCycleTime,
@@ -49,6 +54,14 @@ interface MasterDataSettingsProps {
   isAdmin?: boolean;
   isReadOnly?: boolean;
   onOpenMachine?: (params: OpenMachineParams) => void;
+  onRenameOperator?: (oldName: string, newName: string) => void;
+  onRenameItem?: (params: {
+    id: string;
+    oldName: string;
+    oldCode?: string;
+    newName: string;
+    newCode: string;
+  }) => void;
 }
 
 export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
@@ -57,6 +70,8 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   onResetAllDemoData,
   isAdmin = false,
   onOpenMachine,
+  onRenameOperator,
+  onRenameItem,
 }) => {
   const machines = masterData.machines.filter((m) => m.status !== "idle");
   const { operators, items } = masterData;
@@ -91,6 +106,14 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   const [newItemName, setNewItemName] = useState("");
   const [newItemCode, setNewItemCode] = useState("");
   const [newOperation, setNewOperation] = useState("");
+
+  // Inline edit state for Operators & Items
+  const [editingOperator, setEditingOperator] = useState<string | null>(null);
+  const [editOperatorName, setEditOperatorName] = useState<string>("");
+
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [editItemName, setEditItemName] = useState<string>("");
+  const [editItemCode, setEditItemCode] = useState<string>("");
 
   const handleAddMachine = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -188,6 +211,45 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
     }
   };
 
+  const handleSaveOperatorEdit = async (oldName: string) => {
+    const cleanNewName = editOperatorName.trim();
+    if (!cleanNewName) {
+      alert("Operator name cannot be empty.");
+      return;
+    }
+    if (cleanNewName === oldName) {
+      setEditingOperator(null);
+      return;
+    }
+    if (
+      operators.some(
+        (o) =>
+          o.toLowerCase() === cleanNewName.toLowerCase() &&
+          o.toLowerCase() !== oldName.toLowerCase()
+      )
+    ) {
+      alert("An operator with this name already exists.");
+      return;
+    }
+
+    await runWithFeedback(
+      async () => {
+        await updateOperatorMaster({ oldName, newName: cleanNewName });
+        if (onRenameOperator) {
+          onRenameOperator(oldName, cleanNewName);
+        }
+        await onRefreshMasterData();
+        setEditingOperator(null);
+      },
+      {
+        loadingMessage: "Updating operator...",
+        successTitle: "Operator Updated",
+        successDetail: `Renamed "${oldName}" to "${cleanNewName}"`,
+        errorTitle: "Could Not Update Operator",
+      }
+    );
+  };
+
   const handleAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newItemName.trim() || !newOperation.trim()) return;
@@ -235,6 +297,52 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
         }
       );
     }
+  };
+
+  const handleSaveItemEdit = async (it: ItemMaster) => {
+    const cleanName = editItemName.trim();
+    const cleanCode = editItemCode.trim().toUpperCase();
+    if (!cleanName) {
+      alert("Item name cannot be empty.");
+      return;
+    }
+    if (!cleanCode) {
+      alert("Item code cannot be empty.");
+      return;
+    }
+    if (cleanName === it.itemName && cleanCode === it.itemCode) {
+      setEditingItemId(null);
+      return;
+    }
+
+    await runWithFeedback(
+      async () => {
+        await updateItemMaster({
+          id: it.id,
+          oldName: it.itemName,
+          oldCode: it.itemCode,
+          newName: cleanName,
+          newCode: cleanCode,
+        });
+        if (onRenameItem) {
+          onRenameItem({
+            id: it.id,
+            oldName: it.itemName,
+            oldCode: it.itemCode,
+            newName: cleanName,
+            newCode: cleanCode,
+          });
+        }
+        await onRefreshMasterData();
+        setEditingItemId(null);
+      },
+      {
+        loadingMessage: "Updating item...",
+        successTitle: "Item Updated",
+        successDetail: `Updated ${cleanName} (${cleanCode})`,
+        errorTitle: "Could Not Update Item",
+      }
+    );
   };
 
   // ==========================================================================
@@ -931,34 +1039,91 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
           </form>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-            {operators.map((op, idx) => (
-              <div
-                key={op}
-                className="bg-white p-3 rounded-lg border border-slate-200 shadow-2xs flex items-center justify-between"
-              >
-                <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded bg-slate-100 flex items-center justify-center font-bold text-slate-700 text-xs">
-                    {op.charAt(0)}
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-xs text-slate-900">{op}</h4>
-                    <span className="text-[10px] text-slate-500 font-mono">
-                      Operator #{idx + 1}
-                    </span>
-                  </div>
-                </div>
+            {operators.map((op, idx) => {
+              const isEditing = editingOperator === op;
+              return (
+                <div
+                  key={op}
+                  className="bg-white p-3 rounded-lg border border-slate-200 shadow-2xs flex items-center justify-between gap-2"
+                >
+                  {isEditing ? (
+                    <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                      <input
+                        type="text"
+                        value={editOperatorName}
+                        onChange={(e) => setEditOperatorName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleSaveOperatorEdit(op);
+                          } else if (e.key === "Escape") {
+                            setEditingOperator(null);
+                          }
+                        }}
+                        autoFocus
+                        className="flex-1 px-2 py-1 text-xs font-bold border border-slate-300 rounded focus:border-slate-800 focus:outline-none bg-slate-50 focus:bg-white"
+                        placeholder="Operator Name"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSaveOperatorEdit(op)}
+                        className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[11px] font-bold flex items-center gap-1 shadow-2xs cursor-pointer"
+                        title="Save (Enter)"
+                      >
+                        <Check className="w-3 h-3" />
+                        <span>Save</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingOperator(null)}
+                        className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded text-[11px] font-semibold cursor-pointer"
+                        title="Cancel (Esc)"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded bg-slate-100 flex items-center justify-center font-bold text-slate-700 text-xs shrink-0">
+                          {op.charAt(0)}
+                        </div>
+                        <div className="min-w-0">
+                          <h4 className="font-bold text-xs text-slate-900 truncate">{op}</h4>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            Operator #{idx + 1}
+                          </span>
+                        </div>
+                      </div>
 
-                {isAdmin && (
-                  <button
-                    onClick={() => handleDeleteOperator(op)}
-                    className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
-                    title="Remove operator"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            ))}
+                      {isAdmin && (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingOperator(op);
+                              setEditOperatorName(op);
+                            }}
+                            className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                            title="Edit operator name"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteOperator(op)}
+                            className="p-1 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                            title="Remove operator"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1036,32 +1201,108 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                   <th className="px-3 py-2.5">Part Code</th>
                   <th className="px-3 py-2.5">Component / Item Name</th>
                   <th className="px-3 py-2.5">Operations</th>
-                  <th className="px-3 py-2.5 text-right w-20">Action</th>
+                  <th className="px-3 py-2.5 text-right w-24">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
-                {items.map((it) => (
-                  <tr key={it.id} className="hover:bg-slate-50">
-                    <td className="px-3 py-2 font-mono font-bold text-slate-700">
-                      {it.itemCode}
-                    </td>
-                    <td className="px-3 py-2 font-bold text-slate-900">
-                      {it.itemName}
-                    </td>
-                    <td className="px-3 py-2 text-slate-600">{it.operation}</td>
-                    <td className="px-3 py-2 text-right">
-                      {isAdmin && (
-                        <button
-                          onClick={() => handleDeleteItem(it.id, it.itemName)}
-                          className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
-                          title="Delete component"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {items.map((it) => {
+                  const isEditing = editingItemId === it.id;
+                  return (
+                    <tr key={it.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-3 py-2 font-mono font-bold text-slate-700">
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editItemCode}
+                            onChange={(e) => setEditItemCode(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleSaveItemEdit(it);
+                              } else if (e.key === "Escape") {
+                                setEditingItemId(null);
+                              }
+                            }}
+                            className="w-full max-w-[140px] px-2 py-1 text-xs font-mono font-bold border border-slate-300 rounded focus:border-slate-800 focus:outline-none bg-slate-50 focus:bg-white"
+                            placeholder="Part Code"
+                          />
+                        ) : (
+                          it.itemCode
+                        )}
+                      </td>
+                      <td className="px-3 py-2 font-bold text-slate-900">
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editItemName}
+                            onChange={(e) => setEditItemName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleSaveItemEdit(it);
+                              } else if (e.key === "Escape") {
+                                setEditingItemId(null);
+                              }
+                            }}
+                            autoFocus
+                            className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded focus:border-slate-800 focus:outline-none bg-slate-50 focus:bg-white"
+                            placeholder="Component / Item Name"
+                          />
+                        ) : (
+                          it.itemName
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-slate-600">{it.operation}</td>
+                      <td className="px-3 py-2 text-right">
+                        {isEditing ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleSaveItemEdit(it)}
+                              className="p-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded cursor-pointer transition-colors shadow-2xs"
+                              title="Save (Enter)"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingItemId(null)}
+                              className="p-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer transition-colors"
+                              title="Cancel (Esc)"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          isAdmin && (
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingItemId(it.id);
+                                  setEditItemName(it.itemName);
+                                  setEditItemCode(it.itemCode || "");
+                                }}
+                                className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                                title="Edit item name & code"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteItem(it.id, it.itemName)}
+                                className="p-1 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                                title="Delete component"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

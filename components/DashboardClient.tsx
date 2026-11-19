@@ -1136,6 +1136,46 @@ export default function DashboardClient({
     );
   };
 
+  const handleRenameOperator = (oldName: string, newName: string) => {
+    setCurrentShiftRows((prevRows) => {
+      const updated = prevRows.map((r) =>
+        r.operatorName === oldName ? { ...r, operatorName: newName } : r
+      );
+      if (hasUnsavedDraft) {
+        writeDraft(updated);
+      }
+      return updated;
+    });
+  };
+
+  const handleRenameItem = (params: {
+    id: string;
+    oldName: string;
+    oldCode?: string;
+    newName: string;
+    newCode: string;
+  }) => {
+    setCurrentShiftRows((prevRows) => {
+      const updated = prevRows.map((r) => {
+        if (
+          r.itemId === params.id ||
+          (params.oldName && r.itemName === params.oldName)
+        ) {
+          return {
+            ...r,
+            itemName: params.newName,
+            itemId: r.itemId || params.id,
+          };
+        }
+        return r;
+      });
+      if (hasUnsavedDraft) {
+        writeDraft(updated);
+      }
+      return updated;
+    });
+  };
+
   const handleExportExcel = () => {
     exportShiftToExcel(
       displayRows,
@@ -1297,6 +1337,8 @@ export default function DashboardClient({
             isAdmin={isAdmin}
             isReadOnly={isShiftLocked}
             onOpenMachine={handleOpenMachinePage}
+            onRenameOperator={handleRenameOperator}
+            onRenameItem={handleRenameItem}
           />
         )}
       </main>

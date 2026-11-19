@@ -1522,6 +1522,181 @@ export async function removeOperatorMaster(operatorName: string) {
   return { success: true };
 }
 
+export async function updateOperatorMaster(input: {
+  id?: string;
+  oldName: string;
+  newName: string;
+  code?: string;
+}) {
+  const isAdmin = await isUnitHeadSession();
+  if (!isAdmin) {
+    throw new Error("Unauthorized: Unit Head login required to edit operators.");
+  }
+
+  const supabase = createAdminClient();
+  const trimmedNewName = (input.newName || "").trim();
+  const trimmedOldName = (input.oldName || "").trim();
+
+  if (!trimmedNewName) {
+    throw new Error("Operator name cannot be empty.");
+  }
+
+  // Check for duplicate name
+  const { data: existingOps, error: checkErr } = await supabase
+    .from("operators")
+    .select("*")
+    .ilike("name", trimmedNewName);
+
+  if (checkErr) throw new Error(checkErr.message);
+
+  if (existingOps && existingOps.length > 0) {
+    const isDuplicate = existingOps.some((op) => {
+      if (input.id && op.id) return op.id !== input.id;
+      return op.name.toLowerCase() !== trimmedOldName.toLowerCase();
+    });
+    if (isDuplicate) {
+      throw new Error("An operator with this name already exists.");
+    }
+  }
+
+  let updateQuery = supabase
+    .from("operators")
+    .update({ name: trimmedNewName });
+
+  if (input.id) {
+    updateQuery = updateQuery.eq("id", input.id);
+  } else {
+    updateQuery = updateQuery.eq("name", trimmedOldName);
+  }
+
+  const { data: updatedOp, error: updateErr } = await updateQuery
+    .select()
+    .maybeSingle();
+
+  if (updateErr) throw new Error(updateErr.message);
+
+  // Cascade to public.shift_logs: if oldName differs from newName, update shift_logs
+  if (trimmedOldName && trimmedOldName !== trimmedNewName) {
+    const { error: cascadeErr } = await supabase
+      .from("shift_logs")
+      .update({ operator_name: trimmedNewName })
+      .eq("operator_name", trimmedOldName);
+
+    if (cascadeErr) {
+      console.error("Failed to cascade operator name to shift_logs:", cascadeErr);
+    }
+  }
+
+  revalidatePath("/");
+  return {
+    success: true,
+    operator: {
+      id: updatedOp?.id ?? input.id ?? `op_${Date.now()}`,
+      name: trimmedNewName,
+    },
+  };
+}
+
+export async function updateItemMaster(input: {
+  id: string;
+  oldName: string;
+  oldCode?: string;
+  newName: string;
+  newCode: string;
+}) {
+  const isAdmin = await isUnitHeadSession();
+  if (!isAdmin) {
+    throw new Error("Unauthorized: Unit Head login required to edit items.");
+  }
+
+  const supabase = createAdminClient();
+  const trimmedNewName = (input.newName || "").trim();
+  const trimmedNewCode = (input.newCode || "").trim().toUpperCase();
+  const trimmedOldName = (input.oldName || "").trim();
+  const trimmedOldCode = (input.oldCode || "").trim().toUpperCase();
+
+  if (!trimmedNewName) {
+    throw new Error("Item name cannot be empty.");
+  }
+  if (!trimmedNewCode) {
+    throw new Error("Item code cannot be empty.");
+  }
+
+  // Fetch all items to identify siblings (multi-operation items) and duplicate code check
+  const { data: allItems, error: itemsErr } = await supabase
+    .from("items")
+    .select("*");
+
+  if (itemsErr) throw new Error(itemsErr.message);
+
+  const siblingIds = new Set<string>();
+  siblingIds.add(input.id);
+
+  if (allItems) {
+    for (const it of allItems) {
+      const matchName =
+        trimmedOldName &&
+        it.item_name &&
+        it.item_name.trim().toLowerCase() === trimmedOldName.toLowerCase();
+      const matchCode =
+        trimmedOldCode &&
+        it.item_code &&
+        it.item_code.trim().toLowerCase() === trimmedOldCode.toLowerCase();
+      if (matchName || matchCode) {
+        siblingIds.add(it.id);
+      }
+    }
+
+    // Check if another unrelated item (not in siblingIds) already has the newCode
+    for (const it of allItems) {
+      if (!siblingIds.has(it.id)) {
+        if (
+          it.item_code &&
+          it.item_code.trim().toUpperCase() === trimmedNewCode
+        ) {
+          throw new Error(`An item with code "${trimmedNewCode}" already exists.`);
+        }
+      }
+    }
+  }
+
+  const idsToUpdate = Array.from(siblingIds);
+
+  const { error: updateErr } = await supabase
+    .from("items")
+    .update({
+      item_name: trimmedNewName,
+      item_code: trimmedNewCode,
+    })
+    .in("id", idsToUpdate);
+
+  if (updateErr) throw new Error(updateErr.message);
+
+  // Cascade to public.shift_logs
+  const { error: cascadeIdErr } = await supabase
+    .from("shift_logs")
+    .update({ item_name: trimmedNewName })
+    .in("item_id", idsToUpdate);
+
+  if (cascadeIdErr) {
+    console.error("Failed to cascade item name to shift_logs by item_id:", cascadeIdErr);
+  }
+
+  if (trimmedOldName && trimmedOldName !== trimmedNewName) {
+    const { error: cascadeNameErr } = await supabase
+      .from("shift_logs")
+      .update({ item_name: trimmedNewName })
+      .eq("item_name", trimmedOldName);
+
+    if (cascadeNameErr) {
+      console.error("Failed to cascade item name to shift_logs by item_name:", cascadeNameErr);
+    }
+  }
+
+  revalidatePath("/");
+  return { success: true };
+}
+
 export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
   if (
     !entry.machineId ||
