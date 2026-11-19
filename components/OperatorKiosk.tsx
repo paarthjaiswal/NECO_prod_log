@@ -743,6 +743,10 @@ export function OperatorKiosk({
   const handleBreakdownStep = (field: BreakdownKey, delta: number) => {
     if (isShiftLocked || !draft) return;
     setValidationError(null);
+    if (editingBdField === field) {
+      setEditingBdField(null);
+      setEditingBdText("");
+    }
     const currentVal = Number(draft.breakdown?.[field]) || 0;
     const nextVal = Number(Math.max(0, currentVal + delta).toFixed(2));
     updateDraft({
@@ -757,6 +761,10 @@ export function OperatorKiosk({
   const handleFillUnaccountedToField = (field: BreakdownKey, unaccountedMins: number) => {
     if (isShiftLocked || !draft || unaccountedMins <= 0) return;
     setValidationError(null);
+    if (editingBdField === field) {
+      setEditingBdField(null);
+      setEditingBdText("");
+    }
     const currentVal = Number(draft.breakdown?.[field]) || 0;
     const nextVal = Number(Math.max(0, currentVal + unaccountedMins).toFixed(2));
     updateDraft({
@@ -1832,7 +1840,9 @@ export function OperatorKiosk({
                       </span>
                       <span>
                         {balance?.isBalanced ? (
-                          <span className="text-emerald-700 font-bold">✓ {balance.shiftMinutes}m</span>
+                          <span className="text-emerald-700 font-bold">
+                            ✓ {balance.isFullTargetBalanced && (balance.cycleRemainderMinutes ?? 0) > 0 ? `${balance.cycleRemainderMinutes}m rem.` : `${balance.shiftMinutes}m`}
+                          </span>
                         ) : (
                           <span className="text-amber-700 font-semibold">{totalBd}m BD</span>
                         )}
@@ -2635,7 +2645,11 @@ export function OperatorKiosk({
                 {timeBalance.isBalanced ? (
                   <span className="text-emerald-700 bg-emerald-100 border border-emerald-300 px-1.5 py-0.2 rounded font-bold flex items-center gap-1">
                     <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                    <span>Balanced</span>
+                    <span>
+                      {timeBalance.isFullTargetBalanced && (timeBalance.cycleRemainderMinutes ?? 0) > 0
+                        ? `Balanced ✓ (100% Target · ${timeBalance.cycleRemainderMinutes}m rem.)`
+                        : "Balanced"}
+                    </span>
                   </span>
                 ) : (
                   <span
@@ -2719,7 +2733,10 @@ export function OperatorKiosk({
                             });
                           }
                         }}
-                        onBlur={() => setEditingBdField(null)}
+                        onBlur={() => {
+                          setEditingBdField(null);
+                          setEditingBdText("");
+                        }}
                         placeholder="0"
                         className="w-full min-h-[40px] lg:min-h-[32px] text-base lg:text-sm font-semibold font-mono text-center bg-white border border-slate-300 rounded-md focus:border-slate-800 focus:outline-none"
                       />
@@ -2747,7 +2764,7 @@ export function OperatorKiosk({
                       </div>
 
                       {/* 1-Tap Fill Button (Shown when unaccounted minutes remain) */}
-                      {!isShiftLocked && timeBalance.unaccountedMinutes > 0.01 && (
+                      {!isShiftLocked && !timeBalance.isFullTargetBalanced && timeBalance.unaccountedMinutes > 0.01 && (
                         <button
                           type="button"
                           onClick={() =>
@@ -2838,7 +2855,11 @@ export function OperatorKiosk({
             {timeBalance.isBalanced ? (
               <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 font-mono">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Balanced {timeBalance.shiftMinutes}m ✓</span>
+                <span>
+                  {timeBalance.isFullTargetBalanced && (timeBalance.cycleRemainderMinutes ?? 0) > 0
+                    ? `Balanced ✓ (100% Target · ${timeBalance.cycleRemainderMinutes}m rem.)`
+                    : `Balanced ${timeBalance.shiftMinutes}m ✓`}
+                </span>
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 text-xs font-bold text-rose-700 font-mono">

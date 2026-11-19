@@ -260,6 +260,8 @@ export interface ShiftTimeBalance {
   isUnder: boolean;
   isProductionExceeded: boolean;
   missingCycleTime: boolean;
+  isFullTargetBalanced?: boolean;
+  cycleRemainderMinutes?: number;
   errorMessage?: string;
 }
 
@@ -272,13 +274,14 @@ export function calculateShiftTimeBalance(
   row: Pick<
     MachineShiftRow,
     "cycleTime" | "actualOutput" | "breakdown" | "totalWorkingMinutes"
-  > & { itemId?: string; operatorName?: string },
+  > & { itemId?: string; operatorName?: string; stdOutput?: number },
   shiftWorkingMinutes?: number
 ): ShiftTimeBalance {
   const shiftMins =
     Number(shiftWorkingMinutes) || Number(row.totalWorkingMinutes) || 0;
   const ct = Number(row.cycleTime) || 0;
   const actual = Number(row.actualOutput) || 0;
+  const std = Number(row.stdOutput) || 0;
   const loggedBreakdown = calculateTotalBreakdown(row.breakdown);
 
   // If machine row is completely idle / untouched
@@ -302,6 +305,8 @@ export function calculateShiftTimeBalance(
       isUnder: false,
       isProductionExceeded: false,
       missingCycleTime: false,
+      isFullTargetBalanced: false,
+      cycleRemainderMinutes: 0,
       errorMessage: undefined,
     };
   }
@@ -321,6 +326,8 @@ export function calculateShiftTimeBalance(
       isUnder: true,
       isProductionExceeded: false,
       missingCycleTime: true,
+      isFullTargetBalanced: false,
+      cycleRemainderMinutes: 0,
       errorMessage: `Actual output (${actual} pcs) entered, but cycle time is 0. Please select an Item with a cycle time or enter cycle time.`,
     };
   }
@@ -330,22 +337,42 @@ export function calculateShiftTimeBalance(
     (productionMinutes + loggedBreakdown).toFixed(2)
   );
   const diff = Number((shiftMins - totalAccountedMinutes).toFixed(2));
-  const isBalanced = Math.abs(diff) < 0.01;
+  let isBalanced = Math.abs(diff) < 0.01;
   const isOver = diff < -0.01;
-  const isUnder = diff > 0.01;
+  let isUnder = diff > 0.01;
   const isProductionExceeded = productionMinutes > shiftMins + 0.01;
 
-  const requiredBreakdownMinutes = Math.max(
+  let requiredBreakdownMinutes = Math.max(
     0,
     Number((shiftMins - productionMinutes).toFixed(2))
   );
+  let unaccountedMinutes = diff;
+
+  let isFullTargetBalanced = false;
+  let cycleRemainderMinutes = 0;
+
+  if (
+    !isProductionExceeded &&
+    !isOver &&
+    std > 0 &&
+    ct > 0 &&
+    actual >= std &&
+    totalAccountedMinutes <= shiftMins + 0.01
+  ) {
+    cycleRemainderMinutes = Math.max(0, Number((shiftMins - totalAccountedMinutes).toFixed(2)));
+    isFullTargetBalanced = true;
+    requiredBreakdownMinutes = 0;
+    unaccountedMinutes = 0;
+    isBalanced = true;
+    isUnder = false;
+  }
 
   let errorMessage: string | undefined = undefined;
   if (isProductionExceeded) {
     errorMessage = `Actual output time (${productionMinutes}m = ${actual} pcs × ${ct}m) exceeds shift duration (${shiftMins}m). Productive time alone is greater than shift timing.`;
   } else if (isOver) {
     errorMessage = `Total time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdown}m BD) exceeds shift duration (${shiftMins}m) by ${Math.abs(diff)}m. Total time must not exceed shift timing.`;
-  } else if (isUnder) {
+  } else if (isUnder && !isFullTargetBalanced) {
     errorMessage = `Total time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdown}m BD) is ${diff}m short of shift duration (${shiftMins}m). Log ${diff}m in breakdown to balance.`;
   }
 
@@ -354,13 +381,15 @@ export function calculateShiftTimeBalance(
     productionMinutes,
     requiredBreakdownMinutes,
     loggedBreakdownMinutes: loggedBreakdown,
-    unaccountedMinutes: diff,
+    unaccountedMinutes,
     totalAccountedMinutes,
     isBalanced,
     isOver,
     isUnder,
     isProductionExceeded,
     missingCycleTime: false,
+    isFullTargetBalanced,
+    cycleRemainderMinutes,
     errorMessage,
   };
 }
@@ -459,6 +488,8 @@ export function calculateMachineGroupTimeBalance(
       isUnder: false,
       isProductionExceeded: false,
       missingCycleTime: false,
+      isFullTargetBalanced: false,
+      cycleRemainderMinutes: 0,
     };
   }
 
@@ -491,13 +522,71 @@ export function calculateMachineGroupTimeBalance(
   const diff = Number((shiftMins - totalAccountedMinutes).toFixed(2));
   const isProductionExceeded = productionMinutes > shiftMins + 0.01;
   const isOver = diff < -0.01;
-  const isUnder = diff > 0.01;
-  const isBalanced = !hasMissingCt && !isProductionExceeded && Math.abs(diff) < 0.01;
+  let isUnder = diff > 0.01;
+  let isBalanced = !hasMissingCt && !isProductionExceeded && Math.abs(diff) < 0.01;
 
-  const requiredBreakdownMinutes = Math.max(
+  let requiredBreakdownMinutes = Math.max(
     0,
     Number((shiftMins - productionMinutes).toFixed(2))
   );
+  let unaccountedMinutes = diff;
+
+  let isFullTargetBalanced = false;
+  let cycleRemainderMinutes = 0;
+
+  if (!hasMissingCt && !isProductionExceeded && !isOver) {
+    if (machineRows.length === 1) {
+      const singleRow = machineRows[0];
+      const std = Number(singleRow.stdOutput) || 0;
+      const ct = Number(singleRow.cycleTime) || 0;
+      const act = Number(singleRow.actualOutput) || 0;
+
+      if (std > 0 && ct > 0 && act >= std && totalAccountedMinutes <= shiftMins + 0.01) {
+        cycleRemainderMinutes = Math.max(0, Number((shiftMins - totalAccountedMinutes).toFixed(2)));
+        isFullTargetBalanced = true;
+        requiredBreakdownMinutes = 0;
+        unaccountedMinutes = 0;
+        isBalanced = true;
+        isUnder = false;
+      }
+    } else if (machineRows.length > 1) {
+      const activeRuns = machineRows.filter(
+        (r) =>
+          (Number(r.cycleTime) || 0) > 0 ||
+          (Number(r.actualOutput) || 0) > 0 ||
+          (Number(r.stdOutput) || 0) > 0
+      );
+
+      if (activeRuns.length > 0) {
+        const allActiveMetTarget = activeRuns.every((r) => {
+          const rCt = Number(r.cycleTime) || 0;
+          const rStd = Number(r.stdOutput) || 0;
+          const rAct = Number(r.actualOutput) || 0;
+          return rCt > 0 && rStd > 0 && rAct >= rStd;
+        });
+
+        const positiveCts = activeRuns
+          .map((r) => Number(r.cycleTime) || 0)
+          .filter((c) => c > 0);
+        const minActiveCycleTime = positiveCts.length > 0 ? Math.min(...positiveCts) : 0;
+        const gap = Math.max(0, Number((shiftMins - totalAccountedMinutes).toFixed(2)));
+
+        if (
+          allActiveMetTarget &&
+          totalAccountedMinutes <= shiftMins + 0.01 &&
+          minActiveCycleTime > 0 &&
+          gap < minActiveCycleTime
+        ) {
+          isFullTargetBalanced = true;
+          cycleRemainderMinutes = gap;
+          requiredBreakdownMinutes = 0;
+          unaccountedMinutes = 0;
+          isBalanced = true;
+          isUnder = false;
+        }
+      }
+    }
+  }
 
   let errorMessage: string | undefined = undefined;
   if (hasMissingCt) {
@@ -506,7 +595,7 @@ export function calculateMachineGroupTimeBalance(
     errorMessage = `Combined actual output time (${productionMinutes}m) across ${machineRows.length} run(s) exceeds shift duration (${shiftMins}m). Productive time alone is greater than shift timing.`;
   } else if (isOver) {
     errorMessage = `Combined machine time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdownMinutes}m BD) exceeds shift duration (${shiftMins}m) by ${Math.abs(diff)}m.`;
-  } else if (isUnder) {
+  } else if (isUnder && !isFullTargetBalanced) {
     errorMessage = `Combined machine time (${totalAccountedMinutes}m = ${productionMinutes}m prod + ${loggedBreakdownMinutes}m BD) is ${diff}m short of shift duration (${shiftMins}m). Log ${diff}m in breakdown to balance.`;
   }
 
@@ -520,13 +609,15 @@ export function calculateMachineGroupTimeBalance(
     productionMinutes,
     requiredBreakdownMinutes,
     loggedBreakdownMinutes,
-    unaccountedMinutes: diff,
+    unaccountedMinutes,
     totalAccountedMinutes,
     isBalanced,
     isOver,
     isUnder,
     isProductionExceeded,
     missingCycleTime: hasMissingCt,
+    isFullTargetBalanced,
+    cycleRemainderMinutes,
     errorMessage,
   };
 }

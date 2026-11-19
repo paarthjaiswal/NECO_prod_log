@@ -281,12 +281,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     field: BreakdownKey;
   }>({ rowIndex: 0, field: 'noDisc' });
 
-  // Tracks active text being typed in a breakdown cell so mid-entry decimals like "12." are not swallowed
-  const [editingBdCell, setEditingBdCell] = useState<{
-    rowIndex: number;
-    field: BreakdownKey;
-    text: string;
-  } | null>(null);
+  // Tracks active text being typed in breakdown cells so mid-entry decimals like "12." are not swallowed
+  const [bdDrafts, setBdDrafts] = useState<Record<string, string>>({});
 
   // State for Line-Wide Bulk Breakdown Applier (e.g., Power Cut across all machines)
   const [bulkBdField, setBulkBdField] = useState<BreakdownKey>('power');
@@ -1124,6 +1120,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     const targetRow = rows[active.rowIndex] || rows[0];
     if (!targetRow) return;
 
+    setBdDrafts({});
     const currentVal = Number(targetRow.breakdown?.[active.field] ?? 0);
     const nextVal =
       mode === 'set'
@@ -1147,6 +1144,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       preferredField ??
       (activeBdCell?.rowIndex === rowIndex ? activeBdCell.field : 'noDisc');
 
+    setBdDrafts({});
     const currentVal = Number(row.breakdown?.[targetField] ?? 0);
     const nextVal = Number((currentVal + balance.unaccountedMinutes).toFixed(2));
     handleBreakdownChange(rowIndex, targetField, nextVal);
@@ -1159,7 +1157,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     const minsToAdd = parseFloat(bulkBdMinutes);
     if (isNaN(minsToAdd) || minsToAdd <= 0) return;
 
-    patchRows((row) => {
+    setBdDrafts({});
+    const updated = rows.map((row) => {
       const currentBd = row.breakdown || {
         noDisc: 0,
         change: 0,
@@ -1169,13 +1168,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         fixProgSettings: 0,
         miscellaneous: 0,
       };
+      const prevVal = Number(currentBd[bulkBdField] || 0);
       return {
+        ...row,
         breakdown: {
           ...currentBd,
-          [bulkBdField]: Number(Math.max(0, Number(currentBd[bulkBdField] || 0) + minsToAdd).toFixed(2)),
+          [bulkBdField]: Number((prevVal + minsToAdd).toFixed(2)),
         },
       };
     });
+    onRowsChange(updated);
     setBulkBdMinutes('');
   };
 
@@ -1257,6 +1259,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const handleClearSheet = () => {
     if (isShiftLocked) return;
     if (window.confirm('Clear all inputs on this shift sheet?')) {
+      setBdDrafts({});
       patchRows(() => ({
         operatorName: '',
         itemId: '',
@@ -1742,7 +1745,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
               </span>
             )}
 
-            {focusedRowBalance && focusedRowBalance.unaccountedMinutes > 0 && (
+            {focusedRowBalance && !focusedRowBalance.isFullTargetBalanced && focusedRowBalance.unaccountedMinutes > 0 && (
               <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
@@ -2595,13 +2598,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       />
                     </td>
 
-                    {/* 9. BREAKDOWN SUB-COLUMNS (NO/DISC, CHANGE, POWER, OPERATOR, BREAK DOWN, FIX/PROG) */}
+                    {/* 9. BREAKDOWN SUB-COLUMNS (NO/DISC, CHANGE, POWER, OPERATOR, BREAK DOWN, FIX/PROG, MISC) */}
                     {BD_KEYS.map((bdKey) => {
                       const val = Number(row.breakdown?.[bdKey] ?? 0);
+                      const cellKey = `${index}_${bdKey}`;
                       const isFocused =
                         activeBdCell?.rowIndex === index && activeBdCell?.field === bdKey;
-                      const isEditing =
-                        editingBdCell?.rowIndex === index && editingBdCell?.field === bdKey;
 
                       return (
                         <td
@@ -2618,34 +2620,37 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                             readOnly={isShiftLocked}
                             data-grid-cell={`${index}-${bdKey}`}
                             value={
-                              isEditing
-                                ? editingBdCell.text
+                              bdDrafts[cellKey] !== undefined
+                                ? bdDrafts[cellKey]
                                 : val > 0
-                                ? val
+                                ? String(val)
                                 : ''
                             }
                             placeholder="0"
                             onFocus={(e) => {
                               e.target.select();
                               setActiveBdCell({ rowIndex: index, field: bdKey });
-                              setEditingBdCell({
-                                rowIndex: index,
-                                field: bdKey,
-                                text: val > 0 ? String(val) : '',
-                              });
+                              setBdDrafts((prev) => ({
+                                ...prev,
+                                [cellKey]: val > 0 ? String(val) : '',
+                              }));
                             }}
                             onBlur={() => {
-                              setEditingBdCell(null);
+                              setBdDrafts((prev) => {
+                                if (prev[cellKey] === undefined) return prev;
+                                const next = { ...prev };
+                                delete next[cellKey];
+                                return next;
+                              });
                             }}
                             onClick={(e) => (e.target as HTMLInputElement).select()}
                             onKeyDown={(e) => handleGridKeyDown(e, index, bdKey)}
                             onChange={(e) => {
                               const raw = e.target.value;
-                              setEditingBdCell({
-                                rowIndex: index,
-                                field: bdKey,
-                                text: raw,
-                              });
+                              setBdDrafts((prev) => ({
+                                ...prev,
+                                [cellKey]: raw,
+                              }));
                               const parsed = parseFloat(raw);
                               handleBreakdownChange(
                                 index,
@@ -2754,7 +2759,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           ) : (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px] border border-emerald-300">
                               <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                              <span>{timeBalance.shiftMinutes}m Balanced</span>
+                              <span>
+                                {timeBalance.isFullTargetBalanced && (timeBalance.cycleRemainderMinutes ?? 0) > 0
+                                  ? `Balanced ✓ (100% Target · ${timeBalance.cycleRemainderMinutes}m rem.)`
+                                  : `${timeBalance.shiftMinutes}m Balanced`}
+                              </span>
                             </span>
                           )}
                         </div>
