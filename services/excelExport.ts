@@ -2,6 +2,11 @@ import * as XLSX from "xlsx";
 import { MachineShiftRow, MasterDataState, ItemProductionRollup } from "@/types";
 import { calculateTotalBreakdown } from "@/services/storageService";
 import { INITIAL_MACHINES, PRODUCTION_LINES } from "@/data/initialData";
+import {
+  computeAllocatedPlannedMinutes,
+  calculateOeeMetrics,
+  buildProductLineMachineMatrix,
+} from "@/services/analyticsEngine";
 
 /**
  * Formats a MachineShiftRow to match the vw_powerbi_shift_logs schema:
@@ -106,6 +111,7 @@ function buildLineEfficiencyData(
     ? masterData.machines
     : INITIAL_MACHINES;
 
+  const allEnriched = computeAllocatedPlannedMinutes(rows);
   const result: Record<string, string | number>[] = [];
 
   let grandTotalMachines = 0;
@@ -126,6 +132,9 @@ function buildLineEfficiencyData(
     grandTotalMachines += totalLineMachines;
 
     const lineRows = rows.filter((r) => (r.line || "Line 1") === lineName);
+    const lineEnriched = allEnriched.filter((r) => (r.line || "Line 1") === lineName);
+    const lineMetrics = calculateOeeMetrics(lineEnriched);
+
     const activeRows = lineRows.filter((r) => Number(r.stdOutput) > 0);
 
     const activeMachineIds = new Set(activeRows.map((r) => r.machineId || r.machineName));
@@ -183,6 +192,10 @@ function buildLineEfficiencyData(
       "Actual Output (Pcs)": lineAct,
       "Variance (Pcs)": lineVariance,
       "Line Efficiency %": `${lineEff}%`,
+      "Availability %": `${lineMetrics.availabilityPct}%`,
+      "Performance %": `${lineMetrics.performancePct}%`,
+      "Quality %": `${lineMetrics.qualityPct}%`,
+      "OEE %": `${lineMetrics.oeePct}%`,
       "Shift A Target": shiftAStd,
       "Shift A Actual": shiftAAct,
       "Shift A Eff %": shiftAStd > 0 ? `${shiftAEff}%` : "—",
@@ -198,6 +211,7 @@ function buildLineEfficiencyData(
   }
 
   // Overall Plant Row
+  const plantMetrics = calculateOeeMetrics(allEnriched);
   const grandEff = grandStd > 0 ? Math.round((grandAct / grandStd) * 100) : 0;
   const grandShiftAEff = grandShiftAStd > 0 ? Math.round((grandShiftAAct / grandShiftAStd) * 100) : 0;
   const grandShiftBEff = grandShiftBStd > 0 ? Math.round((grandShiftBAct / grandShiftBStd) * 100) : 0;
@@ -217,6 +231,10 @@ function buildLineEfficiencyData(
     "Actual Output (Pcs)": grandAct,
     "Variance (Pcs)": grandAct - grandStd,
     "Line Efficiency %": `${grandEff}%`,
+    "Availability %": `${plantMetrics.availabilityPct}%`,
+    "Performance %": `${plantMetrics.performancePct}%`,
+    "Quality %": `${plantMetrics.qualityPct}%`,
+    "OEE %": `${plantMetrics.oeePct}%`,
     "Shift A Target": grandShiftAStd,
     "Shift A Actual": grandShiftAAct,
     "Shift A Eff %": grandShiftAStd > 0 ? `${grandShiftAEff}%` : "—",
@@ -244,6 +262,7 @@ function buildMachineEfficiencyData(
     ? masterData.machines
     : INITIAL_MACHINES;
 
+  const allEnriched = computeAllocatedPlannedMinutes(rows);
   const baseMachineIds = new Set(allMachines.map((m) => m.id));
   const tempMachinesMap = new Map<
     string,
@@ -323,6 +342,11 @@ function buildMachineEfficiencyData(
       bestWorstText = `${activeShifts[0].name} only (${activeShifts[0].eff}%)`;
     }
 
+    const machEnriched = allEnriched.filter(
+      (r) => r.machineId === m.id || (!m.isTemp && r.machineName === m.name)
+    );
+    const machMetrics = calculateOeeMetrics(machEnriched);
+
     return {
       "Machine Name": m.name,
       "Code": m.code || "",
@@ -333,6 +357,10 @@ function buildMachineEfficiencyData(
       "Actual Output (Pcs)": act,
       "Variance": act - std,
       "Machine Efficiency %": std > 0 ? `${eff}%` : "—",
+      "Availability %": machMetrics.plannedMinutes > 0 ? `${machMetrics.availabilityPct}%` : "—",
+      "Performance %": machMetrics.operatingMinutes > 0 ? `${machMetrics.performancePct}%` : "—",
+      "Quality %": machMetrics.totalActual > 0 ? `${machMetrics.qualityPct}%` : "—",
+      "OEE %": machMetrics.plannedMinutes > 0 ? `${machMetrics.oeePct}%` : "—",
       "Shift A Output": aAct,
       "Shift A Eff %": aEff,
       "Shift B Output": bAct,
@@ -383,6 +411,7 @@ function buildItemProductionData(
   const map = new Map<
     string,
     {
+      canonicalKey: string;
       itemId: string;
       itemCode: string;
       itemName: string;
@@ -403,6 +432,7 @@ function buildItemProductionData(
       const resolved = resolve(roll.itemId, roll.itemCode, roll.itemName);
       if (!map.has(resolved.canonicalKey)) {
         map.set(resolved.canonicalKey, {
+          canonicalKey: resolved.canonicalKey,
           itemId: resolved.itemId,
           itemCode: resolved.itemCode || "—",
           itemName: resolved.itemName,
@@ -431,6 +461,7 @@ function buildItemProductionData(
     const resolved = resolve(r.itemId, undefined, r.itemName);
     if (!map.has(resolved.canonicalKey)) {
       map.set(resolved.canonicalKey, {
+        canonicalKey: resolved.canonicalKey,
         itemId: resolved.itemId,
         itemCode: resolved.itemCode || "—",
         itemName: resolved.itemName || "Unknown Part",
@@ -457,20 +488,73 @@ function buildItemProductionData(
     entry.periodRework += Number(r.rework) || 0;
   }
 
+  const allEnriched = computeAllocatedPlannedMinutes(rows);
+
   return Array.from(map.values())
     .sort((a, b) => b.periodAct - a.periodAct || b.tillNowQty - a.tillNowQty)
-    .map((it) => ({
-      "Part Code": it.itemCode,
-      "Item Name": it.itemName,
-      "Selected Period Qty": it.periodAct,
-      "Today Qty": it.todayQty,
-      "Month-to-Date (MTD) Qty": it.mtdQty,
-      "Total Till Now Qty": it.tillNowQty,
-      "Till Now Target (Std)": it.tillNowStd,
-      "Till Now Rework (pcs)": it.tillNowRework,
-      "Period Efficiency %":
-        it.periodStd > 0 ? `${Math.round((it.periodAct / it.periodStd) * 100)}%` : "—",
-    }));
+    .map((it) => {
+      const itemEnriched = allEnriched.filter(
+        (r) => resolve(r.itemId, undefined, r.itemName).canonicalKey === it.canonicalKey
+      );
+      const itemMetrics = calculateOeeMetrics(itemEnriched);
+      return {
+        "Part Code": it.itemCode,
+        "Item Name": it.itemName,
+        "Selected Period Qty": it.periodAct,
+        "Today Qty": it.todayQty,
+        "Month-to-Date (MTD) Qty": it.mtdQty,
+        "Total Till Now Qty": it.tillNowQty,
+        "Till Now Target (Std)": it.tillNowStd,
+        "Till Now Rework (pcs)": it.tillNowRework,
+        "Period Efficiency %":
+          it.periodStd > 0 ? `${Math.round((it.periodAct / it.periodStd) * 100)}%` : "—",
+        "Availability %": itemMetrics.plannedMinutes > 0 ? `${itemMetrics.availabilityPct}%` : "—",
+        "Performance %": itemMetrics.operatingMinutes > 0 ? `${itemMetrics.performancePct}%` : "—",
+        "Quality %": itemMetrics.totalActual > 0 ? `${itemMetrics.qualityPct}%` : "—",
+        "OEE %": itemMetrics.plannedMinutes > 0 ? `${itemMetrics.oeePct}%` : "—",
+      };
+    });
+}
+
+/**
+ * Builds Sheet 4: Product-Line-Machine Matrix (Traceability, Temp Machines & Split Runs)
+ */
+export function buildProductLineMachineMatrixData(
+  rows: MachineShiftRow[]
+): Record<string, string | number>[] {
+  const enriched = computeAllocatedPlannedMinutes(rows);
+  const matrixItems = buildProductLineMachineMatrix(enriched);
+  const result: Record<string, string | number>[] = [];
+
+  for (const prod of matrixItems) {
+    for (const m of prod.matrix) {
+      result.push({
+        "Product Name": prod.productName,
+        "Product Code": prod.productCode || "—",
+        "Line": m.line,
+        "Machine Name": m.machineName,
+        "Machine ID": m.machineId,
+        "Machine Type": m.isTempMachine ? "TEMP" : "Permanent",
+        "Operation": m.operation,
+        "Split Runs Count": m.splitRunsCount,
+        "Run Numbers": m.runNos.join(", "),
+        "Scheduled Target (Std)": m.stdOutput,
+        "Actual Output (Pcs)": m.actualOutput,
+        "Rework (Pcs)": m.rework,
+        "Good Output (Pcs)": m.goodOutput,
+        "Downtime (mins)": m.breakdownMinutes,
+        "Availability %": `${m.metrics.availabilityPct}%`,
+        "Performance %": `${m.metrics.performancePct}%`,
+        "Quality %": `${m.metrics.qualityPct}%`,
+        "OEE %": `${m.metrics.oeePct}%`,
+        "Plan Achievement %": `${m.metrics.planAchievementPct}%`,
+        "Latest Date": m.latestDate,
+        "Latest Shift": m.latestShift,
+      });
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -478,7 +562,8 @@ function buildItemProductionData(
  * Sheet 1: Line & Shift Efficiency
  * Sheet 2: Machine & Shift Efficiency
  * Sheet 3: Item Production Summary
- * Sheet 4: Shift Logs Detail
+ * Sheet 4: Product-Line-Machine Matrix
+ * Sheet 5: Shift Logs Detail
  */
 export function exportShiftToExcel(
   rows: MachineShiftRow[],
@@ -510,10 +595,17 @@ export function exportShiftToExcel(
         XLSX.utils.book_append_sheet(wb, ws3, "Item Production Summary");
       }
 
-      // Sheet 4: Shift Logs Detail (raw line-level logs)
+      // Sheet 4: Product-Line-Machine Matrix
+      const matrixData = buildProductLineMachineMatrixData(rows);
+      if (matrixData.length > 0) {
+        const ws4 = XLSX.utils.json_to_sheet(matrixData);
+        XLSX.utils.book_append_sheet(wb, ws4, "Product-Line-Machine Matrix");
+      }
+
+      // Sheet 5: Shift Logs Detail (raw line-level logs)
       const formattedDetail = rows.map(formatRowForExport);
-      const ws4 = XLSX.utils.json_to_sheet(formattedDetail);
-      XLSX.utils.book_append_sheet(wb, ws4, "Shift Logs Detail");
+      const ws5 = XLSX.utils.json_to_sheet(formattedDetail);
+      XLSX.utils.book_append_sheet(wb, ws5, "Shift Logs Detail");
 
       const sampleRow = rows[0];
       const date = dateArg || sampleRow?.date || new Date().toISOString().split("T")[0];

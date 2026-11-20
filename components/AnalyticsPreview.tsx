@@ -1,8 +1,6 @@
 "use client";
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
-  TrendingUp,
-  AlertOctagon,
   Clock,
   Download,
   FileSpreadsheet,
@@ -11,20 +9,36 @@ import {
   Layers,
   Package,
   Activity,
-} from 'lucide-react';
+  Filter,
+  RotateCcw,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  Cpu,
+  ArrowUpDown,
+  CheckCircle2,
+  AlertTriangle,
+} from "lucide-react";
 import {
-  MachineMaster,
   MachineShiftRow,
   MasterDataState,
   ShiftType,
-  ItemProductionRollup,
   OpenMachineParams,
-} from '@/types';
-import { INITIAL_MACHINES, PRODUCTION_LINES } from '@/data/initialData';
-import { calculateEfficiency, calculateTotalBreakdown } from '@/services/storageService';
-import { exportHistoricalToCSV, exportShiftToExcel } from '@/services/excelExport';
-import { getAnalyticsLogs, getItemProductionRollups } from '@/actions/shiftActions';
-import { useFeedback } from '@/context/FeedbackContext';
+} from "@/types";
+import { exportHistoricalToCSV, exportShiftToExcel } from "@/services/excelExport";
+import { getAnalyticsLogs } from "@/actions/shiftActions";
+import { useFeedback } from "@/context/FeedbackContext";
+import {
+  computeAllocatedPlannedMinutes,
+  calculateOeeMetrics,
+  buildProductLineMachineMatrix,
+  groupByLine,
+  groupByShift,
+  groupByPeriod,
+  groupByMachine,
+  EnrichedAnalyticsRow,
+  OeeMetrics,
+} from "@/services/analyticsEngine";
 
 interface AnalyticsPreviewProps {
   rows: MachineShiftRow[];
@@ -35,2155 +49,1469 @@ interface AnalyticsPreviewProps {
   onOpenMachine?: (params: OpenMachineParams) => void;
 }
 
+type TabType = "product" | "line" | "shift" | "period" | "machine";
+type PresetKey = "today" | "yesterday" | "thisWeek" | "lastWeek" | "thisMonth" | "custom";
+
+function getLocalDateString(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function computePresetDates(refDate?: string): Record<
+  "today" | "yesterday" | "thisWeek" | "lastWeek" | "thisMonth",
+  { from: string; to: string }
+> {
+  const now = refDate ? new Date(refDate + "T00:00:00") : new Date();
+  const todayStr = getLocalDateString(now);
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = getLocalDateString(yesterday);
+
+  // This Week (Monday to today)
+  const dayOfWeek = (now.getDay() + 6) % 7; // Monday = 0
+  const thisWeekMon = new Date(now);
+  thisWeekMon.setDate(now.getDate() - dayOfWeek);
+  const thisWeekStr = getLocalDateString(thisWeekMon);
+
+  // Last Week (Monday to Sunday of last week)
+  const lastWeekMon = new Date(thisWeekMon);
+  lastWeekMon.setDate(thisWeekMon.getDate() - 7);
+  const lastWeekSun = new Date(thisWeekMon);
+  lastWeekSun.setDate(thisWeekMon.getDate() - 1);
+
+  // This Month (1st of month to today)
+  const thisMonth1st = new Date(now.getFullYear(), now.getMonth(), 1);
+  const thisMonthStr = getLocalDateString(thisMonth1st);
+
+  return {
+    today: { from: todayStr, to: todayStr },
+    yesterday: { from: yesterdayStr, to: yesterdayStr },
+    thisWeek: { from: thisWeekStr, to: todayStr },
+    lastWeek: { from: getLocalDateString(lastWeekMon), to: getLocalDateString(lastWeekSun) },
+    thisMonth: { from: thisMonthStr, to: todayStr },
+  };
+}
+
 export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   rows,
   selectedDate,
-  selectedShift,
-  selectedLine,
   masterData,
   onOpenMachine,
 }) => {
-  // Use live machines from masterData if passed, otherwise fallback to INITIAL_MACHINES
-  const machines: MachineMaster[] = masterData?.machines ?? INITIAL_MACHINES;
-
   const { runWithFeedback } = useFeedback();
 
-  // Start with current shift rows, then merge 30-day history from Supabase on mount
+  // --------------------------------------------------------------------------
+  // DATE RANGE CONTROLS & STATE
+  // --------------------------------------------------------------------------
+  const initialPresets = useMemo(() => computePresetDates(selectedDate), [selectedDate]);
+  const [activePreset, setActivePreset] = useState<PresetKey>("thisWeek");
+  const [fromDate, setFromDate] = useState<string>(initialPresets.thisWeek.from);
+  const [toDate, setToDate] = useState<string>(initialPresets.thisWeek.to);
+
+  // Data loaded from Supabase
   const [historicalLogs, setHistoricalLogs] = useState<MachineShiftRow[]>([]);
-  const [itemRollups, setItemRollups] = useState<ItemProductionRollup[]>([]);
-  const [isLoadingRollups, setIsLoadingRollups] = useState(false);
 
-  useEffect(() => {
-    let isMounted = true;
-    getAnalyticsLogs(30)
-      .then((data) => {
-        if (isMounted && data) {
-          setHistoricalLogs(data);
-        }
-      })
-      .catch((err) => console.error('Failed to load analytics history:', err));
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  // Fetch Item Production rollups (Today, MTD, Till Now) anchored to selectedDate
-  useEffect(() => {
-    let isMounted = true;
-    setIsLoadingRollups(true);
-    runWithFeedback(
-      async () => {
-        const data = await getItemProductionRollups(selectedDate);
-        if (isMounted && data) {
-          setItemRollups(data);
-        }
-        return data;
-      },
-      {
-        loadingMessage: "Fetching analytics data...",
-        errorTitle: "Analytics Fetch Failed",
-      }
-    ).finally(() => {
-      if (isMounted) setIsLoadingRollups(false);
-    });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [selectedDate, runWithFeedback]);
-
-  // Merge current shift rows with historical logs (deduplicated by row.id or unique composite key)
-  const allLogs = useMemo(() => {
-    const logMap = new Map<string, MachineShiftRow>();
-    historicalLogs.forEach((log) => {
-      const key = log.id || `${log.date}_${log.shift}_${log.line}_${log.machineId}_${log.runNo || 1}`;
-      logMap.set(key, log);
-    });
-    rows.forEach((row) => {
-      const key = row.id || `${row.date}_${row.shift}_${row.line}_${row.machineId}_${row.runNo || 1}`;
-      logMap.set(key, row); // Latest current shift rows win
-    });
-    return Array.from(logMap.values());
-  }, [historicalLogs, rows]);
-
-  // Filters
-  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | '7d' | 'week' | 'custom' | 'selected'>('all');
-  const [shiftFilter, setShiftFilter] = useState<string>('all');
-  const [lineFilter, setLineFilter] = useState<string>('all');
-  const [machineLineFilter, setMachineLineFilter] = useState<string>('all');
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
-  const [itemDropdownFilter, setItemDropdownFilter] = useState<string>('all');
-  const [showIdleMachines, setShowIdleMachines] = useState<boolean>(false);
-
-  // Canonical item index for consistent resolution across masterData, rollups, and shift logs
-  const itemLookup = useMemo(() => {
-    const lookup = new Map<
-      string,
-      { canonicalKey: string; itemId: string; itemCode: string; itemName: string }
-    >();
-
-    // 1. Index from masterData.items first (highest priority)
-    (masterData?.items || []).forEach((item) => {
-      const id = (item.id || '').trim();
-      const code = (item.itemCode || '').trim();
-      const name = (item.itemName || '').trim();
-      const canonicalKey = (code || id || name).toLowerCase();
-      if (!canonicalKey) return;
-
-      const canonicalItem = {
-        canonicalKey,
-        itemId: id || canonicalKey,
-        itemCode: code || '—',
-        itemName: name || code || 'Unknown Part',
-      };
-
-      if (id) lookup.set(id.toLowerCase(), canonicalItem);
-      if (code) lookup.set(code.toLowerCase(), canonicalItem);
-      if (name) lookup.set(name.toLowerCase(), canonicalItem);
-      lookup.set(canonicalKey, canonicalItem);
-    });
-
-    // 2. Index from itemRollups (for items present in DB shift_logs)
-    itemRollups.forEach((r) => {
-      const id = (r.itemId || '').trim();
-      const code = (r.itemCode || '').trim();
-      const name = (r.itemName || '').trim();
-
-      const existing =
-        (id ? lookup.get(id.toLowerCase()) : null) ||
-        (code ? lookup.get(code.toLowerCase()) : null) ||
-        (name ? lookup.get(name.toLowerCase()) : null);
-
-      const canonicalKey = existing?.canonicalKey || (code || id || name).toLowerCase();
-      if (!canonicalKey) return;
-
-      const canonicalItem = existing || {
-        canonicalKey,
-        itemId: id || canonicalKey,
-        itemCode: code || (id && !id.startsWith('item_') && !id.startsWith('it_') ? id : '—'),
-        itemName: name || code || 'Unknown Part',
-      };
-
-      if (id && !lookup.has(id.toLowerCase())) lookup.set(id.toLowerCase(), canonicalItem);
-      if (code && !lookup.has(code.toLowerCase())) lookup.set(code.toLowerCase(), canonicalItem);
-      if (name && !lookup.has(name.toLowerCase())) lookup.set(name.toLowerCase(), canonicalItem);
-      if (!lookup.has(canonicalKey)) lookup.set(canonicalKey, canonicalItem);
-    });
-
-    return lookup;
-  }, [masterData?.items, itemRollups]);
-
-  // Resolve any raw item reference into canonical item info
-  const resolveItem = useCallback(
-    (rawId?: string, rawCode?: string, rawName?: string) => {
-      const id = (rawId || '').trim();
-      const code = (rawCode || '').trim();
-      const name = (rawName || '').trim();
-
-      const matched =
-        (id ? itemLookup.get(id.toLowerCase()) : null) ||
-        (code ? itemLookup.get(code.toLowerCase()) : null) ||
-        (name ? itemLookup.get(name.toLowerCase()) : null);
-
-      if (matched) return matched;
-
-      const fallbackCode = code || (id && !id.startsWith('item_') && !id.startsWith('it_') ? id : '');
-      const canonicalKey = (fallbackCode || id || name || 'unknown').toLowerCase();
-      return {
-        canonicalKey,
-        itemId: id || canonicalKey,
-        itemCode: fallbackCode || '—',
-        itemName: name || fallbackCode || id || 'Unknown Part',
-      };
-    },
-    [itemLookup]
-  );
-
-  // Unique parts for dropdown with canonical deduplication
-  const uniquePartOptions = useMemo(() => {
-    const map = new Map<string, { value: string; label: string }>();
-
-    (masterData?.items || []).forEach((it) => {
-      const resolved = resolveItem(it.id, it.itemCode, it.itemName);
-      const code = resolved.itemCode !== '—' ? resolved.itemCode : '';
-      const name = resolved.itemName;
-      const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
-      if (resolved.canonicalKey && !map.has(resolved.canonicalKey)) {
-        map.set(resolved.canonicalKey, { value: resolved.canonicalKey, label });
-      }
-    });
-
-    itemRollups.forEach((r) => {
-      const resolved = resolveItem(r.itemId, r.itemCode, r.itemName);
-      const code = resolved.itemCode !== '—' ? resolved.itemCode : '';
-      const name = resolved.itemName;
-      const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
-      if (resolved.canonicalKey && !map.has(resolved.canonicalKey)) {
-        map.set(resolved.canonicalKey, { value: resolved.canonicalKey, label });
-      }
-    });
-
-    allLogs.forEach((l) => {
-      if (!l.itemName && !l.itemId) return;
-      const resolved = resolveItem(l.itemId, undefined, l.itemName);
-      const code = resolved.itemCode !== '—' ? resolved.itemCode : '';
-      const name = resolved.itemName;
-      const label = code && name && code !== name ? `${code} — ${name}` : (code || name);
-      if (resolved.canonicalKey && !map.has(resolved.canonicalKey)) {
-        map.set(resolved.canonicalKey, { value: resolved.canonicalKey, label });
-      }
-    });
-
-    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
-  }, [masterData?.items, itemRollups, allLogs, resolveItem]);
-
-  // Custom Date Range State (defaults to past 30 days up to today)
-  const [fromDate, setFromDate] = useState<string>(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 30);
-    return d.toISOString().slice(0, 10);
-  });
-  const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
-  const [appliedCustomRange, setAppliedCustomRange] = useState<{ from: string; to: string } | null>(null);
-  const [isLoadingCustom, setIsLoadingCustom] = useState(false);
-
-  const activeToDateOrToday = useMemo(() => {
-    if (dateFilter === 'selected' && selectedDate) return selectedDate;
-    if (dateFilter === 'today') return new Date().toISOString().slice(0, 10);
-    if (dateFilter === 'yesterday') {
-      const d = new Date();
-      d.setDate(d.getDate() - 1);
-      return d.toISOString().slice(0, 10);
-    }
-    if (dateFilter === 'custom') {
-      return appliedCustomRange?.to || toDate || selectedDate || new Date().toISOString().slice(0, 10);
-    }
-    return selectedDate || new Date().toISOString().slice(0, 10);
-  }, [dateFilter, selectedDate, appliedCustomRange, toDate]);
-
-  // Prevent invalid ranges: clamp toDate if fromDate > toDate, or vice versa
-  const handleFromDateChange = (val: string) => {
-    setFromDate(val);
-    if (toDate && val > toDate) {
-      setToDate(val);
-    }
-  };
-
-  const handleToDateChange = (val: string) => {
-    if (fromDate && val < fromDate) {
-      setToDate(fromDate);
-    } else {
-      setToDate(val);
-    }
-  };
-
-  // Fetch older dates outside initial cache from Supabase when "Apply" is clicked
-  const handleApplyCustomRange = async () => {
-    if (!fromDate || !toDate) return;
-    setAppliedCustomRange({ from: fromDate, to: toDate });
-    setIsLoadingCustom(true);
-    try {
+  const fetchRange = useCallback(
+    async (from: string, to: string) => {
       await runWithFeedback(
         async () => {
-          const customLogs = await getAnalyticsLogs({ startDate: fromDate, endDate: toDate });
-          if (customLogs && customLogs.length > 0) {
-            setHistoricalLogs((prev) => {
-              const map = new Map<string, MachineShiftRow>();
-              prev.forEach((l) => map.set(l.id, l));
-              customLogs.forEach((l) => map.set(l.id, l));
-              return Array.from(map.values());
-            });
-          }
-          return customLogs;
+          const data = await getAnalyticsLogs(from, to);
+          setHistoricalLogs(data || []);
+          return data;
         },
         {
-          loadingMessage: "Fetching analytics data...",
-          successTitle: "Analytics Updated",
-          successDetail: `Loaded historical logs for ${fromDate} to ${toDate}`,
+          loadingMessage: "Loading analytics data...",
           errorTitle: "Analytics Fetch Failed",
         }
       );
-    } finally {
-      setIsLoadingCustom(false);
-    }
+    },
+    [runWithFeedback]
+  );
+
+  // Fetch on mount or when fromDate/toDate changes through preset or explicit Apply
+  useEffect(() => {
+    fetchRange(fromDate, toDate);
+  }, [fetchRange, fromDate, toDate]);
+
+  const handleSelectPreset = (key: "today" | "yesterday" | "thisWeek" | "lastWeek" | "thisMonth") => {
+    const dates = initialPresets[key];
+    setActivePreset(key);
+    setFromDate(dates.from);
+    setToDate(dates.to);
   };
 
-  // Sync internal filters with Header props when they change
-  useEffect(() => {
-    if (selectedLine) {
-      setLineFilter(selectedLine);
-      setMachineLineFilter(selectedLine);
-    }
-  }, [selectedLine]);
+  const handleApplyCustomDates = () => {
+    setActivePreset("custom");
+    fetchRange(fromDate, toDate);
+  };
 
-  useEffect(() => {
-    if (selectedShift) {
-      const parts = selectedShift.split(' ');
-      const shiftPrefix = parts.length >= 2 ? `${parts[0]} ${parts[1]}` : parts[0];
-      setShiftFilter(shiftPrefix || 'all');
-    }
-  }, [selectedShift]);
+  // --------------------------------------------------------------------------
+  // MERGE HISTORICAL LOGS WITH LIVE SHIFT ROWS
+  // --------------------------------------------------------------------------
+  const mergedLogs = useMemo(() => {
+    const map = new Map<string, MachineShiftRow>();
+    historicalLogs.forEach((log) => {
+      const key = log.id || `${log.date}_${log.shift}_${log.line}_${log.machineId}_${log.runNo || 1}`;
+      map.set(key, log);
+    });
+    // Live current shift sheet rows take precedence
+    rows.forEach((row) => {
+      const key = row.id || `${row.date}_${row.shift}_${row.line}_${row.machineId}_${row.runNo || 1}`;
+      map.set(key, row);
+    });
+    return Array.from(map.values());
+  }, [historicalLogs, rows]);
 
-  const prevSelectedDateRef = React.useRef(selectedDate);
-  useEffect(() => {
-    if (prevSelectedDateRef.current === selectedDate) return;
-    prevSelectedDateRef.current = selectedDate;
-    if (dateFilter === 'custom') return; // Do not stomp active custom date range
+  // Feed through pure calculation engine to allocate planned minutes without double counting
+  const enrichedAllRows = useMemo(() => {
+    return computeAllocatedPlannedMinutes(mergedLogs);
+  }, [mergedLogs]);
 
-    const today = new Date().toISOString().slice(0, 10);
-    const yesterdayDate = new Date();
-    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-    const yesterday = yesterdayDate.toISOString().slice(0, 10);
+  // --------------------------------------------------------------------------
+  // INSTANT CLIENT-SIDE FACET FILTERS (Zero DB refetch)
+  // --------------------------------------------------------------------------
+  const [filterProduct, setFilterProduct] = useState<string>("all");
+  const [filterLine, setFilterLine] = useState<string>("all");
+  const [filterShift, setFilterShift] = useState<string>("all");
+  const [filterMachine, setFilterMachine] = useState<string>("all");
+  const [filterOperator, setFilterOperator] = useState<string>("all");
 
-    if (selectedDate === today) {
-      setDateFilter('today');
-    } else if (selectedDate === yesterday) {
-      setDateFilter('yesterday');
-    } else if (selectedDate) {
-      setDateFilter('selected');
-    }
-  }, [selectedDate, dateFilter]);
+  const [includeTempMachines, setIncludeTempMachines] = useState<boolean>(true);
+  const [tempOnly, setTempOnly] = useState<boolean>(false);
+  const [splitRunsOnly, setSplitRunsOnly] = useState<boolean>(false);
 
-  // Compute filtered logs
-  const filteredLogs = useMemo(() => {
-    const today = new Date().toISOString().slice(0, 10);
-    const yesterdayDate = new Date();
-    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-    const yesterday = yesterdayDate.toISOString().slice(0, 10);
+  // Available facet options derived from data
+  const availableFacets = useMemo(() => {
+    const prodMap = new Map<string, string>();
+    const lineSet = new Set<string>();
+    const shiftSet = new Set<string>();
+    const machMap = new Map<string, { id: string; name: string; isTemp: boolean }>();
+    const opSet = new Set<string>();
 
-    const weekAgoDate = new Date();
-    weekAgoDate.setDate(weekAgoDate.getDate() - 7);
-    const weekAgo = weekAgoDate.toISOString().slice(0, 10);
-
-    return allLogs.filter((log) => {
-      // Date filter
-      if (dateFilter === 'selected' && log.date !== selectedDate) return false;
-      if (dateFilter === 'today' && log.date !== today) return false;
-      if (dateFilter === 'yesterday' && log.date !== yesterday) return false;
-      if ((dateFilter === 'week' || dateFilter === '7d') && log.date < weekAgo) return false;
-      if (dateFilter === 'custom') {
-        const from = appliedCustomRange?.from || fromDate;
-        const to = appliedCustomRange?.to || toDate;
-        if (from && log.date < from) return false;
-        if (to && log.date > to) return false;
+    for (const r of enrichedAllRows) {
+      if (r.itemName || r.itemId) {
+        const pKey = (r.itemId || r.itemName || "").trim();
+        const pName = r.itemName || r.itemId || "";
+        if (pKey) prodMap.set(pKey, pName);
       }
-
-      // Shift filter
-      if (shiftFilter !== 'all' && !log.shift.startsWith(shiftFilter)) return false;
-
-      // Line filter
-      if (lineFilter !== 'all' && (log.line || 'Line 1') !== lineFilter) return false;
-
-      // Search filter
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matches =
-          log.machineName.toLowerCase().includes(q) ||
-          log.operatorName.toLowerCase().includes(q) ||
-          log.itemName.toLowerCase().includes(q) ||
-          (log.line && log.line.toLowerCase().includes(q)) ||
-          log.remarks.toLowerCase().includes(q);
-        if (!matches) return false;
+      if (r.line) lineSet.add(r.line);
+      if (r.shift) shiftSet.add(r.shift);
+      const mId = r.machineId || r.machineName;
+      if (mId && !machMap.has(mId)) {
+        machMap.set(mId, {
+          id: mId,
+          name: r.machineName || mId,
+          isTemp: Boolean(r.isTempMachine),
+        });
       }
+      if (r.operatorName) opSet.add(r.operatorName);
+    }
 
+    // Include masterData lines if not yet in shift_logs
+    if (masterData?.lines) {
+      masterData.lines.forEach((l) => lineSet.add(l.name));
+    }
+
+    return {
+      products: Array.from(prodMap.entries()).map(([id, name]) => ({ id, name })),
+      lines: Array.from(lineSet).sort(),
+      shifts: Array.from(shiftSet).sort(),
+      machines: Array.from(machMap.values()).sort((a, b) => a.name.localeCompare(b.name)),
+      operators: Array.from(opSet).sort(),
+    };
+  }, [enrichedAllRows, masterData]);
+
+  const hasActiveFacetFilters =
+    filterProduct !== "all" ||
+    filterLine !== "all" ||
+    filterShift !== "all" ||
+    filterMachine !== "all" ||
+    filterOperator !== "all" ||
+    !includeTempMachines ||
+    tempOnly ||
+    splitRunsOnly;
+
+  const handleResetFilters = () => {
+    setFilterProduct("all");
+    setFilterLine("all");
+    setFilterShift("all");
+    setFilterMachine("all");
+    setFilterOperator("all");
+    setIncludeTempMachines(true);
+    setTempOnly(false);
+    setSplitRunsOnly(false);
+  };
+
+  // Filtered rows for analytics calculations
+  const filteredRows: EnrichedAnalyticsRow[] = useMemo(() => {
+    return enrichedAllRows.filter((r) => {
+      if (filterProduct !== "all") {
+        const target = filterProduct.toLowerCase();
+        const matchName = (r.itemName || "").toLowerCase() === target;
+        const matchId = (r.itemId || "").toLowerCase() === target;
+        if (!matchName && !matchId) return false;
+      }
+      if (filterLine !== "all" && (r.line || "").toLowerCase() !== filterLine.toLowerCase()) {
+        return false;
+      }
+      if (filterShift !== "all" && (r.shift || "").toLowerCase() !== filterShift.toLowerCase()) {
+        return false;
+      }
+      if (filterMachine !== "all") {
+        const targetM = filterMachine.toLowerCase();
+        const matchMId = (r.machineId || "").toLowerCase() === targetM;
+        const matchMName = (r.machineName || "").toLowerCase() === targetM;
+        if (!matchMId && !matchMName) return false;
+      }
+      if (
+        filterOperator !== "all" &&
+        (r.operatorName || "").toLowerCase() !== filterOperator.toLowerCase()
+      ) {
+        return false;
+      }
+      if (!includeTempMachines && r.isTempMachine) {
+        return false;
+      }
+      if (tempOnly && !r.isTempMachine) {
+        return false;
+      }
+      if (splitRunsOnly && !r.isSplitRun) {
+        return false;
+      }
       return true;
     });
-  }, [allLogs, dateFilter, selectedDate, shiftFilter, lineFilter, searchQuery, appliedCustomRange, fromDate, toDate]);
+  }, [
+    enrichedAllRows,
+    filterProduct,
+    filterLine,
+    filterShift,
+    filterMachine,
+    filterOperator,
+    includeTempMachines,
+    tempOnly,
+    splitRunsOnly,
+  ]);
 
-  // Dynamic Export Filename Builder that includes the active date range
-  const getExportFilename = (extension: 'csv' | 'xlsx', basePrefix: string = 'neco_production') => {
-    let datePart = dateFilter as string;
-    if (dateFilter === 'custom') {
-      const from = appliedCustomRange?.from || fromDate;
-      const to = appliedCustomRange?.to || toDate;
-      datePart = `${from}_to_${to}`;
-    } else if (dateFilter === 'today') {
-      datePart = new Date().toISOString().slice(0, 10);
-    } else if (dateFilter === 'yesterday') {
-      const d = new Date();
-      d.setDate(d.getDate() - 1);
-      datePart = d.toISOString().slice(0, 10);
-    } else if (dateFilter === 'week' || dateFilter === '7d') {
-      datePart = 'last_7_days';
-    } else if (dateFilter === 'selected' && selectedDate) {
-      datePart = selectedDate;
-    } else {
-      datePart = 'all_time';
-    }
+  // Overall OEE Metrics reflecting active filters
+  const overallMetrics: OeeMetrics = useMemo(() => {
+    return calculateOeeMetrics(filteredRows);
+  }, [filteredRows]);
 
-    const cleanLine = lineFilter !== 'all' ? `_${lineFilter.replace(/\s+/g, '_')}` : '';
-    const cleanShift = shiftFilter !== 'all' ? `_${shiftFilter.replace(/\s+/g, '_')}` : '';
-    return `${basePrefix}_logs_${datePart}${cleanLine}${cleanShift}.${extension}`;
+  // --------------------------------------------------------------------------
+  // WORKSPACE TABS & ROLLUPS
+  // --------------------------------------------------------------------------
+  const [activeTab, setActiveTab] = useState<TabType>("product");
+  const [periodGranularity, setPeriodGranularity] = useState<"day" | "week">("day");
+  const [productSearch, setProductSearch] = useState<string>("");
+  const [expandedProducts, setExpandedProducts] = useState<Set<string>>(new Set());
+
+  const [machineSortKey, setMachineSortKey] = useState<"oee" | "actual" | "downtime" | "name">("oee");
+  const [machineSortOrder, setMachineSortOrder] = useState<"asc" | "desc">("desc");
+
+  // Tab 1: Product Matrix
+  const productMatrix = useMemo(() => {
+    const list = buildProductLineMachineMatrix(filteredRows);
+    if (!productSearch.trim()) return list;
+    const q = productSearch.trim().toLowerCase();
+    return list.filter(
+      (p) =>
+        p.productName.toLowerCase().includes(q) ||
+        p.productCode.toLowerCase().includes(q) ||
+        p.lines.some((l) => l.toLowerCase().includes(q))
+    );
+  }, [filteredRows, productSearch]);
+
+  // Tab 2: Line Rollups
+  const lineRollups = useMemo(() => {
+    return groupByLine(filteredRows);
+  }, [filteredRows]);
+
+  // Tab 3: Shift Rollups
+  const shiftRollups = useMemo(() => {
+    return groupByShift(filteredRows);
+  }, [filteredRows]);
+
+  // Tab 4: Period Rollups
+  const periodRollups = useMemo(() => {
+    return groupByPeriod(filteredRows, periodGranularity);
+  }, [filteredRows, periodGranularity]);
+
+  // Tab 5: Machine Rollups
+  const machineRollups = useMemo(() => {
+    const list = groupByMachine(filteredRows);
+    list.sort((a, b) => {
+      let diff = 0;
+      if (machineSortKey === "oee") diff = a.metrics.oeePct - b.metrics.oeePct;
+      else if (machineSortKey === "actual") diff = a.metrics.totalActual - b.metrics.totalActual;
+      else if (machineSortKey === "downtime") diff = a.metrics.downtimeMinutes - b.metrics.downtimeMinutes;
+      else diff = a.machineName.localeCompare(b.machineName);
+      return machineSortOrder === "desc" ? -diff : diff;
+    });
+    return list;
+  }, [filteredRows, machineSortKey, machineSortOrder]);
+
+  const toggleExpandProduct = (key: string) => {
+    setExpandedProducts((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // --------------------------------------------------------------------------
+  // EXPORT HANDLERS
+  // --------------------------------------------------------------------------
+  const handleExportExcel = () => {
+    const rangeTag = `${fromDate}_to_${toDate}`;
+    exportShiftToExcel(
+      filteredRows,
+      rangeTag,
+      filterShift !== "all" ? filterShift : "All_Shifts",
+      filterLine !== "all" ? filterLine : "All_Lines",
+      `neco_production_analytics_${rangeTag}.xlsx`,
+      masterData
+    );
   };
 
   const handleExportCSV = () => {
-    const from = dateFilter === 'custom' ? (appliedCustomRange?.from || fromDate) : undefined;
-    const to = dateFilter === 'custom' ? (appliedCustomRange?.to || toDate) : undefined;
-    const filename = getExportFilename('csv', 'neco_powerbi');
-    exportHistoricalToCSV(filteredLogs, from, to, filename);
-  };
-
-  const handleExportExcel = () => {
-    const from = dateFilter === 'custom' ? (appliedCustomRange?.from || fromDate) : undefined;
-    const to = dateFilter === 'custom' ? (appliedCustomRange?.to || toDate) : undefined;
-    const dateRangeLabel = from && to ? `${from}_to_${to}` : (dateFilter === 'selected' ? selectedDate : dateFilter);
-    const filename = getExportFilename('xlsx', 'neco_shift_report');
-    exportShiftToExcel(
-      filteredLogs,
-      dateRangeLabel,
-      shiftFilter !== 'all' ? shiftFilter : undefined,
-      lineFilter !== 'all' ? lineFilter : undefined,
-      filename,
-      masterData,
-      itemRollups
+    const rangeTag = `${fromDate}_to_${toDate}`;
+    exportHistoricalToCSV(
+      filteredRows,
+      fromDate,
+      toDate,
+      `neco_production_detail_${rangeTag}.csv`
     );
   };
 
-  // Aggregate Primary KPIs (Partial-Line Rule: only stdOutput > 0)
-  const kpis = useMemo(() => {
-    const activeLogs = filteredLogs.filter((r) => Number(r.stdOutput) > 0);
+  // Color helper for OEE
+  const getOeeColorClass = (oee: number) => {
+    if (oee >= 85) return "text-emerald-700 bg-emerald-50 border-emerald-200";
+    if (oee >= 65) return "text-amber-700 bg-amber-50 border-amber-200";
+    return "text-rose-700 bg-rose-50 border-rose-200";
+  };
 
-    const totalStd = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-    const totalAct = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-    const totalRework = activeLogs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-
-    const totalNoDisc = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.noDisc) || 0), 0).toFixed(2));
-    const totalChange = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.change) || 0), 0).toFixed(2));
-    const totalPower = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.power) || 0), 0).toFixed(2));
-    const totalOperator = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.operator) || 0), 0).toFixed(2));
-    const totalMachineBd = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.machineBreakdown) || 0), 0).toFixed(2));
-    const totalFixProg = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.fixProgSettings) || 0), 0).toFixed(2));
-    const totalMisc = Number(activeLogs.reduce((acc, r) => acc + (Number(r.breakdown.miscellaneous) || 0), 0).toFixed(2));
-    const totalBreakdown = Number(
-      (
-        totalNoDisc +
-        totalChange +
-        totalPower +
-        totalOperator +
-        totalMachineBd +
-        totalFixProg +
-        totalMisc
-      ).toFixed(2)
-    );
-
-    const plantEfficiency = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : 0;
-    const reworkRate = totalAct > 0 ? ((totalRework / totalAct) * 100).toFixed(1) : '0.0';
-
-    const totalWorkingMins =
-      activeLogs.reduce(
-        (acc, r) => acc + (Number(r.totalWorkingMinutes) || 1305),
-        0
-      ) || (activeLogs.length * 1305 || 1305);
-
-    const totalBdPctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalBreakdown / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    const noDiscPctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalNoDisc / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    const changePctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalChange / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    const powerPctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalPower / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    const operatorPctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalOperator / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    const machineBdPctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalMachineBd / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    const fixProgPctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalFixProg / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    const miscPctOfWorking =
-      totalWorkingMins > 0
-        ? ((totalMisc / totalWorkingMins) * 100).toFixed(1)
-        : '0.0';
-
-    return {
-      totalStd,
-      totalAct,
-      variance: totalAct - totalStd,
-      plantEfficiency,
-      totalRework,
-      reworkRate,
-      totalBreakdown,
-      totalWorkingMins,
-      totalBdPctOfWorking,
-      breakdownSplit: {
-        noDisc: totalNoDisc,
-        change: totalChange,
-        power: totalPower,
-        operator: totalOperator,
-        machineBreakdown: totalMachineBd,
-        fixProgSettings: totalFixProg,
-        miscellaneous: totalMisc,
-      },
-      categoryWorkingPct: {
-        noDisc: noDiscPctOfWorking,
-        change: changePctOfWorking,
-        power: powerPctOfWorking,
-        operator: operatorPctOfWorking,
-        machineBreakdown: machineBdPctOfWorking,
-        fixProgSettings: fixProgPctOfWorking,
-        miscellaneous: miscPctOfWorking,
-      },
-      logCount: activeLogs.length,
-    };
-  }, [filteredLogs]);
-
-  // Section 1: Line Efficiency & Shift-Wise Comparison Matrix (Domain Rule: Partial-Line stdOutput > 0)
-  const lineComparisonData = useMemo(() => {
-    const lineList =
-      masterData?.lines && masterData.lines.length > 0
-        ? masterData.lines.filter((l) => l.isActive !== false).map((l) => l.name)
-        : PRODUCTION_LINES;
-
-    const allMachines = masterData?.machines && masterData.machines.length > 0
-      ? masterData.machines
-      : INITIAL_MACHINES;
-
-    let grandTotalMachines = 0;
-    const grandActiveSet = new Set<string>();
-    let grandStd = 0;
-    let grandAct = 0;
-    let grandAStd = 0;
-    let grandAAct = 0;
-    let grandBStd = 0;
-    let grandBAct = 0;
-    let grandCStd = 0;
-    let grandCAct = 0;
-    let grandBd = 0;
-
-    const lines = lineList.map((lineName) => {
-      const lineMachines = allMachines.filter((m) => (m.line || 'Line 1') === lineName);
-      const totalMachines = lineMachines.length;
-      grandTotalMachines += totalMachines;
-
-      const lineLogs = filteredLogs.filter((r) => (r.line || 'Line 1') === lineName);
-      // Strictly filter active rows where stdOutput > 0
-      const activeLogs = lineLogs.filter((r) => Number(r.stdOutput) > 0);
-
-      const activeMachineSet = new Set(activeLogs.map((r) => r.machineId || r.machineName));
-      activeLogs.forEach((r) => grandActiveSet.add(r.machineId || r.machineName));
-
-      const std = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const act = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const eff = std > 0 ? Math.round((act / std) * 100) : 0;
-
-      const filterShift = (prefix: string) =>
-        activeLogs.filter((r) => (r.shift || '').toLowerCase().includes(prefix.toLowerCase()));
-
-      const aLogs = filterShift('shift a');
-      const bLogs = filterShift('shift b');
-      const cLogs = filterShift('shift c');
-
-      const aStd = aLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const aAct = aLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const aEff = aStd > 0 ? Math.round((aAct / aStd) * 100) : null;
-
-      const bStd = bLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const bAct = bLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const bEff = bStd > 0 ? Math.round((bAct / bStd) * 100) : null;
-
-      const cStd = cLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const cAct = cLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const cEff = cStd > 0 ? Math.round((cAct / cStd) * 100) : null;
-
-      const runningEffs = [aEff, bEff, cEff].filter((v): v is number => v !== null);
-      const spread = runningEffs.length >= 2 ? Math.max(...runningEffs) - Math.min(...runningEffs) : null;
-
-      const totalBd = Number(lineLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2));
-
-      grandStd += std;
-      grandAct += act;
-      grandAStd += aStd;
-      grandAAct += aAct;
-      grandBStd += bStd;
-      grandBAct += bAct;
-      grandCStd += cStd;
-      grandCAct += cAct;
-      grandBd = Number((grandBd + totalBd).toFixed(2));
-
-      return {
-        lineName,
-        activeCount: activeMachineSet.size,
-        totalMachines,
-        std,
-        act,
-        variance: act - std,
-        eff,
-        aAct,
-        aStd,
-        aEff,
-        bAct,
-        bStd,
-        bEff,
-        cAct,
-        cStd,
-        cEff,
-        spread,
-        totalBd,
-      };
-    });
-
-    const grandEff = grandStd > 0 ? Math.round((grandAct / grandStd) * 100) : 0;
-    const grandAEff = grandAStd > 0 ? Math.round((grandAAct / grandAStd) * 100) : null;
-    const grandBEff = grandBStd > 0 ? Math.round((grandBAct / grandBStd) * 100) : null;
-    const grandCEff = grandCStd > 0 ? Math.round((grandCAct / grandCStd) * 100) : null;
-    const grandRunningEffs = [grandAEff, grandBEff, grandCEff].filter((v): v is number => v !== null);
-    const grandSpread =
-      grandRunningEffs.length >= 2 ? Math.max(...grandRunningEffs) - Math.min(...grandRunningEffs) : null;
-
-    const plantTotal = {
-      lineName: 'Total Plant (All Lines)',
-      activeCount: grandActiveSet.size,
-      totalMachines: grandTotalMachines,
-      std: grandStd,
-      act: grandAct,
-      variance: grandAct - grandStd,
-      eff: grandEff,
-      aAct: grandAAct,
-      aStd: grandAStd,
-      aEff: grandAEff,
-      bAct: grandBAct,
-      bStd: grandBStd,
-      bEff: grandBEff,
-      cAct: grandCAct,
-      cStd: grandCStd,
-      cEff: grandCEff,
-      spread: grandSpread,
-      totalBd: grandBd,
-    };
-
-    return { lines, plantTotal };
-  }, [masterData?.lines, masterData?.machines, filteredLogs]);
-
-  // Section 2: Item Production Rollups Summary (Period, Today, MTD, All-Time Till Now)
-  const itemSummaryRows = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        canonicalKey: string;
-        itemId: string;
-        itemCode: string;
-        itemName: string;
-        periodQty: number;
-        periodStd: number;
-        periodRework: number;
-        todayQty: number;
-        mtdQty: number;
-        tillNowQty: number;
-        tillNowStd: number;
-        tillNowRework: number;
-      }
-    >();
-
-    // 1. Seed master definitions and historical rollups from itemRollups
-    for (const roll of itemRollups) {
-      const resolved = resolveItem(roll.itemId, roll.itemCode, roll.itemName);
-      if (!map.has(resolved.canonicalKey)) {
-        map.set(resolved.canonicalKey, {
-          canonicalKey: resolved.canonicalKey,
-          itemId: resolved.itemId,
-          itemCode: resolved.itemCode || '—',
-          itemName: resolved.itemName,
-          periodQty: 0,
-          periodStd: 0,
-          periodRework: 0,
-          todayQty: 0,
-          mtdQty: 0,
-          tillNowQty: 0,
-          tillNowStd: 0,
-          tillNowRework: 0,
-        });
-      }
-      const entry = map.get(resolved.canonicalKey)!;
-      entry.todayQty += Number(roll.todayOutput) || 0;
-      entry.mtdQty += Number(roll.mtdOutput) || 0;
-      entry.tillNowQty += Number(roll.tillNowOutput) || 0;
-      entry.tillNowStd += Number(roll.tillNowStd) || 0;
-      entry.tillNowRework += Number(roll.tillNowRework) || 0;
-    }
-
-    // 2. Accumulate period quantities from current filteredLogs
-    for (const log of filteredLogs) {
-      if (!log.itemId && !log.itemName) continue;
-      const resolved = resolveItem(log.itemId, undefined, log.itemName);
-      if (!map.has(resolved.canonicalKey)) {
-        map.set(resolved.canonicalKey, {
-          canonicalKey: resolved.canonicalKey,
-          itemId: resolved.itemId,
-          itemCode: resolved.itemCode || '—',
-          itemName: resolved.itemName || 'Unknown Part',
-          periodQty: 0,
-          periodStd: 0,
-          periodRework: 0,
-          todayQty: 0,
-          mtdQty: 0,
-          tillNowQty: 0,
-          tillNowStd: 0,
-          tillNowRework: 0,
-        });
-      }
-      const entry = map.get(resolved.canonicalKey)!;
-      if (entry.itemCode === '—' && resolved.itemCode !== '—') {
-        entry.itemCode = resolved.itemCode;
-      }
-      if ((!entry.itemName || entry.itemName === 'Unknown Part') && resolved.itemName) {
-        entry.itemName = resolved.itemName;
-      }
-      entry.periodQty += Number(log.actualOutput) || 0;
-      entry.periodStd += Number(log.stdOutput) || 0;
-      entry.periodRework += Number(log.rework) || 0;
-    }
-
-    let list = Array.from(map.values());
-
-    if (itemDropdownFilter && itemDropdownFilter !== 'all') {
-      const target = itemDropdownFilter.trim().toLowerCase();
-      list = list.filter(
-        (it) =>
-          it.canonicalKey === target ||
-          it.itemId.trim().toLowerCase() === target ||
-          it.itemCode.trim().toLowerCase() === target ||
-          it.itemName.trim().toLowerCase() === target
-      );
-    }
-
-    if (itemSearchQuery.trim()) {
-      const q = itemSearchQuery.trim().toLowerCase();
-      list = list.filter(
-        (it) =>
-          it.canonicalKey.includes(q) ||
-          it.itemName.toLowerCase().includes(q) ||
-          it.itemCode.toLowerCase().includes(q) ||
-          it.itemId.toLowerCase().includes(q)
-      );
-    }
-
-    return list.sort((a, b) => b.periodQty - a.periodQty || b.tillNowQty - a.tillNowQty);
-  }, [itemRollups, filteredLogs, resolveItem, itemDropdownFilter, itemSearchQuery]);
-
-  // Aggregate totals for the filtered item summary rows
-  const itemSummaryTotals = useMemo(() => {
-    const periodQty = itemSummaryRows.reduce((acc, it) => acc + it.periodQty, 0);
-    const periodStd = itemSummaryRows.reduce((acc, it) => acc + it.periodStd, 0);
-    const periodRework = itemSummaryRows.reduce((acc, it) => acc + it.periodRework, 0);
-    const todayQty = itemSummaryRows.reduce((acc, it) => acc + it.todayQty, 0);
-    const mtdQty = itemSummaryRows.reduce((acc, it) => acc + it.mtdQty, 0);
-    const tillNowQty = itemSummaryRows.reduce((acc, it) => acc + it.tillNowQty, 0);
-    const tillNowStd = itemSummaryRows.reduce((acc, it) => acc + it.tillNowStd, 0);
-    const tillNowRework = itemSummaryRows.reduce((acc, it) => acc + it.tillNowRework, 0);
-    const eff = periodStd > 0 ? Math.round((periodQty / periodStd) * 100) : null;
-
-    return {
-      periodQty,
-      periodStd,
-      periodRework,
-      todayQty,
-      mtdQty,
-      tillNowQty,
-      tillNowStd,
-      tillNowRework,
-      eff,
-      count: itemSummaryRows.length,
-    };
-  }, [itemSummaryRows]);
-
-  // Section 3: Machine-wise Detailed Efficiency Matrix
-  const machineMetrics = useMemo(() => {
-    const baseMachines =
-      machineLineFilter === 'all'
-        ? machines
-        : machines.filter((m) => (m.line || 'Line 1') === machineLineFilter);
-
-    const baseMachineIds = new Set(machines.map((m) => m.id));
-
-    // Find any temporary machines present in filteredLogs for the selected machineLineFilter
-    const tempMachinesMap = new Map<
-      string,
-      { id: string; name: string; code: string; line: string; isTemp: boolean }
-    >();
-
-    for (const log of filteredLogs) {
-      const isTemp = Boolean(
-        log.isTempMachine ||
-        log.machineId?.startsWith('temp_') ||
-        !baseMachineIds.has(log.machineId)
-      );
-
-      if (isTemp && log.machineId) {
-        const line = log.line || 'Line 1';
-        if (machineLineFilter === 'all' || line === machineLineFilter) {
-          if (!tempMachinesMap.has(log.machineId)) {
-            tempMachinesMap.set(log.machineId, {
-              id: log.machineId,
-              name: `${log.machineName || 'Temp Machine'} (Temp)`,
-              code: log.machineCode || 'TEMP',
-              line,
-              isTemp: true,
-            });
-          }
-        }
-      }
-    }
-
-    const relevantMachines = [
-      ...baseMachines.map((m) => ({ ...m, isTemp: false })),
-      ...Array.from(tempMachinesMap.values()),
-    ];
-
-    return relevantMachines.map((machine) => {
-      const machLogs = filteredLogs.filter(
-        (l) => l.machineId === machine.id || (!machine.isTemp && l.machineName === machine.name)
-      );
-      const activeLogs = machLogs.filter((l) => Number(l.stdOutput) > 0);
-      const isOperating = activeLogs.length > 0;
-
-      const std = activeLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const act = activeLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const rework = machLogs.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-      const downtime = Number(
-        machLogs.reduce((acc, r) => acc + calculateTotalBreakdown(r.breakdown), 0).toFixed(2)
-      );
-      const efficiency = std > 0 ? Math.round((act / std) * 100) : null;
-
-      const filterShift = (prefix: string) =>
-        activeLogs.filter((r) => (r.shift || '').toLowerCase().includes(prefix.toLowerCase()));
-
-      const aLogs = filterShift('shift a');
-      const bLogs = filterShift('shift b');
-      const cLogs = filterShift('shift c');
-
-      const aAct = aLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const aStd = aLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const aEff = aStd > 0 ? Math.round((aAct / aStd) * 100) : null;
-
-      const bAct = bLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const bStd = bLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const bEff = bStd > 0 ? Math.round((bAct / bStd) * 100) : null;
-
-      const cAct = cLogs.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const cStd = cLogs.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const cEff = cStd > 0 ? Math.round((cAct / cStd) * 100) : null;
-
-      const activeShifts: { name: string; eff: number; act: number; std: number }[] = [];
-      if (aEff !== null) activeShifts.push({ name: 'Shift A', eff: aEff, act: aAct, std: aStd });
-      if (bEff !== null) activeShifts.push({ name: 'Shift B', eff: bEff, act: bAct, std: bStd });
-      if (cEff !== null) activeShifts.push({ name: 'Shift C', eff: cEff, act: cAct, std: cStd });
-
-      const shiftsOperatedText = isOperating ? `${activeShifts.length} / 3 shifts` : '0 / 3 (Idle)';
-
-      let bestWorstHighlight: {
-        text: string;
-        spread: number | null;
-        isHighSpread: boolean;
-      } = {
-        text: '—',
-        spread: null,
-        isHighSpread: false,
-      };
-
-      if (activeShifts.length >= 2) {
-        const sorted = [...activeShifts].sort((x, y) => y.eff - x.eff);
-        const best = sorted[0];
-        const worst = sorted[sorted.length - 1];
-        const diff = best.eff - worst.eff;
-        bestWorstHighlight = {
-          text: `Best: ${best.name} (${best.eff}%) | Worst: ${worst.name} (${worst.eff}%)`,
-          spread: diff,
-          isHighSpread: diff >= 10,
-        };
-      } else if (activeShifts.length === 1) {
-        bestWorstHighlight = {
-          text: `${activeShifts[0].name} only (${activeShifts[0].eff}%)`,
-          spread: null,
-          isHighSpread: false,
-        };
-      }
-
-      const latestOperator = activeLogs[activeLogs.length - 1]?.operatorName || '—';
-      const latestItem = activeLogs[activeLogs.length - 1]?.itemName || '—';
-
-      return {
-        id: machine.id,
-        name: machine.name,
-        code: machine.code,
-        line: machine.line || 'Line 1',
-        isOperating,
-        std,
-        act,
-        variance: act - std,
-        rework,
-        downtime,
-        efficiency,
-        shiftsOperatedCount: activeShifts.length,
-        shiftsOperatedText,
-        aAct,
-        aEff,
-        bAct,
-        bEff,
-        cAct,
-        cEff,
-        bestWorstHighlight,
-        latestOperator,
-        latestItem,
-        hasData: machLogs.length > 0,
-      };
-    });
-  }, [machines, filteredLogs, machineLineFilter]);
-
-  // Filtered machine metrics for display based on showIdleMachines toggle
-  const visibleMachineMetrics = useMemo(() => {
-    if (showIdleMachines) return machineMetrics;
-    return machineMetrics.filter((m) => m.isOperating || m.hasData);
-  }, [machineMetrics, showIdleMachines]);
-
-  // Sorted machine downtime for Pareto list
-  const sortedByDowntime = useMemo(() => {
-    return [...machineMetrics]
-      .filter((m) => m.downtime > 0)
-      .sort((a, b) => b.downtime - a.downtime);
-  }, [machineMetrics]);
-
-  // Total breakdown calculation for breakdown percentages
-  const grandBreakdown = kpis.totalBreakdown || 1; // avoid divide by 0
-  const noDiscPct = Math.round((kpis.breakdownSplit.noDisc / grandBreakdown) * 100);
-  const changePct = Math.round((kpis.breakdownSplit.change / grandBreakdown) * 100);
-  const powerPct = Math.round((kpis.breakdownSplit.power / grandBreakdown) * 100);
-  const operatorPct = Math.round((kpis.breakdownSplit.operator / grandBreakdown) * 100);
-  const machineBdPct = Math.round((kpis.breakdownSplit.machineBreakdown / grandBreakdown) * 100);
-  const fixProgPct = Math.round((kpis.breakdownSplit.fixProgSettings / grandBreakdown) * 100);
-  const miscPct = Math.round((kpis.breakdownSplit.miscellaneous / grandBreakdown) * 100);
+  const getOeeBadgeClass = (oee: number) => {
+    if (oee >= 85) return "bg-emerald-100 text-emerald-800 border-emerald-300";
+    if (oee >= 65) return "bg-amber-100 text-amber-800 border-amber-300";
+    return "bg-rose-100 text-rose-800 border-rose-300";
+  };
 
   return (
-    <div className="space-y-6">
-      {/* Top Controls & Power BI Feed Export */}
-      <div className="bg-white rounded-lg border border-slate-200 p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-            <h2 className="text-base font-bold text-slate-900 tracking-tight">
-              Production Intelligence & Power BI Telemetry
-            </h2>
-          </div>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Plant-wide efficiency matrix, item production totals, and telemetry for audit & executive review.
-          </p>
-        </div>
-
-        {/* Action Controls */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Quick Date Presets */}
-          <div className="flex flex-wrap items-center gap-0.5 bg-slate-100 p-1 rounded border border-slate-200 text-xs max-w-full">
-            <button
-              onClick={() => setDateFilter('all')}
-              className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              All Time
-            </button>
-            <button
-              onClick={() => setDateFilter('today')}
-              className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === 'today' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Today
-            </button>
-            <button
-              onClick={() => setDateFilter('yesterday')}
-              className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === 'yesterday' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Yesterday
-            </button>
-            <button
-              onClick={() => setDateFilter('7d')}
-              className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                dateFilter === '7d' || dateFilter === 'week' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Last 7 Days
-            </button>
-            <button
-              onClick={() => {
-                setDateFilter('custom');
-                if (!appliedCustomRange) {
-                  setAppliedCustomRange({ from: fromDate, to: toDate });
-                }
-              }}
-              className={`px-2.5 py-1 rounded font-medium transition-colors flex items-center gap-1.5 ${
-                dateFilter === 'custom' ? 'bg-white text-slate-900 shadow-2xs font-bold' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Calendar className="w-3.5 h-3.5 text-slate-500" />
-              <span>Custom Range</span>
-            </button>
-            {selectedDate && selectedDate !== new Date().toISOString().slice(0, 10) && (
-              <button
-                onClick={() => setDateFilter('selected')}
-                className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                  dateFilter === 'selected' ? 'bg-white text-slate-900 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Log Date ({selectedDate})
-              </button>
-            )}
+    <div className="space-y-4 max-w-[1600px] mx-auto pb-12">
+      {/* ==================================================================== */}
+      {/* TOP UNIFIED FILTER BAR (Compact & Responsive)                         */}
+      {/* ==================================================================== */}
+      <div className="bg-white rounded-lg border border-slate-200 p-3 shadow-2xs space-y-2.5">
+        {/* ROW 1: Date Controls */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          {/* Quick Preset Pills */}
+          <div className="flex flex-wrap items-center gap-1">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mr-1 flex items-center gap-1">
+              <Calendar className="w-3.5 h-3.5 text-slate-400" />
+              <span>Range:</span>
+            </span>
+            {(
+              [
+                { key: "today", label: "Today" },
+                { key: "yesterday", label: "Yesterday" },
+                { key: "thisWeek", label: "This Week" },
+                { key: "lastWeek", label: "Last Week" },
+                { key: "thisMonth", label: "This Month" },
+              ] as const
+            ).map((p) => {
+              const isSelected = activePreset === p.key;
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  onClick={() => handleSelectPreset(p.key)}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
+                    isSelected
+                      ? "bg-slate-900 text-white shadow-2xs"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
           </div>
 
-          {/* Inline Custom Date Range Picker */}
-          {dateFilter === 'custom' && (
-            <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded border border-slate-300 text-xs shadow-2xs">
-              <div className="flex items-center gap-1">
-                <span className="text-[11px] font-semibold text-slate-600 uppercase">From:</span>
-                <input
-                  type="date"
-                  aria-label="From Date"
-                  value={fromDate}
-                  max={toDate}
-                  onChange={(e) => handleFromDateChange(e.target.value)}
-                  className="px-2 py-0.5 text-xs bg-white border border-slate-300 rounded font-mono text-slate-800 focus:outline-none focus:border-slate-800"
-                />
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="text-[11px] font-semibold text-slate-600 uppercase">To:</span>
-                <input
-                  type="date"
-                  aria-label="To Date"
-                  value={toDate}
-                  min={fromDate}
-                  onChange={(e) => handleToDateChange(e.target.value)}
-                  className="px-2 py-0.5 text-xs bg-white border border-slate-300 rounded font-mono text-slate-800 focus:outline-none focus:border-slate-800"
-                />
-              </div>
+          {/* Date Pickers + Apply */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+              <span className="text-[11px] font-semibold text-slate-500">From:</span>
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => {
+                  setFromDate(e.target.value);
+                  setActivePreset("custom");
+                }}
+                className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
+              />
+            </div>
+            <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+              <span className="text-[11px] font-semibold text-slate-500">To:</span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => {
+                  setToDate(e.target.value);
+                  setActivePreset("custom");
+                }}
+                className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleApplyCustomDates}
+              className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+            >
+              Apply
+            </button>
+
+            {/* Export buttons */}
+            <div className="flex items-center gap-1 pl-2 border-l border-slate-200 ml-1">
               <button
                 type="button"
-                onClick={handleApplyCustomRange}
-                disabled={isLoadingCustom || !fromDate || !toDate}
-                className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-semibold flex items-center gap-1 transition-colors shadow-2xs disabled:opacity-50"
+                onClick={handleExportExcel}
+                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer"
+                title="Export complete 5-sheet Excel workbook"
               >
-                {isLoadingCustom ? (
-                  <span>Loading...</span>
-                ) : (
-                  <span>Apply</span>
-                )}
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Export .xlsx</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleExportCSV}
+                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                title="Export raw shift logs as CSV"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>CSV</span>
               </button>
             </div>
-          )}
+          </div>
+        </div>
+
+        {/* ROW 2: Instant Client-Side Facet Filters */}
+        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+          <div className="flex items-center gap-1 text-[11px] font-bold text-slate-500 uppercase tracking-wider mr-1">
+            <Filter className="w-3 h-3 text-slate-400" />
+            <span>Filters:</span>
+          </div>
+
+          {/* Product Filter */}
+          <select
+            value={filterProduct}
+            onChange={(e) => setFilterProduct(e.target.value)}
+            className="text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1 font-medium text-slate-800 focus:outline-none focus:border-slate-800 max-w-[160px] truncate"
+          >
+            <option value="all">All Products ({availableFacets.products.length})</option>
+            {availableFacets.products.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Line Filter */}
+          <select
+            value={filterLine}
+            onChange={(e) => setFilterLine(e.target.value)}
+            className="text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1 font-medium text-slate-800 focus:outline-none focus:border-slate-800"
+          >
+            <option value="all">All Lines ({availableFacets.lines.length})</option>
+            {availableFacets.lines.map((l) => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
+          </select>
 
           {/* Shift Filter */}
           <select
-            value={shiftFilter}
-            onChange={(e) => setShiftFilter(e.target.value)}
-            className="bg-white border border-slate-200 text-xs font-medium text-slate-700 rounded px-2.5 py-1.5 focus:outline-none focus:border-slate-800"
+            value={filterShift}
+            onChange={(e) => setFilterShift(e.target.value)}
+            className="text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1 font-medium text-slate-800 focus:outline-none focus:border-slate-800"
           >
-            <option value="all">All Shifts</option>
-            <option value="Shift A">Shift A (7AM-3:30PM)</option>
-            <option value="Shift B">Shift B (3:30PM-12AM)</option>
-            <option value="Shift C">Shift C (12AM-7AM)</option>
+            <option value="all">All Shifts ({availableFacets.shifts.length})</option>
+            {availableFacets.shifts.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
           </select>
 
-          {/* Production Line Filter */}
+          {/* Machine Filter */}
           <select
-            value={lineFilter}
-            onChange={(e) => setLineFilter(e.target.value)}
-            className="bg-white border border-slate-200 text-xs font-medium text-slate-700 rounded px-2.5 py-1.5 focus:outline-none focus:border-slate-800"
+            value={filterMachine}
+            onChange={(e) => setFilterMachine(e.target.value)}
+            className="text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1 font-medium text-slate-800 focus:outline-none focus:border-slate-800 max-w-[160px] truncate"
           >
-            <option value="all">All Lines (Plant-wide)</option>
-            <option value="Line 1">Line 1 (CNC Line)</option>
-            <option value="Line 2">Line 2 (VMC Line)</option>
-            <option value="Line 3">Line 3 (Heavy SPM)</option>
+            <option value="all">All Machines ({availableFacets.machines.length})</option>
+            {availableFacets.machines.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name} {m.isTemp ? "[TEMP]" : ""}
+              </option>
+            ))}
           </select>
 
-          {/* Direct CSV / Excel Export */}
-          <button
-            onClick={handleExportCSV}
-            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
-            title="Download clean CSV table structured for Power BI desktop import"
+          {/* Operator Filter */}
+          <select
+            value={filterOperator}
+            onChange={(e) => setFilterOperator(e.target.value)}
+            className="text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1 font-medium text-slate-800 focus:outline-none focus:border-slate-800 max-w-[140px] truncate"
           >
-            <Download className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Power BI CSV</span>
-          </button>
+            <option value="all">All Operators ({availableFacets.operators.length})</option>
+            {availableFacets.operators.map((op) => (
+              <option key={op} value={op}>
+                {op}
+              </option>
+            ))}
+          </select>
 
-          <button
-            onClick={handleExportExcel}
-            className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
-            title="Download 4-sheet multi-table Excel workbook"
-          >
-            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Export .xlsx (4 Sheets)</span>
-          </button>
-        </div>
-      </div>
-
-      {/* 4 Primary KPI Summary Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* KPI 1: Actual vs Std Output */}
-        <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-2">
-          <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
-            <span>Production Output</span>
-            <span className="font-mono text-slate-400">Pcs</span>
-          </div>
-          <div className="flex items-baseline justify-between">
-            <span className="text-2xl sm:text-3xl font-extrabold font-mono text-slate-900">
-              {kpis.totalAct}
-            </span>
-            <span className="text-xs text-slate-500 font-mono">
-              Std: <strong className="text-slate-800">{kpis.totalStd}</strong>
-            </span>
-          </div>
-          <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
-            <span className="text-slate-500">Target Variance:</span>
-            <span
-              className={`font-mono font-bold ${
-                kpis.variance >= 0 ? 'text-emerald-700' : 'text-rose-700'
+          {/* Quick Toggle Chips */}
+          <div className="flex items-center gap-1.5 ml-auto">
+            <button
+              type="button"
+              onClick={() => setIncludeTempMachines(!includeTempMachines)}
+              className={`px-2 py-0.5 text-[11px] font-semibold rounded border cursor-pointer transition-colors ${
+                includeTempMachines
+                  ? "bg-slate-100 text-slate-800 border-slate-300"
+                  : "bg-white text-slate-400 border-slate-200 line-through"
               }`}
             >
-              {kpis.variance >= 0 ? `+${kpis.variance} surplus` : `${kpis.variance} shortfall`}
-            </span>
-          </div>
-        </div>
+              Temp Machines
+            </button>
 
-        {/* KPI 2: Overall Plant Efficiency (Partial-Line Weighted) */}
-        <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-2">
-          <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
-            <span>Plant-Wide Efficiency</span>
-            <TrendingUp className="w-4 h-4 text-emerald-600" />
-          </div>
-          <div className="flex items-baseline justify-between">
-            <span
-              className={`text-2xl sm:text-3xl font-extrabold font-mono ${
-                kpis.plantEfficiency >= 90
-                  ? 'text-emerald-700'
-                  : kpis.plantEfficiency >= 75
-                  ? 'text-amber-700'
-                  : 'text-rose-700'
+            <button
+              type="button"
+              onClick={() => {
+                const next = !tempOnly;
+                setTempOnly(next);
+                if (next) setIncludeTempMachines(true);
+              }}
+              className={`px-2 py-0.5 text-[11px] font-semibold rounded border cursor-pointer transition-colors ${
+                tempOnly
+                  ? "bg-amber-100 text-amber-900 border-amber-300 font-bold"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
               }`}
             >
-              {kpis.plantEfficiency}%
-            </span>
-            <span className="text-xs text-slate-500 font-mono">
-              Target SLA: <strong>85%</strong>
-            </span>
-          </div>
-          <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
-            <span className="text-slate-500">Operating Machines:</span>
-            <span className="font-semibold text-emerald-700 font-mono">
-              {lineComparisonData.plantTotal.activeCount} / {lineComparisonData.plantTotal.totalMachines} active
-            </span>
-          </div>
-        </div>
+              Temp Only
+            </button>
 
-        {/* KPI 3: Total Rework Pieces */}
-        <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-2">
-          <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
-            <span>Rework / Scrap Defect</span>
-            <AlertOctagon className="w-4 h-4 text-rose-600" />
-          </div>
-          <div className="flex items-baseline justify-between">
-            <span className="text-2xl sm:text-3xl font-extrabold font-mono text-rose-700">
-              {kpis.totalRework}
-            </span>
-            <span className="text-xs font-mono text-slate-500">
-              Defect Rate: <strong className="text-rose-700">{kpis.reworkRate}%</strong>
-            </span>
-          </div>
-          <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
-            <span className="text-slate-500">Quality Benchmark:</span>
-            <span className="text-slate-700 font-medium font-mono">&lt; 3.0% acceptable</span>
-          </div>
-        </div>
-
-        {/* KPI 4: Total Breakdown Minutes Lost */}
-        <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs space-y-2">
-          <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
-            <span>Total Downtime Lost</span>
-            <Clock className="w-4 h-4 text-amber-600" />
-          </div>
-          <div className="flex items-baseline justify-between">
-            <span className="text-2xl sm:text-3xl font-extrabold font-mono text-amber-700">
-              {kpis.totalBreakdown}
-              <span className="text-sm font-semibold text-slate-500 ml-1">mins</span>
-            </span>
-            <span className="text-xs font-mono text-slate-500">
-              ≈ {(kpis.totalBreakdown / 60).toFixed(1)} hrs
-            </span>
-          </div>
-          <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-xs">
-            <span className="text-slate-500">Working Time Loss:</span>
-            <span className="font-mono font-bold text-amber-800">
-              {kpis.totalBdPctOfWorking}% of total
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION 1: Item Production Tracker & Temporal Progress (Today, MTD, All-Time Till Now) */}
-      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
-              <Package className="w-4 h-4 text-slate-700" />
-              <span>Item Production Tracker & Temporal Progress</span>
-            </h3>
-            <p className="text-xs text-slate-500">
-              Real-time part production tracking across temporal horizons: Selected Period, Today, Month-to-Date (MTD), and Total Till Now (All-Time).
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Part Dropdown Filter */}
-            <select
-              value={itemDropdownFilter}
-              onChange={(e) => setItemDropdownFilter(e.target.value)}
-              className="bg-white border border-slate-300 text-xs font-medium text-slate-700 rounded px-2.5 py-1 focus:outline-none focus:border-slate-800 max-w-[200px] truncate"
-              title="Filter by specific item"
+            <button
+              type="button"
+              onClick={() => setSplitRunsOnly(!splitRunsOnly)}
+              className={`px-2 py-0.5 text-[11px] font-semibold rounded border cursor-pointer transition-colors ${
+                splitRunsOnly
+                  ? "bg-purple-100 text-purple-900 border-purple-300 font-bold"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+              }`}
             >
-              <option value="all">All Items (Plant-wide)</option>
-              {uniquePartOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+              Split Runs Only
+            </button>
 
-            {/* Part Search Box */}
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search part code or name..."
-                value={itemSearchQuery}
-                onChange={(e) => setItemSearchQuery(e.target.value)}
-                className="pl-8 pr-3 py-1 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none w-48 sm:w-56"
-              />
-            </div>
-
-            {isLoadingRollups && (
-              <span className="text-[11px] text-slate-400 font-mono animate-pulse">Syncing...</span>
+            {hasActiveFacetFilters && (
+              <button
+                type="button"
+                onClick={handleResetFilters}
+                className="px-2 py-0.5 text-[11px] font-bold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 rounded border border-rose-200 flex items-center gap-1 cursor-pointer transition-colors"
+                title="Reset all filters"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset</span>
+              </button>
             )}
           </div>
         </div>
+      </div>
 
-        <div className="overflow-x-auto max-h-80 border border-slate-200 rounded">
-          <table className="w-full text-xs text-left border-collapse">
-            <thead className="bg-slate-900 text-slate-200 sticky top-0 z-10 text-[11px] font-semibold uppercase">
-              <tr>
-                <th className="px-3 py-2 border-r border-slate-800">Part Code</th>
-                <th className="px-3 py-2 border-r border-slate-800">Item Name</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/80">Selected Range (Pcs)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Today Output</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Month-to-Date (MTD)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center font-bold text-amber-300">Total Till Now (All-Time)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Till Now Target</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Rework Defect</th>
-                <th className="px-3 py-2 text-center">Period Eff %</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 font-mono">
-              {itemSummaryRows.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="text-center py-6 text-slate-500 font-sans">
-                    No matching item production records found.
-                  </td>
-                </tr>
-              ) : (
-                itemSummaryRows.map((it) => {
-                  const eff = it.periodStd > 0 ? Math.round((it.periodQty / it.periodStd) * 100) : null;
+      {/* ==================================================================== */}
+      {/* TOP OEE EXECUTIVE KPI STRIP (Reflects Active Filters)                 */}
+      {/* ==================================================================== */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {/* HERO CARD: OEE % */}
+        <div
+          className={`p-4 rounded-lg border shadow-2xs flex flex-col justify-between ${getOeeColorClass(
+            overallMetrics.oeePct
+          )}`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider">Overall Equipment Effectiveness</span>
+            <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-white/70 border border-current">
+              A × P × Q
+            </span>
+          </div>
+          <div className="my-2">
+            <div className="text-4xl font-black tracking-tight">{overallMetrics.oeePct}%</div>
+            <div className="text-[11px] font-medium opacity-85 mt-0.5">
+              {overallMetrics.oeePct >= 85
+                ? "World-Class Manufacturing Level"
+                : overallMetrics.oeePct >= 65
+                ? "Typical Plant Performance Level"
+                : "Needs Process Improvement"}
+            </div>
+          </div>
+          <div className="text-[11px] font-mono flex items-center justify-between pt-2 border-t border-current/20 opacity-90">
+            <span>Oper: {overallMetrics.operatingMinutes.toFixed(1)}m</span>
+            <span>Plan: {overallMetrics.plannedMinutes.toFixed(1)}m</span>
+          </div>
+        </div>
+
+        {/* CARD 2: Availability */}
+        <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-1">
+              <span className="flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-blue-600" />
+                <span>Availability</span>
+              </span>
+              <span className="text-sm font-extrabold text-slate-900">{overallMetrics.availabilityPct}%</span>
+            </div>
+            <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden my-2">
+              <div
+                className="bg-blue-600 h-full rounded-full transition-all duration-300"
+                style={{ width: `${Math.min(100, overallMetrics.availabilityPct)}%` }}
+              />
+            </div>
+          </div>
+          <div className="space-y-1 text-xs text-slate-600 pt-1 border-t border-slate-100">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Operating Mins:</span>
+              <span className="font-mono font-bold text-slate-800">
+                {overallMetrics.operatingMinutes.toLocaleString()} m
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Total Downtime:</span>
+              <span className="font-mono font-bold text-rose-600">
+                {overallMetrics.downtimeMinutes.toLocaleString()} m
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* CARD 3: Performance */}
+        <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-1">
+              <span className="flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-purple-600" />
+                <span>Performance</span>
+              </span>
+              <span className="text-sm font-extrabold text-slate-900">{overallMetrics.performancePct}%</span>
+            </div>
+            <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden my-2">
+              <div
+                className="bg-purple-600 h-full rounded-full transition-all duration-300"
+                style={{ width: `${Math.min(100, overallMetrics.performancePct)}%` }}
+              />
+            </div>
+          </div>
+          <div className="space-y-1 text-xs text-slate-600 pt-1 border-t border-slate-100">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Actual vs Target:</span>
+              <span className="font-mono font-bold text-slate-800">
+                {overallMetrics.totalActual.toLocaleString()} / {overallMetrics.totalStd.toLocaleString()} pcs
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Plan Achievement:</span>
+              <span className="font-mono font-bold text-purple-700">{overallMetrics.planAchievementPct}%</span>
+            </div>
+          </div>
+        </div>
+
+        {/* CARD 4: Quality */}
+        <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-1">
+              <span className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Quality (First Pass)</span>
+              </span>
+              <span className="text-sm font-extrabold text-slate-900">{overallMetrics.qualityPct}%</span>
+            </div>
+            <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden my-2">
+              <div
+                className="bg-emerald-600 h-full rounded-full transition-all duration-300"
+                style={{ width: `${Math.min(100, overallMetrics.qualityPct)}%` }}
+              />
+            </div>
+          </div>
+          <div className="space-y-1 text-xs text-slate-600 pt-1 border-t border-slate-100">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Good Output:</span>
+              <span className="font-mono font-bold text-emerald-700">
+                {overallMetrics.goodOutput.toLocaleString()} pcs
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Rework Quantity:</span>
+              <span className="font-mono font-bold text-amber-600">
+                {overallMetrics.totalRework.toLocaleString()} pcs
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 7-CATEGORY DOWNTIME STRIP */}
+      <div className="bg-white rounded-lg border border-slate-200 p-3 shadow-2xs space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-slate-800 uppercase tracking-wider text-[11px] flex items-center gap-1">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+              <span>7 Breakdown Categories:</span>
+            </span>
+            <span className="text-slate-500 text-[11px]">
+              Total Downtime: <strong className="text-slate-800">{overallMetrics.downtimeMinutes} mins</strong>
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 text-[11px] font-mono">
+            {overallMetrics.tempMachineRunsCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                {overallMetrics.tempMachineRunsCount} Temp Machine Runs
+              </span>
+            )}
+            {overallMetrics.splitRunsCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
+                {overallMetrics.splitRunsCount} Split Runs
+              </span>
+            )}
+            <span className="text-slate-400">({overallMetrics.rowCount} log records)</span>
+          </div>
+        </div>
+
+        {/* Stacked CSS Bar */}
+        {overallMetrics.downtimeMinutes > 0 && (
+          <div className="w-full h-2 rounded-full overflow-hidden flex bg-slate-100">
+            {overallMetrics.breakdownTotals.noDisc > 0 && (
+              <div
+                style={{
+                  width: `${(overallMetrics.breakdownTotals.noDisc / overallMetrics.downtimeMinutes) * 100}%`,
+                }}
+                className="bg-slate-500 h-full"
+                title={`No Disc: ${overallMetrics.breakdownTotals.noDisc}m`}
+              />
+            )}
+            {overallMetrics.breakdownTotals.change > 0 && (
+              <div
+                style={{
+                  width: `${(overallMetrics.breakdownTotals.change / overallMetrics.downtimeMinutes) * 100}%`,
+                }}
+                className="bg-sky-500 h-full"
+                title={`Change: ${overallMetrics.breakdownTotals.change}m`}
+              />
+            )}
+            {overallMetrics.breakdownTotals.power > 0 && (
+              <div
+                style={{
+                  width: `${(overallMetrics.breakdownTotals.power / overallMetrics.downtimeMinutes) * 100}%`,
+                }}
+                className="bg-amber-500 h-full"
+                title={`Power: ${overallMetrics.breakdownTotals.power}m`}
+              />
+            )}
+            {overallMetrics.breakdownTotals.operator > 0 && (
+              <div
+                style={{
+                  width: `${(overallMetrics.breakdownTotals.operator / overallMetrics.downtimeMinutes) * 100}%`,
+                }}
+                className="bg-purple-500 h-full"
+                title={`Operator: ${overallMetrics.breakdownTotals.operator}m`}
+              />
+            )}
+            {overallMetrics.breakdownTotals.machineBreakdown > 0 && (
+              <div
+                style={{
+                  width: `${(overallMetrics.breakdownTotals.machineBreakdown / overallMetrics.downtimeMinutes) * 100}%`,
+                }}
+                className="bg-rose-500 h-full"
+                title={`Break Down: ${overallMetrics.breakdownTotals.machineBreakdown}m`}
+              />
+            )}
+            {overallMetrics.breakdownTotals.fixProgSettings > 0 && (
+              <div
+                style={{
+                  width: `${(overallMetrics.breakdownTotals.fixProgSettings / overallMetrics.downtimeMinutes) * 100}%`,
+                }}
+                className="bg-orange-500 h-full"
+                title={`Fix / Prog: ${overallMetrics.breakdownTotals.fixProgSettings}m`}
+              />
+            )}
+            {overallMetrics.breakdownTotals.miscellaneous > 0 && (
+              <div
+                style={{
+                  width: `${(overallMetrics.breakdownTotals.miscellaneous / overallMetrics.downtimeMinutes) * 100}%`,
+                }}
+                className="bg-teal-500 h-full"
+                title={`Misc: ${overallMetrics.breakdownTotals.miscellaneous}m`}
+              />
+            )}
+          </div>
+        )}
+
+        {/* Breakdown category chips */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2 pt-1">
+          {[
+            { label: "NO/DISC", val: overallMetrics.breakdownTotals.noDisc, color: "text-slate-600 bg-slate-50" },
+            { label: "CHANGE", val: overallMetrics.breakdownTotals.change, color: "text-sky-700 bg-sky-50" },
+            { label: "POWER", val: overallMetrics.breakdownTotals.power, color: "text-amber-700 bg-amber-50" },
+            { label: "OPERATOR", val: overallMetrics.breakdownTotals.operator, color: "text-purple-700 bg-purple-50" },
+            { label: "BREAK DOWN", val: overallMetrics.breakdownTotals.machineBreakdown, color: "text-rose-700 bg-rose-50" },
+            { label: "FIX/PROG", val: overallMetrics.breakdownTotals.fixProgSettings, color: "text-orange-700 bg-orange-50" },
+            { label: "MISC.", val: overallMetrics.breakdownTotals.miscellaneous, color: "text-teal-700 bg-teal-50" },
+          ].map((cat) => {
+            const pct =
+              overallMetrics.downtimeMinutes > 0
+                ? Math.round((cat.val / overallMetrics.downtimeMinutes) * 100)
+                : 0;
+            return (
+              <div key={cat.label} className={`p-1.5 rounded border border-slate-200 text-center ${cat.color}`}>
+                <div className="text-[10px] font-bold uppercase truncate">{cat.label}</div>
+                <div className="text-xs font-mono font-bold mt-0.5">{cat.val} m</div>
+                <div className="text-[10px] text-slate-500">{pct}%</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ==================================================================== */}
+      {/* 5-TAB ANALYTICS WORKSPACE                                             */}
+      {/* ==================================================================== */}
+      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden">
+        {/* Tab Navigation Header */}
+        <div className="flex border-b border-slate-200 bg-slate-50 overflow-x-auto">
+          {[
+            { id: "product", label: "By Product (Lines & Machines)", icon: Package },
+            { id: "line", label: "By Line", icon: Layers },
+            { id: "shift", label: "By Shift", icon: Clock },
+            { id: "period", label: "By Day / Week", icon: Calendar },
+            { id: "machine", label: "By Machine", icon: Cpu },
+          ].map((t) => {
+            const Icon = t.icon;
+            const isActive = activeTab === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setActiveTab(t.id as TabType)}
+                className={`px-4 py-2.5 text-xs font-bold flex items-center gap-2 border-b-2 whitespace-nowrap cursor-pointer transition-colors ${
+                  isActive
+                    ? "border-slate-900 text-slate-900 bg-white"
+                    : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+                }`}
+              >
+                <Icon className={`w-3.5 h-3.5 ${isActive ? "text-blue-600" : "text-slate-400"}`} />
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* TAB 1: BY PRODUCT (LINES & MACHINES) */}
+        {activeTab === "product" && (
+          <div className="p-4 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Product Traceability & Machine Matrix</h3>
+                <p className="text-xs text-slate-500">
+                  Detailed view of every Line, Machine, and Operation used to manufacture each component.
+                </p>
+              </div>
+              <div className="relative w-72">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Search Product Name or Code..."
+                  value={productSearch}
+                  onChange={(e) => setProductSearch(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            {productMatrix.length === 0 ? (
+              <div className="p-8 text-center text-slate-500 text-xs bg-slate-50 rounded border border-dashed border-slate-300">
+                No product manufacturing data found for current filters.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {productMatrix.map((prod) => {
+                  const isExpanded = expandedProducts.has(prod.productKey);
                   return (
-                    <tr key={it.canonicalKey || it.itemId || it.itemName} className="hover:bg-slate-50">
-                      <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap font-semibold">
-                        {it.itemCode}
-                      </td>
-                      <td className="px-3 py-1.5 font-sans font-bold text-slate-900 whitespace-nowrap">
-                        {it.itemName}
-                      </td>
-                      <td className="px-2.5 py-1.5 text-center font-extrabold text-slate-900 bg-slate-50/70">
-                        {it.periodQty}
-                      </td>
-                      <td className="px-2.5 py-1.5 text-center text-slate-700">{it.todayQty}</td>
-                      <td className="px-2.5 py-1.5 text-center text-slate-700">{it.mtdQty}</td>
-                      <td className="px-2.5 py-1.5 text-center font-black text-amber-800 bg-amber-50/40">
-                        {it.tillNowQty}
-                      </td>
-                      <td className="px-2.5 py-1.5 text-center text-slate-600">{it.tillNowStd}</td>
-                      <td className="px-2.5 py-1.5 text-center text-rose-700">{it.tillNowRework}</td>
-                      <td className="px-3 py-1.5 text-center">
-                        {eff !== null ? (
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
-                              eff >= 85
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : eff >= 75
-                                ? 'bg-amber-100 text-amber-800'
-                                : 'bg-rose-100 text-rose-800'
-                            }`}
+                    <div
+                      key={prod.productKey}
+                      className="border border-slate-200 rounded-lg overflow-hidden bg-white shadow-2xs"
+                    >
+                      {/* Product Header Row */}
+                      <div
+                        onClick={() => toggleExpandProduct(prod.productKey)}
+                        className="p-3 bg-slate-50 hover:bg-slate-100/80 transition-colors cursor-pointer flex flex-wrap items-center justify-between gap-3"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <button
+                            type="button"
+                            className="p-1 text-slate-500 hover:text-slate-800 rounded cursor-pointer"
                           >
-                            {eff}%
+                            {isExpanded ? (
+                              <ChevronDown className="w-4 h-4" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4" />
+                            )}
+                          </button>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-sm font-extrabold text-slate-900">{prod.productName}</h4>
+                              {prod.productCode && (
+                                <span className="text-[11px] font-mono font-bold text-slate-600 bg-slate-200 px-1.5 py-0.5 rounded">
+                                  {prod.productCode}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-slate-500 flex items-center gap-2 mt-0.5">
+                              <span>Lines: {prod.lines.join(", ") || "—"}</span>
+                              <span>•</span>
+                              <span>{prod.matrix.length} machine allocations</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Product KPI Mini Bar */}
+                        <div className="flex items-center gap-3 text-xs">
+                          <div className="text-right">
+                            <span className="text-[10px] text-slate-500 uppercase block">Actual Output</span>
+                            <span className="font-mono font-bold text-slate-900">
+                              {prod.metrics.totalActual.toLocaleString()} pcs
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-[10px] text-slate-500 uppercase block">Good Output</span>
+                            <span className="font-mono font-bold text-emerald-700">
+                              {prod.metrics.goodOutput.toLocaleString()} pcs
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-[10px] text-slate-500 uppercase block">Rework</span>
+                            <span className="font-mono font-bold text-amber-600">
+                              {prod.metrics.totalRework.toLocaleString()} pcs
+                            </span>
+                          </div>
+                          <div className="text-right pl-2 border-l border-slate-200">
+                            <span className="text-[10px] text-slate-500 uppercase block">Product OEE</span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                                prod.metrics.oeePct
+                              )}`}
+                            >
+                              {prod.metrics.oeePct}%
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Product Expanded Line & Machine Matrix Table */}
+                      {isExpanded && (
+                        <div className="border-t border-slate-200 overflow-x-auto">
+                          <table className="w-full text-xs text-left">
+                            <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                              <tr>
+                                <th className="px-3 py-2">Line</th>
+                                <th className="px-3 py-2">Machine</th>
+                                <th className="px-3 py-2">Operation</th>
+                                <th className="px-3 py-2 text-center">Runs</th>
+                                <th className="px-3 py-2 text-right">Target</th>
+                                <th className="px-3 py-2 text-right">Actual</th>
+                                <th className="px-3 py-2 text-right">Rework</th>
+                                <th className="px-3 py-2 text-right">Good</th>
+                                <th className="px-3 py-2 text-right">Downtime</th>
+                                <th className="px-3 py-2 text-right">Avail %</th>
+                                <th className="px-3 py-2 text-right">Perf %</th>
+                                <th className="px-3 py-2 text-right">Qual %</th>
+                                <th className="px-3 py-2 text-right font-black">OEE %</th>
+                                <th className="px-3 py-2 text-center">Jump</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 font-mono">
+                              {prod.matrix.map((m, mIdx) => (
+                                <tr key={mIdx} className="hover:bg-slate-50 transition-colors">
+                                  <td className="px-3 py-2 font-sans font-medium text-slate-700 whitespace-nowrap">
+                                    {m.line}
+                                  </td>
+                                  <td className="px-3 py-2 font-sans">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          onOpenMachine &&
+                                          onOpenMachine({
+                                            machineId: m.machineId,
+                                            line: m.latestLine,
+                                            date: m.latestDate,
+                                            shift: m.latestShift as ShiftType,
+                                            fromTab: "analytics",
+                                          })
+                                        }
+                                        className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
+                                        title="Jump to this machine in Operator Kiosk"
+                                      >
+                                        <span>{m.machineName}</span>
+                                        <ExternalLink className="w-3 h-3 opacity-60" />
+                                      </button>
+                                      {m.isTempMachine && (
+                                        <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                                          TEMP
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-3 py-2 font-sans text-slate-600">{m.operation}</td>
+                                  <td className="px-3 py-2 text-center">
+                                    {m.splitRunsCount > 0 ? (
+                                      <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">
+                                        Split ({m.runNos.join(",")})
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-400">1</span>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2 text-right text-slate-600">{m.stdOutput}</td>
+                                  <td className="px-3 py-2 text-right font-bold text-slate-900">{m.actualOutput}</td>
+                                  <td className="px-3 py-2 text-right text-amber-600">{m.rework}</td>
+                                  <td className="px-3 py-2 text-right text-emerald-700 font-bold">{m.goodOutput}</td>
+                                  <td className="px-3 py-2 text-right text-rose-600">{m.breakdownMinutes}m</td>
+                                  <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
+                                  <td className="px-3 py-2 text-right text-slate-700">{m.metrics.performancePct}%</td>
+                                  <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
+                                  <td className="px-3 py-2 text-right font-black">
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[11px] font-extrabold border ${getOeeBadgeClass(
+                                        m.metrics.oeePct
+                                      )}`}
+                                    >
+                                      {m.metrics.oeePct}%
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-center font-sans">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        onOpenMachine &&
+                                        onOpenMachine({
+                                          machineId: m.machineId,
+                                          line: m.latestLine,
+                                          date: m.latestDate,
+                                          shift: m.latestShift as ShiftType,
+                                          fromTab: "analytics",
+                                        })
+                                      }
+                                      className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                                      title="Open in Machine Cockpit"
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 2: BY LINE */}
+        {activeTab === "line" && (
+          <div className="p-4 space-y-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Production Line Performance & OEE Comparison</h3>
+              <p className="text-xs text-slate-500">
+                Line-by-line efficiency, downtime, and item breakdown across the selected period.
+              </p>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                  <tr>
+                    <th className="px-3 py-2.5">Line Name</th>
+                    <th className="px-3 py-2.5 text-center">Machines (Perm / Temp)</th>
+                    <th className="px-3 py-2.5 text-right">Target (Std)</th>
+                    <th className="px-3 py-2.5 text-right">Actual Output</th>
+                    <th className="px-3 py-2.5 text-right">Good Output</th>
+                    <th className="px-3 py-2.5 text-right">Rework</th>
+                    <th className="px-3 py-2.5 text-right">Downtime</th>
+                    <th className="px-3 py-2.5 text-right">Availability</th>
+                    <th className="px-3 py-2.5 text-right">Performance</th>
+                    <th className="px-3 py-2.5 text-right">Quality</th>
+                    <th className="px-3 py-2.5 text-right font-black">Line OEE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono">
+                  {lineRollups.map((l) => (
+                    <tr key={l.line} className="hover:bg-slate-50">
+                      <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">{l.line}</td>
+                      <td className="px-3 py-2 text-center font-sans text-slate-600">
+                        {l.machineCount} total ({l.permMachineCount} perm / {l.tempMachineCount} temp)
+                      </td>
+                      <td className="px-3 py-2 text-right text-slate-600">{l.metrics.totalStd.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right font-bold text-slate-900">
+                        {l.metrics.totalActual.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">
+                        {l.metrics.goodOutput.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-amber-600">{l.metrics.totalRework.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right text-rose-600">{l.metrics.downtimeMinutes}m</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{l.metrics.availabilityPct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{l.metrics.performancePct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{l.metrics.qualityPct}%</td>
+                      <td className="px-3 py-2 text-right">
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                            l.metrics.oeePct
+                          )}`}
+                        >
+                          {l.metrics.oeePct}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 3: BY SHIFT */}
+        {activeTab === "shift" && (
+          <div className="p-4 space-y-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Shift-Wise Efficiency & OEE Comparison</h3>
+              <p className="text-xs text-slate-500">
+                Analysis across Shift A, Shift B, and Shift C to identify variance between operational shifts.
+              </p>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                  <tr>
+                    <th className="px-3 py-2.5">Shift Name</th>
+                    <th className="px-3 py-2.5 text-center">Active Machines</th>
+                    <th className="px-3 py-2.5 text-right">Target (Std)</th>
+                    <th className="px-3 py-2.5 text-right">Actual Output</th>
+                    <th className="px-3 py-2.5 text-right">Good Output</th>
+                    <th className="px-3 py-2.5 text-right">Rework</th>
+                    <th className="px-3 py-2.5 text-right">Downtime</th>
+                    <th className="px-3 py-2.5 text-right">Availability</th>
+                    <th className="px-3 py-2.5 text-right">Performance</th>
+                    <th className="px-3 py-2.5 text-right">Quality</th>
+                    <th className="px-3 py-2.5 text-right font-black">Shift OEE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono">
+                  {shiftRollups.map((s) => (
+                    <tr key={s.shift} className="hover:bg-slate-50">
+                      <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">{s.shift}</td>
+                      <td className="px-3 py-2 text-center font-sans text-slate-600">{s.machineCount}</td>
+                      <td className="px-3 py-2 text-right text-slate-600">{s.metrics.totalStd.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right font-bold text-slate-900">
+                        {s.metrics.totalActual.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">
+                        {s.metrics.goodOutput.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-amber-600">{s.metrics.totalRework.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right text-rose-600">{s.metrics.downtimeMinutes}m</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{s.metrics.availabilityPct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{s.metrics.performancePct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{s.metrics.qualityPct}%</td>
+                      <td className="px-3 py-2 text-right">
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                            s.metrics.oeePct
+                          )}`}
+                        >
+                          {s.metrics.oeePct}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 4: BY DAY / WEEK */}
+        {activeTab === "period" && (
+          <div className="p-4 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Chronological Manufacturing Trends</h3>
+                <p className="text-xs text-slate-500">
+                  Track day-by-day or weekly manufacturing output and OEE progression.
+                </p>
+              </div>
+              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded">
+                <button
+                  type="button"
+                  onClick={() => setPeriodGranularity("day")}
+                  className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
+                    periodGranularity === "day"
+                      ? "bg-white text-slate-900 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  Daily View
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPeriodGranularity("week")}
+                  className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
+                    periodGranularity === "week"
+                      ? "bg-white text-slate-900 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  Weekly View
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                  <tr>
+                    <th className="px-3 py-2.5">
+                      {periodGranularity === "day" ? "Date" : "ISO Week Range"}
+                    </th>
+                    <th className="px-3 py-2.5">Items Produced</th>
+                    <th className="px-3 py-2.5 text-right">Target (Std)</th>
+                    <th className="px-3 py-2.5 text-right">Actual Output</th>
+                    <th className="px-3 py-2.5 text-right">Good Output</th>
+                    <th className="px-3 py-2.5 text-right">Rework</th>
+                    <th className="px-3 py-2.5 text-right">Downtime</th>
+                    <th className="px-3 py-2.5 text-right">Avail %</th>
+                    <th className="px-3 py-2.5 text-right">Perf %</th>
+                    <th className="px-3 py-2.5 text-right">Qual %</th>
+                    <th className="px-3 py-2.5 text-right font-black">Period OEE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono">
+                  {periodRollups.map((p) => (
+                    <tr key={p.periodKey} className="hover:bg-slate-50">
+                      <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
+                        {p.periodLabel}
+                      </td>
+                      <td className="px-3 py-2 font-sans">
+                        <div className="flex flex-wrap gap-1 max-w-xs">
+                          {p.itemsProduced.slice(0, 3).map((it) => (
+                            <span
+                              key={it.itemId}
+                              className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-medium text-slate-700"
+                              title={`${it.itemName}: ${it.actualOutput} pcs`}
+                            >
+                              {it.itemName}: {it.actualOutput}
+                            </span>
+                          ))}
+                          {p.itemsProduced.length > 3 && (
+                            <span className="text-[10px] text-slate-400">
+                              +{p.itemsProduced.length - 3} more
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-right text-slate-600">{p.metrics.totalStd.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right font-bold text-slate-900">
+                        {p.metrics.totalActual.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">
+                        {p.metrics.goodOutput.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-amber-600">{p.metrics.totalRework.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right text-rose-600">{p.metrics.downtimeMinutes}m</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{p.metrics.availabilityPct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{p.metrics.performancePct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{p.metrics.qualityPct}%</td>
+                      <td className="px-3 py-2 text-right">
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                            p.metrics.oeePct
+                          )}`}
+                        >
+                          {p.metrics.oeePct}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 5: BY MACHINE */}
+        {activeTab === "machine" && (
+          <div className="p-4 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Machine OEE, Output & Downtime Matrix</h3>
+                <p className="text-xs text-slate-500">
+                  Comprehensive performance ranking across permanent and temporary machines.
+                </p>
+              </div>
+
+              {/* Sort Controls */}
+              <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                <span className="font-semibold text-slate-500">Sort By:</span>
+                <select
+                  value={machineSortKey}
+                  onChange={(e) =>
+                    setMachineSortKey(
+                      e.target.value as "oee" | "actual" | "downtime" | "name"
+                    )
+                  }
+                  className="bg-slate-50 border border-slate-200 rounded px-2 py-1 font-semibold text-slate-800"
+                >
+                  <option value="oee">OEE %</option>
+                  <option value="actual">Actual Output</option>
+                  <option value="downtime">Downtime Minutes</option>
+                  <option value="name">Machine Name</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setMachineSortOrder(machineSortOrder === "asc" ? "desc" : "asc")}
+                  className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer"
+                  title="Toggle sort direction"
+                >
+                  <ArrowUpDown className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                  <tr>
+                    <th className="px-3 py-2.5">Machine</th>
+                    <th className="px-3 py-2.5">Line</th>
+                    <th className="px-3 py-2.5 text-center">Split Runs</th>
+                    <th className="px-3 py-2.5 text-right">Target (Std)</th>
+                    <th className="px-3 py-2.5 text-right">Actual Output</th>
+                    <th className="px-3 py-2.5 text-right">Good Output</th>
+                    <th className="px-3 py-2.5 text-right">Rework</th>
+                    <th className="px-3 py-2.5 text-right">Downtime</th>
+                    <th className="px-3 py-2.5 text-right">Avail %</th>
+                    <th className="px-3 py-2.5 text-right">Perf %</th>
+                    <th className="px-3 py-2.5 text-right">Qual %</th>
+                    <th className="px-3 py-2.5 text-right font-black">Machine OEE</th>
+                    <th className="px-3 py-2.5 text-center">Jump</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono">
+                  {machineRollups.map((m) => (
+                    <tr key={m.machineId} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-3 py-2 font-sans whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onOpenMachine &&
+                              onOpenMachine({
+                                machineId: m.machineId,
+                                line: m.latestLine,
+                                date: m.latestDate,
+                                shift: m.latestShift as ShiftType,
+                                fromTab: "analytics",
+                              })
+                            }
+                            className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
+                            title="Jump to this machine in Operator Kiosk"
+                          >
+                            <span>{m.machineName}</span>
+                            <ExternalLink className="w-3 h-3 opacity-60" />
+                          </button>
+                          {m.isTempMachine && (
+                            <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                              TEMP
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 font-sans font-medium text-slate-700 whitespace-nowrap">{m.line}</td>
+                      <td className="px-3 py-2 text-center">
+                        {m.splitRunsCount > 0 ? (
+                          <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">
+                            {m.splitRunsCount} Split
                           </span>
                         ) : (
                           <span className="text-slate-400">—</span>
                         )}
                       </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-            {itemSummaryRows.length > 0 && (
-              <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
-                <tr>
-                  <td colSpan={2} className="px-3 py-2 font-sans uppercase text-xs tracking-tight">
-                    TOTAL ({itemSummaryTotals.count} Parts)
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-slate-950 font-black bg-slate-200/50">
-                    {itemSummaryTotals.periodQty}
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-slate-800">
-                    {itemSummaryTotals.todayQty}
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-slate-800">
-                    {itemSummaryTotals.mtdQty}
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-amber-900 font-black bg-amber-100/40">
-                    {itemSummaryTotals.tillNowQty}
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-slate-700">
-                    {itemSummaryTotals.tillNowStd}
-                  </td>
-                  <td className="px-2.5 py-2 text-center text-rose-700">
-                    {itemSummaryTotals.tillNowRework}
-                  </td>
-                  <td className="px-3 py-2 text-center">
-                    {itemSummaryTotals.eff !== null ? (
-                      <span
-                        className={`px-2 py-0.5 rounded text-xs font-black ${
-                          itemSummaryTotals.eff >= 85
-                            ? 'bg-emerald-600 text-white'
-                            : itemSummaryTotals.eff >= 75
-                            ? 'bg-amber-500 text-slate-950'
-                            : 'bg-rose-600 text-white'
-                        }`}
-                      >
-                        {itemSummaryTotals.eff}%
-                      </span>
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                </tr>
-              </tfoot>
-            )}
-          </table>
-        </div>
-      </div>
-
-      {/* SECTION 2: Line Efficiency & Shift-to-Shift Comparison Table */}
-      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
-              <Layers className="w-4 h-4 text-slate-700" />
-              <span>Line Efficiency & Shift-to-Shift Comparison</span>
-            </h3>
-            <p className="text-xs text-slate-500">
-              Evaluated strictly on active machines (Std Output &gt; 0). Idle machines never drag down line efficiency.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              <span>≥ 85% Target</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-amber-500" />
-              <span>75-84% Moderate</span>
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-rose-500" />
-              <span>&lt; 75% Critical</span>
-            </span>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto border border-slate-200 rounded">
-          <table className="w-full text-xs text-left border-collapse">
-            <thead className="bg-slate-900 text-slate-200 text-[11px] font-semibold uppercase">
-              <tr>
-                <th className="px-3 py-2 border-r border-slate-800">Production Line</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Operating Footprint</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Target (Std)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Actual (Pcs)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Line Eff %</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A (7AM-3:30PM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B (3:30PM-12AM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C (12AM-7AM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Shift Spread</th>
-                <th className="px-3 py-2 text-center">Downtime</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 font-mono">
-              {lineComparisonData.lines.map((line) => {
-                const footprintPct = line.totalMachines > 0 ? Math.round((line.activeCount / line.totalMachines) * 100) : 0;
-                return (
-                  <tr key={line.lineName} className="hover:bg-slate-50">
-                    <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
-                      {line.lineName}
-                    </td>
-                    <td className="px-2.5 py-2 text-center text-slate-700 whitespace-nowrap">
-                      <span className="font-semibold text-emerald-800">{line.activeCount}</span>
-                      <span className="text-slate-400"> / {line.totalMachines} active </span>
-                      <span className="text-slate-500 font-mono text-[11px]">({footprintPct}%)</span>
-                    </td>
-                    <td className="px-2.5 py-2 text-center text-slate-600">{line.std}</td>
-                    <td className="px-2.5 py-2 text-center font-bold text-slate-900">{line.act}</td>
-                    <td className="px-2.5 py-2 text-center">
-                      {line.std > 0 ? (
+                      <td className="px-3 py-2 text-right text-slate-600">{m.metrics.totalStd.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right font-bold text-slate-900">
+                        {m.metrics.totalActual.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">
+                        {m.metrics.goodOutput.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-amber-600">{m.metrics.totalRework.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right text-rose-600">{m.metrics.downtimeMinutes}m</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.performancePct}%</td>
+                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
+                      <td className="px-3 py-2 text-right">
                         <span
-                          className={`px-2 py-0.5 rounded text-xs font-extrabold ${
-                            line.eff >= 85
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : line.eff >= 75
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-rose-100 text-rose-800'
-                          }`}
+                          className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                            m.metrics.oeePct
+                          )}`}
                         >
-                          {line.eff}%
+                          {m.metrics.oeePct}%
                         </span>
-                      ) : (
-                        <span className="text-slate-400 font-sans italic text-[11px]">No Target</span>
-                      )}
-                    </td>
-                    {/* Shift A */}
-                    <td className="px-2.5 py-2 text-center bg-slate-50/60">
-                      {line.aEff !== null ? (
-                        <div>
-                          <span className="font-bold text-slate-800">{line.aAct} pcs</span>
-                          <span className="text-slate-500 text-[10px] ml-1">({line.aEff}%)</span>
-                        </div>
-                      ) : (
-                        <span className="text-slate-400 text-[11px]">Idle</span>
-                      )}
-                    </td>
-                    {/* Shift B */}
-                    <td className="px-2.5 py-2 text-center bg-slate-50/60">
-                      {line.bEff !== null ? (
-                        <div>
-                          <span className="font-bold text-slate-800">{line.bAct} pcs</span>
-                          <span className="text-slate-500 text-[10px] ml-1">({line.bEff}%)</span>
-                        </div>
-                      ) : (
-                        <span className="text-slate-400 text-[11px]">Idle</span>
-                      )}
-                    </td>
-                    {/* Shift C */}
-                    <td className="px-2.5 py-2 text-center bg-slate-50/60">
-                      {line.cEff !== null ? (
-                        <div>
-                          <span className="font-bold text-slate-800">{line.cAct} pcs</span>
-                          <span className="text-slate-500 text-[10px] ml-1">({line.cEff}%)</span>
-                        </div>
-                      ) : (
-                        <span className="text-slate-400 text-[11px]">Idle</span>
-                      )}
-                    </td>
-                    {/* Shift Spread */}
-                    <td className="px-2.5 py-2 text-center">
-                      {line.spread !== null ? (
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
-                            line.spread >= 15
-                              ? 'bg-rose-100 text-rose-800 border border-rose-300'
-                              : line.spread >= 10
-                              ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                              : 'text-slate-600'
-                          }`}
-                          title={line.spread >= 10 ? 'High efficiency disparity between shifts (≥ 10%)' : undefined}
-                        >
-                          {line.spread}% spread
-                        </span>
-                      ) : (
-                        <span className="text-slate-400 text-[11px]">Single Shift</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-center text-amber-800 font-bold">{line.totalBd}m</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            {/* Plant Total Footer Row */}
-            <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
-              <tr>
-                <td className="px-3 py-2.5 font-sans uppercase tracking-tight text-xs">
-                  {lineComparisonData.plantTotal.lineName}
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-emerald-800">
-                  {lineComparisonData.plantTotal.activeCount} / {lineComparisonData.plantTotal.totalMachines} active (
-                  {lineComparisonData.plantTotal.totalMachines > 0
-                    ? Math.round(
-                        (lineComparisonData.plantTotal.activeCount / lineComparisonData.plantTotal.totalMachines) * 100
-                      )
-                    : 0}
-                  %)
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-700">{lineComparisonData.plantTotal.std}</td>
-                <td className="px-2.5 py-2.5 text-center text-slate-950 font-black">{lineComparisonData.plantTotal.act}</td>
-                <td className="px-2.5 py-2.5 text-center">
-                  <span
-                    className={`px-2.5 py-1 rounded text-xs font-black ${
-                      lineComparisonData.plantTotal.eff >= 85
-                        ? 'bg-emerald-600 text-white'
-                        : lineComparisonData.plantTotal.eff >= 75
-                        ? 'bg-amber-500 text-slate-950'
-                        : 'bg-rose-600 text-white'
-                    }`}
-                  >
-                    {lineComparisonData.plantTotal.eff}%
-                  </span>
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-800">
-                  {lineComparisonData.plantTotal.aEff !== null ? (
-                    <span>{lineComparisonData.plantTotal.aAct} ({lineComparisonData.plantTotal.aEff}%)</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-800">
-                  {lineComparisonData.plantTotal.bEff !== null ? (
-                    <span>{lineComparisonData.plantTotal.bAct} ({lineComparisonData.plantTotal.bEff}%)</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-2.5 py-2.5 text-center text-slate-800">
-                  {lineComparisonData.plantTotal.cEff !== null ? (
-                    <span>{lineComparisonData.plantTotal.cAct} ({lineComparisonData.plantTotal.cEff}%)</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-2.5 py-2.5 text-center">
-                  {lineComparisonData.plantTotal.spread !== null ? (
-                    <span className="font-bold text-slate-800">{lineComparisonData.plantTotal.spread}%</span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td className="px-3 py-2.5 text-center text-amber-800">{lineComparisonData.plantTotal.totalBd}m</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      </div>
-
-      {/* SECTION 3: Machine Efficiency Matrix & Shift Distribution */}
-      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
-              <Activity className="w-4 h-4 text-slate-700" />
-              <span>Machine Efficiency Matrix & Shift Distribution</span>
-            </h3>
-            <p className="text-xs text-slate-500">
-              Machine-level performance across active shifts with partial-line status tracking and shift variance analysis.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3 flex-wrap">
-            {/* Machine Line Filter */}
-            <select
-              value={machineLineFilter}
-              onChange={(e) => setMachineLineFilter(e.target.value)}
-              className="bg-white border border-slate-300 text-xs font-medium text-slate-700 rounded px-2.5 py-1 focus:outline-none focus:border-slate-800"
-            >
-              <option value="all">All Lines (Machines)</option>
-              {((masterData?.lines && masterData.lines.length > 0)
-                ? masterData.lines.filter((l) => l.isActive !== false).map((l) => l.name)
-                : PRODUCTION_LINES
-              ).map((line) => (
-                <option key={line} value={line}>
-                  {line}
-                </option>
-              ))}
-            </select>
-
-            <label className="flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={showIdleMachines}
-                onChange={(e) => setShowIdleMachines(e.target.checked)}
-                className="rounded text-slate-900 focus:ring-slate-800"
-              />
-              <span className="font-medium">Show Idle / Unassigned Machines</span>
-            </label>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto max-h-96 border border-slate-200 rounded">
-          <table className="w-full text-xs text-left border-collapse">
-            <thead className="bg-slate-900 text-slate-200 sticky top-0 z-10 text-[11px] font-semibold uppercase">
-              <tr>
-                <th className="px-3 py-2 border-r border-slate-800">Machine Name</th>
-                <th className="px-2 py-2 border-r border-slate-800">Code</th>
-                <th className="px-2.5 py-2 border-r border-slate-800">Line</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center">Shifts Operated</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Std</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Actual</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Machine Eff %</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift A (7AM-3:30PM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift B (3:30PM-12AM)</th>
-                <th className="px-2.5 py-2 border-r border-slate-800 text-center bg-slate-800/60">Shift C (12AM-7AM)</th>
-                <th className="px-3 py-2 border-r border-slate-800 text-center">Best / Worst Shift</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Downtime</th>
-                <th className="px-2 py-2 text-center">Rework</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 font-mono">
-              {visibleMachineMetrics.length === 0 ? (
-                <tr>
-                  <td colSpan={13} className="text-center py-6 text-slate-500 font-sans">
-                    No active machines found for current filters.
-                    <button
-                      type="button"
-                      onClick={() => setShowIdleMachines(true)}
-                      className="ml-2 font-semibold text-slate-900 underline hover:text-slate-700"
-                    >
-                      Show Idle Machines
-                    </button>
-                  </td>
-                </tr>
-              ) : (
-                visibleMachineMetrics.map((m) => (
-                  <tr key={m.id} className="hover:bg-slate-50">
-                    <td className="px-3 py-1.5 font-sans font-bold text-slate-900 whitespace-nowrap">
-                      {onOpenMachine ? (
+                      </td>
+                      <td className="px-3 py-2 text-center font-sans">
                         <button
                           type="button"
                           onClick={() =>
+                            onOpenMachine &&
                             onOpenMachine({
-                              machineId: m.id,
-                              line: m.line,
-                              date: activeToDateOrToday,
-                              shift: selectedShift,
-                              fromTab: 'analytics',
+                              machineId: m.machineId,
+                              line: m.latestLine,
+                              date: m.latestDate,
+                              shift: m.latestShift as ShiftType,
+                              fromTab: "analytics",
                             })
                           }
-                          className="text-left font-bold text-slate-900 hover:text-blue-700 hover:underline cursor-pointer"
-                          title={`Open ${m.name} in Operator Kiosk`}
+                          className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                          title="Open in Machine Cockpit"
                         >
-                          {m.name}
+                          <ExternalLink className="w-3.5 h-3.5" />
                         </button>
-                      ) : (
-                        m.name
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{m.code}</td>
-                    <td className="px-2.5 py-1.5 font-sans text-slate-700 whitespace-nowrap">{m.line}</td>
-                    <td className="px-2.5 py-1.5 text-center whitespace-nowrap">
-                      {m.isOperating ? (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                          {m.shiftsOperatedText}
-                        </span>
-                      ) : (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500">
-                          0 / 3 (Idle)
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5 text-center text-slate-600">{m.std}</td>
-                    <td className="px-2 py-1.5 text-center font-bold text-slate-900">{m.act}</td>
-                    <td className="px-2 py-1.5 text-center">
-                      {m.efficiency !== null ? (
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
-                            m.efficiency >= 85
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : m.efficiency >= 75
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-rose-100 text-rose-800'
-                          }`}
-                        >
-                          {m.efficiency}%
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-2.5 py-1.5 text-center bg-slate-50/60 whitespace-nowrap">
-                      {m.aEff !== null ? (
-                        <span>
-                          {m.aAct} <strong className="text-[10px]">({m.aEff}%)</strong>
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-2.5 py-1.5 text-center bg-slate-50/60 whitespace-nowrap">
-                      {m.bEff !== null ? (
-                        <span>
-                          {m.bAct} <strong className="text-[10px]">({m.bEff}%)</strong>
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-2.5 py-1.5 text-center bg-slate-50/60 whitespace-nowrap">
-                      {m.cEff !== null ? (
-                        <span>
-                          {m.cAct} <strong className="text-[10px]">({m.cEff}%)</strong>
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-1.5 text-center whitespace-nowrap font-sans">
-                      {m.bestWorstHighlight.isHighSpread ? (
-                        <span
-                          className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300"
-                          title="Disparity ≥ 10% between shifts"
-                        >
-                          {m.bestWorstHighlight.text}
-                        </span>
-                      ) : (
-                        <span className="text-slate-600 text-[11px]">
-                          {m.bestWorstHighlight.text}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5 text-center text-amber-700 font-bold">{m.downtime}m</td>
-                    <td className="px-2 py-1.5 text-center text-rose-700">{m.rework}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-            {visibleMachineMetrics.length > 0 && (
-              <tfoot className="bg-slate-100 font-mono font-bold text-slate-900 border-t-2 border-slate-300">
-                {(() => {
-                  const totalStd = visibleMachineMetrics.reduce((acc, m) => acc + m.std, 0);
-                  const totalAct = visibleMachineMetrics.reduce((acc, m) => acc + m.act, 0);
-                  const totalDowntime = Number(
-                    visibleMachineMetrics.reduce((acc, m) => acc + m.downtime, 0).toFixed(2)
-                  );
-                  const totalRework = visibleMachineMetrics.reduce((acc, m) => acc + m.rework, 0);
-                  const eff = totalStd > 0 ? Math.round((totalAct / totalStd) * 100) : null;
-                  return (
-                    <tr>
-                      <td colSpan={4} className="px-3 py-2 font-sans uppercase text-xs tracking-tight">
-                        TOTAL VISIBLE MACHINES ({visibleMachineMetrics.length})
-                      </td>
-                      <td className="px-2 py-2 text-center text-slate-700">{totalStd}</td>
-                      <td className="px-2 py-2 text-center text-slate-950 font-black">{totalAct}</td>
-                      <td className="px-2 py-2 text-center">
-                        {eff !== null ? (
-                          <span
-                            className={`px-2 py-0.5 rounded text-xs font-black ${
-                              eff >= 85
-                                ? 'bg-emerald-600 text-white'
-                                : eff >= 75
-                                ? 'bg-amber-500 text-slate-950'
-                                : 'bg-rose-600 text-white'
-                            }`}
-                          >
-                            {eff}%
-                          </span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td colSpan={4} className="px-2 py-2 text-center text-slate-400 font-sans font-normal text-[11px]">
-                        Shift-level summaries displayed in Section 2 above
-                      </td>
-                      <td className="px-2 py-2 text-center text-amber-800 font-bold">{totalDowntime}m</td>
-                      <td className="px-2 py-2 text-center text-rose-700">{totalRework}</td>
-                    </tr>
-                  );
-                })()}
-              </tfoot>
-            )}
-          </table>
-        </div>
-      </div>
-
-      {/* Breakdown Downtime Split & Pareto */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Machine Breakdown Categorization */}
-        <div className="lg:col-span-2 bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-4">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 tracking-tight">
-              Breakdown Downtime Categorization
-            </h3>
-            <p className="text-xs text-slate-500">
-              Split across the 6 factory logging categories (Total: {kpis.totalBreakdown} mins)
-            </p>
-          </div>
-
-          {/* Proportional Stacked Bar */}
-          <div className="w-full h-4 rounded overflow-hidden flex bg-slate-100 border border-slate-200">
-            <div
-              style={{ width: `${noDiscPct}%` }}
-              className="bg-amber-500 h-full"
-              title={`NO/DISC: ${kpis.breakdownSplit.noDisc}m (${noDiscPct}%)`}
-            />
-            <div
-              style={{ width: `${changePct}%` }}
-              className="bg-blue-500 h-full"
-              title={`CHANGE: ${kpis.breakdownSplit.change}m (${changePct}%)`}
-            />
-            <div
-              style={{ width: `${powerPct}%` }}
-              className="bg-rose-500 h-full"
-              title={`POWER: ${kpis.breakdownSplit.power}m (${powerPct}%)`}
-            />
-            <div
-              style={{ width: `${operatorPct}%` }}
-              className="bg-purple-500 h-full"
-              title={`OPERATOR: ${kpis.breakdownSplit.operator}m (${operatorPct}%)`}
-            />
-            <div
-              style={{ width: `${machineBdPct}%` }}
-              className="bg-orange-500 h-full"
-              title={`BREAK DOWN: ${kpis.breakdownSplit.machineBreakdown}m (${machineBdPct}%)`}
-            />
-            <div
-              style={{ width: `${fixProgPct}%` }}
-              className="bg-indigo-500 h-full"
-              title={`FIX/PROG: ${kpis.breakdownSplit.fixProgSettings}m (${fixProgPct}%)`}
-            />
-            <div
-              style={{ width: `${miscPct}%` }}
-              className="bg-teal-500 h-full"
-              title={`MISCELLANEOUS: ${kpis.breakdownSplit.miscellaneous}m (${miscPct}%)`}
-            />
-          </div>
-
-          {/* List breakdown with minutes and percentages */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded bg-amber-500 inline-block" />
-                <div>
-                  <span className="font-bold text-slate-800">NO / DISC</span>
-                  <p className="text-[10px] text-slate-500">Material & casting shortage</p>
-                </div>
-              </div>
-              <div className="text-right font-mono">
-                <span className="font-bold text-slate-900">{kpis.breakdownSplit.noDisc} mins</span>
-                <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                  <span className="text-slate-600 font-semibold">{noDiscPct}% share</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.noDisc}% of total</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded bg-blue-500 inline-block" />
-                <div>
-                  <span className="font-bold text-slate-800">CHANGE</span>
-                  <p className="text-[10px] text-slate-500">Tool change & insert setup</p>
-                </div>
-              </div>
-              <div className="text-right font-mono">
-                <span className="font-bold text-slate-900">{kpis.breakdownSplit.change} mins</span>
-                <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                  <span className="text-slate-600 font-semibold">{changePct}% share</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.change}% of total</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded bg-rose-500 inline-block" />
-                <div>
-                  <span className="font-bold text-slate-800">POWER</span>
-                  <p className="text-[10px] text-slate-500">Grid trip & electrical breakdown</p>
-                </div>
-              </div>
-              <div className="text-right font-mono">
-                <span className="font-bold text-slate-900">{kpis.breakdownSplit.power} mins</span>
-                <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                  <span className="text-slate-600 font-semibold">{powerPct}% share</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.power}% of total</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded bg-purple-500 inline-block" />
-                <div>
-                  <span className="font-bold text-slate-800">OPERATOR</span>
-                  <p className="text-[10px] text-slate-500">Worker delay & unattended</p>
-                </div>
-              </div>
-              <div className="text-right font-mono">
-                <span className="font-bold text-slate-900">{kpis.breakdownSplit.operator} mins</span>
-                <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                  <span className="text-slate-600 font-semibold">{operatorPct}% share</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.operator}% of total</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded bg-orange-500 inline-block" />
-                <div>
-                  <span className="font-bold text-slate-800">BREAK DOWN</span>
-                  <p className="text-[10px] text-slate-500">Machine & mechanical fault</p>
-                </div>
-              </div>
-              <div className="text-right font-mono">
-                <span className="font-bold text-slate-900">{kpis.breakdownSplit.machineBreakdown} mins</span>
-                <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                  <span className="text-slate-600 font-semibold">{machineBdPct}% share</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.machineBreakdown}% of total</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded bg-indigo-500 inline-block" />
-                <div>
-                  <span className="font-bold text-slate-800">FIX/PROG</span>
-                  <p className="text-[10px] text-slate-500">Fixture & program setting</p>
-                </div>
-              </div>
-              <div className="text-right font-mono">
-                <span className="font-bold text-slate-900">{kpis.breakdownSplit.fixProgSettings} mins</span>
-                <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                  <span className="text-slate-600 font-semibold">{fixProgPct}% share</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.fixProgSettings}% of total</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded bg-teal-500 inline-block" />
-                <div>
-                  <span className="font-bold text-slate-800">MISCELLANEOUS</span>
-                  <p className="text-[10px] text-slate-500">Other & miscellaneous downtime</p>
-                </div>
-              </div>
-              <div className="text-right font-mono">
-                <span className="font-bold text-slate-900">{kpis.breakdownSplit.miscellaneous} mins</span>
-                <div className="flex items-center justify-end gap-1.5 text-[10px]">
-                  <span className="text-slate-600 font-semibold">{miscPct}% share</span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-amber-700 font-semibold">{kpis.categoryWorkingPct.miscellaneous}% of total</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Pareto Ranking - Machines with Most Downtime */}
-        <div className="bg-white rounded-lg border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-3">
-          <h3 className="text-sm font-bold text-slate-900 tracking-tight">
-            Top Downtime Culprits (Pareto Ranking)
-          </h3>
-          {sortedByDowntime.length === 0 ? (
-            <p className="text-xs text-slate-500">Zero downtime recorded for current selection.</p>
-          ) : (
-            <div className="space-y-1.5 text-xs">
-              {sortedByDowntime.slice(0, 5).map((m, rank) => (
-                <div
-                  key={m.id}
-                  className="flex items-center justify-between py-1.5 px-2 rounded bg-slate-50"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="w-4 h-4 rounded-full bg-slate-800 text-white font-mono text-[10px] flex items-center justify-center font-bold">
-                      {rank + 1}
-                    </span>
-                    <span className="font-semibold text-slate-800">{m.name}</span>
-                  </div>
-                  <span className="font-mono font-bold text-amber-700">
-                    {m.downtime} mins lost
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Historical Shift Log Table */}
-      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden space-y-3 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 tracking-tight">
-              Historical Production Master Records
-            </h3>
-            <p className="text-xs text-slate-500">
-              Showing {filteredLogs.length} verified shift rows ready for audit and Power BI synchronization.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search machine, operator, part..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none w-56 sm:w-64"
-              />
-            </div>
-
-            <button
-              onClick={handleExportCSV}
-              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded flex items-center gap-1.5 shadow-2xs"
-            >
-              <Download className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Export CSV</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Scrollable Data Table */}
-        <div className="overflow-x-auto max-h-96 border border-slate-200 rounded">
-          <table className="w-full text-xs text-left border-collapse">
-            <thead className="bg-slate-900 text-slate-200 sticky top-0 z-10 text-[11px] font-semibold uppercase">
-              <tr>
-                <th className="px-3 py-2 border-r border-slate-800">Date</th>
-                <th className="px-2.5 py-2 border-r border-slate-800">Line</th>
-                <th className="px-3 py-2 border-r border-slate-800">Shift</th>
-                <th className="px-3 py-2 border-r border-slate-800">Machine</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Run</th>
-                <th className="px-3 py-2 border-r border-slate-800">Operator</th>
-                <th className="px-3 py-2 border-r border-slate-800">Item</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Cycle Time</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Std</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Actual</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Rework</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">BD Mins</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">BD %</th>
-                <th className="px-2 py-2 border-r border-slate-800 text-center">Eff %</th>
-                <th className="px-3 py-2">Remarks</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 font-mono">
-              {filteredLogs.length === 0 ? (
-                <tr>
-                  <td colSpan={15} className="text-center py-8 text-slate-500 font-sans">
-                    No records found matching current date/shift/line filters.
-                  </td>
-                </tr>
-              ) : (
-                filteredLogs.map((row, index) => {
-                  const bdTotal = calculateTotalBreakdown(row.breakdown);
-                  const eff = row.stdOutput > 0 ? calculateEfficiency(row.actualOutput, row.stdOutput) : 0;
-                  const bdPct =
-                    row.breakdownPct?.totalBdPct != null && row.breakdownPct.totalBdPct > 0
-                      ? `${row.breakdownPct.totalBdPct}%`
-                      : bdTotal > 0 && (row.totalWorkingMinutes || 1305) > 0
-                      ? `${((bdTotal / (row.totalWorkingMinutes || 1305)) * 100).toFixed(1)}%`
-                      : '0.0%';
-
-                  return (
-                    <tr key={row.id || `${row.date}_${row.shift}_${row.machineId}_${row.runNo || 1}_${index}`} className="hover:bg-slate-50">
-                      <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{row.date}</td>
-                      <td className="px-2.5 py-1.5 text-slate-800 font-sans font-semibold whitespace-nowrap text-[11px]">
-                        {row.line || 'Line 1'}
-                      </td>
-                      <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{row.shift.split(' ')[0]}</td>
-                      <td className="px-3 py-1.5 font-bold font-sans text-slate-900 whitespace-nowrap">
-                        {onOpenMachine ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              onOpenMachine({
-                                machineId: row.machineId,
-                                line: row.line,
-                                date: row.date,
-                                shift: row.shift,
-                                fromTab: 'analytics',
-                              })
-                            }
-                            className="text-left font-bold text-slate-900 hover:text-blue-700 hover:underline cursor-pointer"
-                            title={`Open ${row.machineName} in Operator Kiosk for ${row.date} (${row.shift})`}
-                          >
-                            {row.machineName}
-                          </button>
-                        ) : (
-                          row.machineName
-                        )}
-                      </td>
-                      <td className="px-2 py-1.5 text-center text-slate-700 font-semibold whitespace-nowrap">
-                        #{row.runNo || 1}
-                      </td>
-                      <td className="px-3 py-1.5 font-sans text-slate-700 whitespace-nowrap">
-                        {row.operatorName || '—'}
-                      </td>
-                      <td className="px-3 py-1.5 font-sans text-slate-700 whitespace-nowrap">
-                        {row.itemName || '—'}
-                      </td>
-                      <td className="px-2 py-1.5 text-center text-slate-700 whitespace-nowrap">
-                        {row.cycleTime ? `${row.cycleTime}s` : '—'}
-                      </td>
-                      <td className="px-2 py-1.5 text-center text-slate-600">{row.stdOutput}</td>
-                      <td className="px-2 py-1.5 text-center font-bold text-slate-900">{row.actualOutput}</td>
-                      <td className="px-2 py-1.5 text-center text-rose-700">{row.rework}</td>
-                      <td className="px-2 py-1.5 text-center text-amber-700">{bdTotal}m</td>
-                      <td className="px-2 py-1.5 text-center font-semibold text-amber-800">{bdPct}</td>
-                      <td className="px-2 py-1.5 text-center">
-                        {row.stdOutput > 0 ? (
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                              eff >= 90
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : eff >= 75
-                                ? 'bg-amber-100 text-amber-800'
-                                : 'bg-rose-100 text-rose-800'
-                            }`}
-                          >
-                            {eff}%
-                          </span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td className="px-3 py-1.5 font-sans text-slate-500 text-xs truncate max-w-xs">
-                        {row.remarks || '—'}
                       </td>
                     </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

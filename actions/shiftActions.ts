@@ -1844,14 +1844,18 @@ export async function deleteShiftMaster(shiftId: string) {
 }
 
 export async function getAnalyticsLogs(
-  daysBackOrFilter: number | { startDate?: string; endDate?: string } = 30
+  daysBackOrFilter: number | { startDate?: string; endDate?: string } | string = 30,
+  maybeToDate?: string
 ): Promise<MachineShiftRow[]> {
   const supabase = createAdminClient();
 
   let startDate: string | undefined;
   let endDate: string | undefined;
 
-  if (typeof daysBackOrFilter === "object" && daysBackOrFilter !== null) {
+  if (typeof daysBackOrFilter === "string") {
+    startDate = daysBackOrFilter;
+    endDate = maybeToDate;
+  } else if (typeof daysBackOrFilter === "object" && daysBackOrFilter !== null) {
     startDate = daysBackOrFilter.startDate;
     endDate = daysBackOrFilter.endDate;
   } else {
@@ -1861,25 +1865,39 @@ export async function getAnalyticsLogs(
     startDate = cutoffDate.toISOString().split("T")[0];
   }
 
-  let query = supabase
-    .from("shift_logs")
-    .select("*")
-    .order("log_date", { ascending: false })
-    .order("sr_no", { ascending: true })
-    .order("run_no", { ascending: true })
-    .limit(10000);
+  const PAGE_SIZE = 1000;
+  let offset = 0;
+  const allRows: DbShiftLogRow[] = [];
 
-  if (startDate) {
-    query = query.gte("log_date", startDate);
+  while (true) {
+    let query = supabase
+      .from("shift_logs")
+      .select("*")
+      .order("log_date", { ascending: false })
+      .order("sr_no", { ascending: true })
+      .order("run_no", { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (startDate) {
+      query = query.gte("log_date", startDate);
+    }
+    if (endDate) {
+      query = query.lte("log_date", endDate);
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const chunk = (data as DbShiftLogRow[]) || [];
+    allRows.push(...chunk);
+
+    if (chunk.length < PAGE_SIZE) {
+      break;
+    }
+    offset += PAGE_SIZE;
   }
-  if (endDate) {
-    query = query.lte("log_date", endDate);
-  }
 
-  const { data, error } = await query;
-
-  if (error) throw new Error(error.message);
-  return (data as DbShiftLogRow[]).map(mapDbRowToUiRow);
+  return allRows.map(mapDbRowToUiRow);
 }
 
 /**
