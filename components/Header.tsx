@@ -103,7 +103,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white md:sticky md:top-0 z-40 shadow-sm">
       {/* Primary Top Bar */}
-      <div className={`transition-all ${activeTab === 'sheet' ? 'w-full px-2 sm:px-3' : 'max-w-7xl mx-auto px-3 sm:px-6 lg:px-8'}`}>
+      <div className="w-full px-2 sm:px-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5 py-2.5 lg:py-0 lg:min-h-16 lg:gap-4">
           {/* Zone 1: Wordmark */}
           <div className="flex items-center gap-2.5 sm:gap-3 shrink-0 order-1 min-w-0">
@@ -236,8 +236,8 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Secondary Context Control Bar (Shown on Sheet & Kiosk views) */}
       {(activeTab === 'sheet' || activeTab === 'kiosk') && (
-        <div className={`bg-slate-950 border-t border-slate-800/80 py-2 ${activeTab === 'sheet' ? 'w-full px-2 sm:px-3' : 'px-3 sm:px-6 lg:px-8'}`}>
-          <div className={`${activeTab === 'sheet' ? 'w-full' : 'max-w-7xl mx-auto'} flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 text-xs`}>
+        <div className="bg-slate-950 border-t border-slate-800/80 py-2 w-full px-2 sm:px-3">
+          <div className="w-full flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 text-xs">
             <div className="flex items-center gap-2 sm:gap-3 lg:gap-4 flex-wrap w-full lg:w-auto">
               {/* Date Selector (Whole label & date pill acts as a single button) */}
               <button
@@ -324,8 +324,8 @@ export const Header: React.FC<HeaderProps> = ({
             {/* Save Status / Lock Status Indicator */}
             <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 w-full lg:w-auto">
               {isSaving ? (
-                <div className="flex items-center gap-1.5 text-amber-300 text-xs font-semibold px-2.5 py-1 rounded bg-amber-950/40 border border-amber-500/30">
-                  <div className="w-3 h-3 rounded-full border-2 border-amber-300 border-t-transparent animate-spin" />
+                <div className="flex items-center gap-2 text-amber-300 text-xs sm:text-sm font-bold px-3 py-1.5 rounded bg-amber-950/50 border border-amber-500/40 shadow-xs">
+                  <div className="w-5 h-5 rounded-full border-[2.5px] border-amber-300 border-t-transparent animate-spin shrink-0" />
                   <span>Syncing with Cloud...</span>
                 </div>
               ) : isShiftLocked ? (

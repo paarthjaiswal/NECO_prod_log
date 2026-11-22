@@ -210,32 +210,32 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
 
   return (
     <FeedbackContext.Provider value={contextValue}>
-      {/* Slim fixed top progress bar when loading */}
+      {/* Top progress bar when loading (prominent) */}
       {isLoading && (
         <div
           role="progressbar"
           aria-label={currentLoadingMessage}
-          className="fixed top-0 left-0 right-0 z-50 h-1 bg-amber-500 animate-pulse pointer-events-none"
+          className="fixed top-0 left-0 right-0 z-50 h-2 bg-amber-500 animate-pulse pointer-events-none"
         />
       )}
 
-      {/* Floating loading status pill with manual dismiss */}
+      {/* Floating loading status pill with manual dismiss (~2x bigger) */}
       {isLoading && (
         <aside
           role="status"
           aria-live="polite"
-          className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white border border-slate-700 shadow-xl rounded-full pl-4 pr-2.5 py-2 flex items-center gap-2.5 text-xs font-semibold select-none backdrop-blur-xs transition-all pointer-events-auto"
+          className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-slate-900/95 text-white border-2 border-slate-700 shadow-2xl rounded-full pl-5 pr-3 py-3 flex items-center gap-3.5 text-sm sm:text-base font-bold select-none backdrop-blur-md transition-all pointer-events-auto"
         >
-          <span className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin shrink-0" />
+          <span className="w-8 h-8 border-[3.5px] border-amber-400 border-t-transparent rounded-full animate-spin shrink-0" />
           <span>{currentLoadingMessage}</span>
           <button
             type="button"
             onClick={forceResetLoading}
             title="Dismiss loading indicator"
             aria-label="Dismiss loading indicator"
-            className="ml-1 p-0.5 rounded-full hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+            className="ml-2 p-1.5 rounded-full hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
           >
-            <X className="w-3.5 h-3.5" />
+            <X className="w-5 h-5" />
           </button>
         </aside>
       )}
@@ -246,7 +246,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
           role="alert"
           aria-live="assertive"
           className={`fixed left-1/2 -translate-x-1/2 z-50 max-w-md w-max shadow-xl rounded-lg px-4 py-3 flex items-start gap-3 text-xs transition-all duration-200 ${
-            isLoading ? "top-28" : "top-16"
+            isLoading ? "top-36" : "top-16"
           } ${
             notification.type === "success"
               ? "bg-emerald-950/95 text-emerald-100 border border-emerald-500 shadow-emerald-950/50"

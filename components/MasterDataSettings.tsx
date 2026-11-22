@@ -785,7 +785,7 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
+    <div className="w-full space-y-6">
       {/* Top Banner */}
       <div className="bg-white rounded-lg border border-slate-200 p-4 shadow-2xs flex flex-wrap items-center justify-between gap-4">
         <div>

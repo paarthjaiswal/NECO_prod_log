@@ -141,7 +141,7 @@ export default function UnitHeadLoginPage() {
           >
             {isSubmitting ? (
               <>
-                <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                <Loader2 className="w-6 h-6 animate-spin text-slate-950" />
                 <span>Verifying Credentials...</span>
               </>
             ) : (

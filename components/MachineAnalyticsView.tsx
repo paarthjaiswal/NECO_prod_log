@@ -14,6 +14,7 @@ import {
   Package,
   Wrench,
   RotateCcw,
+  FileSpreadsheet,
 } from "lucide-react";
 import {
   MasterDataState,
@@ -25,6 +26,8 @@ import {
   buildMachineDetailAnalytics,
   MachineDetailAnalytics,
 } from "@/services/analyticsEngine";
+import { exportMachineDetailExcel } from "@/services/excelExport";
+import { useFeedback } from "@/context/FeedbackContext";
 
 interface MachineAnalyticsViewProps {
   machineId: string;
@@ -163,6 +166,35 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
     shiftLogHistory,
   } = analyticsData;
 
+  const { notifySuccess, notifyError } = useFeedback();
+
+  const handleExportMachineExcel = () => {
+    try {
+      if (shiftLogHistory.length === 0 && configuredCapabilities.length === 0) {
+        notifyError(
+          "No Machine Data",
+          `No configured capabilities or shift logs found for machine ${machineMeta.name}.`
+        );
+        return;
+      }
+
+      exportMachineDetailExcel({
+        machineAnalytics: analyticsData,
+        fromDate,
+        toDate,
+        shiftFilter: selectedShift,
+      });
+
+      notifySuccess(
+        "Machine Export Complete",
+        `Exported multi-sheet Excel workbook for ${machineMeta.name} (${fromDate} to ${toDate}).`
+      );
+    } catch (err) {
+      console.error("Machine detail Excel export failed:", err);
+      notifyError("Export Failed", `Failed to generate Excel for machine ${machineMeta.name}.`);
+    }
+  };
+
   // Available shifts for client-side filter pills
   const availableShifts = useMemo(() => {
     const set = new Set<string>();
@@ -185,7 +217,7 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="w-full space-y-4">
       {/* ==================================================================== */}
       {/* 1. TOP HEADER & MACHINE SWITCHER BAR                                 */}
       {/* ==================================================================== */}
@@ -217,8 +249,8 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
           </div>
         </div>
 
-        {/* Right: Machine Switcher Dropdown with Prev / Next */}
-        <div className="flex items-center gap-1.5">
+        {/* Right: Machine Switcher Dropdown with Prev / Next + Export */}
+        <div className="flex items-center gap-1.5 flex-wrap">
           <button
             type="button"
             disabled={!prevMachine}
@@ -262,6 +294,17 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
             title={nextMachine ? `Next Machine: ${nextMachine.name}` : "No next machine"}
           >
             <ChevronRight className="w-4 h-4" />
+          </button>
+
+          <button
+            type="button"
+            disabled={shiftLogHistory.length === 0 && configuredCapabilities.length === 0}
+            onClick={handleExportMachineExcel}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded transition-colors shadow-2xs cursor-pointer ml-1"
+            title="Export machine drilldown multi-sheet Excel report"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>Export Machine Excel</span>
           </button>
         </div>
       </div>

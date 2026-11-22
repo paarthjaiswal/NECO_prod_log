@@ -1505,7 +1505,7 @@ export function OperatorKiosk({
     }
 
     return (
-      <div className="space-y-3">
+      <div className="w-full space-y-3">
         {/* Shift Lock Banner */}
         {isShiftLocked && (
           <div className="bg-rose-950 border border-rose-500/60 rounded-lg p-2.5 sm:p-3 text-rose-100 flex flex-wrap items-center justify-between gap-2 shadow-xs text-xs font-semibold">
@@ -1917,7 +1917,7 @@ export function OperatorKiosk({
       : 0;
 
   return (
-    <div className="space-y-2">
+    <div className="w-full space-y-2">
       {/* Shift Lock Banner (Compact) */}
       {isShiftLocked && (
         <div className="bg-rose-950 border border-rose-500/60 rounded-md p-2 text-rose-100 flex items-center justify-between text-xs">

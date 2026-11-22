@@ -1275,13 +1275,7 @@ export default function DashboardClient({
         shiftLock={shiftLock}
       />
 
-      <main
-        className={
-          activeTab === "sheet"
-            ? "w-full px-[10px] py-3"
-            : "max-w-7xl mx-auto p-4"
-        }
-      >
+      <main className="w-full px-2 sm:px-3 py-3">
         {activeTab === "sheet" && (
           <DailyShiftSheet
             key={`${selectedDate}_${selectedShift}_${selectedLine}`}

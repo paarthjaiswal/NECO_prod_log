@@ -25,7 +25,12 @@ import {
   ShiftType,
   OpenMachineParams,
 } from "@/types";
-import { exportHistoricalToCSV, exportShiftToExcel } from "@/services/excelExport";
+import {
+  exportHistoricalToCSV,
+  exportItemTraceabilityExcel,
+  exportFilteredAnalyticsWorkbook,
+  exportActiveAnalyticsTabExcel,
+} from "@/services/excelExport";
 import { getAnalyticsLogs } from "@/actions/shiftActions";
 import { useFeedback } from "@/context/FeedbackContext";
 import {
@@ -38,6 +43,7 @@ import {
   groupByMachine,
   EnrichedAnalyticsRow,
   OeeMetrics,
+  ProductMatrixItem,
 } from "@/services/analyticsEngine";
 import { MachineAnalyticsView } from "./MachineAnalyticsView";
 
@@ -102,7 +108,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   masterData,
   onOpenMachine,
 }) => {
-  const { runWithFeedback } = useFeedback();
+  const { runWithFeedback, notifySuccess, notifyError } = useFeedback();
 
   // --------------------------------------------------------------------------
   // DATE RANGE CONTROLS & STATE
@@ -444,19 +450,150 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   };
 
   // --------------------------------------------------------------------------
-  // EXPORT HANDLERS
+  // EXPORT HANDLERS & METADATA
   // --------------------------------------------------------------------------
-  const handleExportExcel = () => {
-    const rangeTag = `${fromDate}_to_${toDate}`;
-    exportShiftToExcel(
+  const activeFiltersMeta = useMemo(
+    () => ({
+      fromDate,
+      toDate,
+      line: filterLine !== "all" ? filterLine : undefined,
+      shift: filterShift !== "all" ? filterShift : undefined,
+      product: filterProduct !== "all" ? filterProduct : undefined,
+      machine: filterMachine !== "all" ? filterMachine : undefined,
+      operator: filterOperator !== "all" ? filterOperator : undefined,
+      includeTemp: includeTempMachines,
+      tempOnly,
+      splitOnly: splitRunsOnly,
+    }),
+    [
+      fromDate,
+      toDate,
+      filterLine,
+      filterShift,
+      filterProduct,
+      filterMachine,
+      filterOperator,
+      includeTempMachines,
+      tempOnly,
+      splitRunsOnly,
+    ]
+  );
+
+  const handleExportFilteredWorkbook = useCallback(() => {
+    try {
+      if (filteredRows.length === 0) {
+        notifyError("No Data to Export", "The current filters returned 0 records. Adjust filters to export.");
+        return;
+      }
+      exportFilteredAnalyticsWorkbook({
+        filteredRows,
+        activeFilters: activeFiltersMeta,
+        periodGranularity,
+        masterData,
+      });
+      notifySuccess(
+        "Excel Export Complete",
+        `Exported filtered analytics report (${filteredRows.length} logs, ${fromDate} to ${toDate}).`
+      );
+    } catch (err) {
+      console.error("Filtered Excel export failed:", err);
+      notifyError("Export Failed", "An error occurred while generating the filtered Excel workbook.");
+    }
+  }, [
+    filteredRows,
+    activeFiltersMeta,
+    periodGranularity,
+    masterData,
+    fromDate,
+    toDate,
+    notifySuccess,
+    notifyError,
+  ]);
+
+  const handleExportItemTraceability = useCallback(
+    (e: React.MouseEvent, prod: ProductMatrixItem) => {
+      e.stopPropagation();
+      try {
+        const itemRows = filteredRows.filter((r) => {
+          const rawName = (r.itemName || "").trim().toLowerCase();
+          const rawId = (r.itemId || "").trim().toLowerCase();
+          const target = prod.productKey.toLowerCase();
+          return rawName === target || rawId === target;
+        });
+
+        if (itemRows.length === 0) {
+          notifyError(
+            "No Item Data",
+            `No shift logs found for product "${prod.productName}" with active filters.`
+          );
+          return;
+        }
+
+        exportItemTraceabilityExcel({
+          product: prod,
+          itemRows,
+          activeFilters: activeFiltersMeta,
+        });
+
+        notifySuccess(
+          "Product Traceability Exported",
+          `Exported multi-sheet workbook for ${prod.productName} (${itemRows.length} machine runs).`
+        );
+      } catch (err) {
+        console.error("Item traceability Excel export failed:", err);
+        notifyError("Export Failed", `Failed to generate Excel for ${prod.productName}.`);
+      }
+    },
+    [filteredRows, activeFiltersMeta, notifySuccess, notifyError]
+  );
+
+  const handleExportActiveTab = useCallback(
+    (tabKey: TabType) => {
+      try {
+        if (filteredRows.length === 0) {
+          notifyError("No Data to Export", "The current filters returned 0 records. Adjust filters to export.");
+          return;
+        }
+
+        exportActiveAnalyticsTabExcel({
+          tab: tabKey,
+          filteredRows,
+          activeFilters: activeFiltersMeta,
+          periodGranularity,
+          masterData,
+        });
+
+        const tabNames: Record<TabType, string> = {
+          product: "Product Traceability Matrix",
+          line: "Line Performance Matrix",
+          shift: "Shift Efficiency Matrix",
+          period:
+            periodGranularity === "week"
+              ? "Weekly Manufacturing Matrix"
+              : "Daily Manufacturing Matrix",
+          machine: "Machine Performance Matrix",
+        };
+
+        notifySuccess(
+          "Tab Export Complete",
+          `Exported ${tabNames[tabKey]} (${fromDate} to ${toDate}).`
+        );
+      } catch (err) {
+        console.error("Tab Excel export failed:", err);
+        notifyError("Export Failed", "An error occurred while generating the tab Excel workbook.");
+      }
+    },
+    [
       filteredRows,
-      rangeTag,
-      filterShift !== "all" ? filterShift : "All_Shifts",
-      filterLine !== "all" ? filterLine : "All_Lines",
-      `neco_production_analytics_${rangeTag}.xlsx`,
-      masterData
-    );
-  };
+      activeFiltersMeta,
+      periodGranularity,
+      masterData,
+      fromDate,
+      toDate,
+      notifySuccess,
+      notifyError,
+    ]
+  );
 
   const handleExportCSV = () => {
     const rangeTag = `${fromDate}_to_${toDate}`;
@@ -483,7 +620,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   if (selectedAnalyticsMachineId) {
     return (
-      <div className="space-y-4 max-w-[1600px] mx-auto pb-12">
+      <div className="w-full space-y-4 pb-12">
         <MachineAnalyticsView
           machineId={selectedAnalyticsMachineId}
           onSelectMachine={handleSelectAnalyticsMachine}
@@ -509,7 +646,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   }
 
   return (
-    <div className="space-y-4 max-w-[1600px] mx-auto pb-12">
+    <div className="w-full space-y-4 pb-12">
       {/* ==================================================================== */}
       {/* TOP UNIFIED FILTER BAR (Compact & Responsive)                         */}
       {/* ==================================================================== */}
@@ -584,20 +721,22 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             </button>
 
             {/* Export buttons */}
-            <div className="flex items-center gap-1 pl-2 border-l border-slate-200 ml-1">
+            <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200 ml-1">
               <button
                 type="button"
-                onClick={handleExportExcel}
-                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-xs font-bold flex items-center gap-1 shadow-2xs cursor-pointer"
-                title="Export complete 5-sheet Excel workbook"
+                disabled={filteredRows.length === 0}
+                onClick={handleExportFilteredWorkbook}
+                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-xs font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer transition-colors"
+                title="Export complete filter-aware multi-sheet Excel workbook"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5" />
-                <span>Export .xlsx</span>
+                <span>Export Filtered Excel</span>
               </button>
               <button
                 type="button"
+                disabled={filteredRows.length === 0}
                 onClick={handleExportCSV}
-                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors"
                 title="Export raw shift logs as CSV"
               >
                 <Download className="w-3.5 h-3.5" />
@@ -1039,15 +1178,27 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   Detailed view of every Line, Machine, and Operation used to manufacture each component.
                 </p>
               </div>
-              <div className="relative w-72">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-                <input
-                  type="text"
-                  placeholder="Search Product Name or Code..."
-                  value={productSearch}
-                  onChange={(e) => setProductSearch(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none"
-                />
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="relative w-64 sm:w-72">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="Search Product Name or Code..."
+                    value={productSearch}
+                    onChange={(e) => setProductSearch(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={productMatrix.length === 0}
+                  onClick={() => handleExportActiveTab("product")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                  title="Export Product Traceability Matrix to Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Export Product Matrix</span>
+                </button>
               </div>
             </div>
 
@@ -1127,13 +1278,38 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                               {prod.metrics.oeePct}%
                             </span>
                           </div>
+                          <button
+                            type="button"
+                            onClick={(e) => handleExportItemTraceability(e, prod)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-white bg-emerald-700 hover:bg-emerald-600 rounded shadow-2xs transition-colors cursor-pointer ml-1"
+                            title={`Export multi-sheet Excel workbook for ${prod.productName}`}
+                          >
+                            <FileSpreadsheet className="w-3 h-3" />
+                            <span>Export Excel</span>
+                          </button>
                         </div>
                       </div>
 
                       {/* Product Expanded Line & Machine Matrix Table */}
                       {isExpanded && (
-                        <div className="border-t border-slate-200 overflow-x-auto">
-                          <table className="w-full text-xs text-left">
+                        <div className="border-t border-slate-200">
+                          <div className="bg-slate-100/80 px-3 py-1.5 border-b border-slate-200 flex items-center justify-between text-xs font-semibold text-slate-700">
+                            <span className="flex items-center gap-1.5">
+                              <Cpu className="w-3.5 h-3.5 text-blue-600" />
+                              <span>Machine Allocations ({prod.matrix.length})</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => handleExportItemTraceability(e, prod)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 rounded transition-colors cursor-pointer"
+                              title={`Export multi-sheet Excel workbook for ${prod.productName}`}
+                            >
+                              <FileSpreadsheet className="w-3 h-3" />
+                              <span>Export Item Excel</span>
+                            </button>
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs text-left">
                             <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
                               <tr>
                                 <th className="px-3 py-2">Line</th>
@@ -1220,7 +1396,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                             </tbody>
                           </table>
                         </div>
-                      )}
+                      </div>
+                    )}
                     </div>
                   );
                 })}
@@ -1232,11 +1409,23 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         {/* TAB 2: BY LINE */}
         {activeTab === "line" && (
           <div className="p-4 space-y-4">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">Production Line Performance & OEE Comparison</h3>
-              <p className="text-xs text-slate-500">
-                Line-by-line efficiency, downtime, and item breakdown across the selected period.
-              </p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Production Line Performance & OEE Comparison</h3>
+                <p className="text-xs text-slate-500">
+                  Line-by-line efficiency, downtime, and item breakdown across the selected period.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={lineRollups.length === 0}
+                onClick={() => handleExportActiveTab("line")}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                title="Export Line Performance Matrix to Excel"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Export Line Matrix</span>
+              </button>
             </div>
 
             <div className="overflow-x-auto border border-slate-200 rounded-lg">
@@ -1293,11 +1482,23 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         {/* TAB 3: BY SHIFT */}
         {activeTab === "shift" && (
           <div className="p-4 space-y-4">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">Shift-Wise Efficiency & OEE Comparison</h3>
-              <p className="text-xs text-slate-500">
-                Analysis across Shift A, Shift B, and Shift C to identify variance between operational shifts.
-              </p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Shift-Wise Efficiency & OEE Comparison</h3>
+                <p className="text-xs text-slate-500">
+                  Analysis across Shift A, Shift B, and Shift C to identify variance between operational shifts.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={shiftRollups.length === 0}
+                onClick={() => handleExportActiveTab("shift")}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                title="Export Shift Efficiency Matrix to Excel"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Export Shift Matrix</span>
+              </button>
             </div>
 
             <div className="overflow-x-auto border border-slate-200 rounded-lg">
@@ -1359,28 +1560,40 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   Track day-by-day or weekly manufacturing output and OEE progression.
                 </p>
               </div>
-              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded">
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex items-center gap-1 bg-slate-100 p-1 rounded">
+                  <button
+                    type="button"
+                    onClick={() => setPeriodGranularity("day")}
+                    className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
+                      periodGranularity === "day"
+                        ? "bg-white text-slate-900 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    Daily View
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPeriodGranularity("week")}
+                    className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
+                      periodGranularity === "week"
+                        ? "bg-white text-slate-900 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    Weekly View
+                  </button>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setPeriodGranularity("day")}
-                  className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
-                    periodGranularity === "day"
-                      ? "bg-white text-slate-900 shadow-2xs"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
+                  disabled={periodRollups.length === 0}
+                  onClick={() => handleExportActiveTab("period")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                  title={`Export ${periodGranularity === "week" ? "Weekly" : "Daily"} Manufacturing Matrix to Excel`}
                 >
-                  Daily View
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPeriodGranularity("week")}
-                  className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
-                    periodGranularity === "week"
-                      ? "bg-white text-slate-900 shadow-2xs"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  Weekly View
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Export {periodGranularity === "week" ? "Weekly" : "Daily"} Matrix</span>
                 </button>
               </div>
             </div>
@@ -1466,30 +1679,42 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </p>
               </div>
 
-              {/* Sort Controls */}
-              <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                <span className="font-semibold text-slate-500">Sort By:</span>
-                <select
-                  value={machineSortKey}
-                  onChange={(e) =>
-                    setMachineSortKey(
-                      e.target.value as "oee" | "actual" | "downtime" | "name"
-                    )
-                  }
-                  className="bg-slate-50 border border-slate-200 rounded px-2 py-1 font-semibold text-slate-800"
-                >
-                  <option value="oee">OEE %</option>
-                  <option value="actual">Actual Output</option>
-                  <option value="downtime">Downtime Minutes</option>
-                  <option value="name">Machine Name</option>
-                </select>
+              {/* Sort Controls & Export */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                  <span className="font-semibold text-slate-500">Sort By:</span>
+                  <select
+                    value={machineSortKey}
+                    onChange={(e) =>
+                      setMachineSortKey(
+                        e.target.value as "oee" | "actual" | "downtime" | "name"
+                      )
+                    }
+                    className="bg-slate-50 border border-slate-200 rounded px-2 py-1 font-semibold text-slate-800"
+                  >
+                    <option value="oee">OEE %</option>
+                    <option value="actual">Actual Output</option>
+                    <option value="downtime">Downtime Minutes</option>
+                    <option value="name">Machine Name</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setMachineSortOrder(machineSortOrder === "asc" ? "desc" : "asc")}
+                    className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer"
+                    title="Toggle sort direction"
+                  >
+                    <ArrowUpDown className="w-3.5 h-3.5" />
+                  </button>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setMachineSortOrder(machineSortOrder === "asc" ? "desc" : "asc")}
-                  className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer"
-                  title="Toggle sort direction"
+                  disabled={machineRollups.length === 0}
+                  onClick={() => handleExportActiveTab("machine")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                  title="Export Machine Performance Matrix to Excel"
                 >
-                  <ArrowUpDown className="w-3.5 h-3.5" />
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Export Machine Matrix</span>
                 </button>
               </div>
             </div>
