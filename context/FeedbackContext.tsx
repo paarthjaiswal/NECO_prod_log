@@ -6,6 +6,8 @@ import React, {
   useState,
   useRef,
   useCallback,
+  useMemo,
+  useEffect,
   ReactNode,
 } from "react";
 import { CheckCircle2, AlertTriangle, X } from "lucide-react";
@@ -29,8 +31,8 @@ export interface FeedbackContextValue {
   pendingCount: number;
   loadingMessage: string;
   notification: FeedbackNotification | null;
-  startLoading: (message?: string) => void;
-  stopLoading: () => void;
+  startLoading: (message?: string) => string;
+  stopLoading: (taskId?: string) => void;
   notifySuccess: (title: string, detail?: string) => void;
   notifyError: (title: string, detail?: string) => void;
   clearNotification: () => void;
@@ -40,11 +42,15 @@ export interface FeedbackContextValue {
   ) => Promise<T | undefined>;
 }
 
+interface ActiveTask {
+  message: string;
+  timestamp: number;
+}
+
 const FeedbackContext = createContext<FeedbackContextValue | null>(null);
 
 export function FeedbackProvider({ children }: { children: ReactNode }) {
-  const [pendingCount, setPendingCount] = useState(0);
-  const [loadingMessage, setLoadingMessage] = useState("Syncing with server...");
+  const [tasks, setTasks] = useState<Map<string, ActiveTask>>(() => new Map());
   const [notification, setNotification] = useState<FeedbackNotification | null>(
     null
   );
@@ -59,14 +65,56 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const startLoading = useCallback((message?: string) => {
-    if (message) setLoadingMessage(message);
-    setPendingCount((prev) => prev + 1);
+  const startLoading = useCallback((message?: string): string => {
+    const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setTasks((prev) => {
+      const next = new Map(prev);
+      next.set(taskId, {
+        message: message || "Syncing with server...",
+        timestamp: Date.now(),
+      });
+      return next;
+    });
+    return taskId;
   }, []);
 
-  const stopLoading = useCallback(() => {
-    setPendingCount((prev) => Math.max(0, prev - 1));
+  const stopLoading = useCallback((taskId?: string) => {
+    setTasks((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Map(prev);
+      if (taskId) {
+        next.delete(taskId);
+      } else {
+        const firstKey = next.keys().next().value;
+        if (firstKey) next.delete(firstKey);
+      }
+      return next;
+    });
   }, []);
+
+  const forceResetLoading = useCallback(() => {
+    setTasks(new Map());
+  }, []);
+
+  // Watchdog cleanup: clear stale tasks running longer than 20 seconds
+  useEffect(() => {
+    if (tasks.size === 0) return;
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setTasks((prev) => {
+        let hasExpired = false;
+        const next = new Map(prev);
+        for (const [id, task] of next.entries()) {
+          if (now - task.timestamp > 20_000) {
+            next.delete(id);
+            hasExpired = true;
+          }
+        }
+        return hasExpired ? next : prev;
+      });
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [tasks.size]);
 
   const clearNotification = useCallback(() => {
     clearTimer();
@@ -106,7 +154,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       task: () => Promise<T>,
       options?: RunWithFeedbackOptions
     ): Promise<T | undefined> => {
-      startLoading(options?.loadingMessage);
+      const taskId = startLoading(options?.loadingMessage);
       try {
         const result = await task();
         if (options?.successTitle) {
@@ -121,46 +169,74 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
         }
         return undefined;
       } finally {
-        stopLoading();
+        stopLoading(taskId);
       }
     },
     [startLoading, stopLoading, notifySuccess, notifyError]
   );
 
-  const isLoading = pendingCount > 0;
+  const currentLoadingMessage = useMemo(() => {
+    if (tasks.size === 0) return "Syncing with server...";
+    const lastTask = Array.from(tasks.values()).pop();
+    return lastTask?.message || "Syncing with server...";
+  }, [tasks]);
+
+  const isLoading = tasks.size > 0;
+
+  const contextValue = useMemo<FeedbackContextValue>(
+    () => ({
+      pendingCount: tasks.size,
+      loadingMessage: currentLoadingMessage,
+      notification,
+      startLoading,
+      stopLoading,
+      notifySuccess,
+      notifyError,
+      clearNotification,
+      runWithFeedback,
+    }),
+    [
+      tasks.size,
+      currentLoadingMessage,
+      notification,
+      startLoading,
+      stopLoading,
+      notifySuccess,
+      notifyError,
+      clearNotification,
+      runWithFeedback,
+    ]
+  );
 
   return (
-    <FeedbackContext.Provider
-      value={{
-        pendingCount,
-        loadingMessage,
-        notification,
-        startLoading,
-        stopLoading,
-        notifySuccess,
-        notifyError,
-        clearNotification,
-        runWithFeedback,
-      }}
-    >
+    <FeedbackContext.Provider value={contextValue}>
       {/* Slim fixed top progress bar when loading */}
       {isLoading && (
         <div
           role="progressbar"
-          aria-label={loadingMessage}
+          aria-label={currentLoadingMessage}
           className="fixed top-0 left-0 right-0 z-50 h-1 bg-amber-500 animate-pulse pointer-events-none"
         />
       )}
 
-      {/* Floating loading status pill */}
+      {/* Floating loading status pill with manual dismiss */}
       {isLoading && (
         <aside
           role="status"
           aria-live="polite"
-          className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white border border-slate-700 shadow-lg rounded-full px-4 py-2 flex items-center gap-2.5 text-xs font-semibold pointer-events-none select-none backdrop-blur-xs"
+          className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white border border-slate-700 shadow-xl rounded-full pl-4 pr-2.5 py-2 flex items-center gap-2.5 text-xs font-semibold select-none backdrop-blur-xs transition-all pointer-events-auto"
         >
           <span className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin shrink-0" />
-          <span>{loadingMessage}</span>
+          <span>{currentLoadingMessage}</span>
+          <button
+            type="button"
+            onClick={forceResetLoading}
+            title="Dismiss loading indicator"
+            aria-label="Dismiss loading indicator"
+            className="ml-1 p-0.5 rounded-full hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </aside>
       )}
 

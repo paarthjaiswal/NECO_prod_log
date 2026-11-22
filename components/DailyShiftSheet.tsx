@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   AlertTriangle,
   RotateCcw,
-  Sparkles,
   ExternalLink,
   Info,
   Zap,
@@ -442,9 +441,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         machineCode: baseRow.machineCode,
         machineName: baseRow.machineName,
         operatorName: baseRow.operatorName || "",
-        itemId: baseRow.itemId || "",
-        itemName: baseRow.itemName || "",
-        operation: baseRow.operation || "",
+        itemId: "",
+        itemName: "",
+        operation: "",
         cycleTime: 0,
         totalWorkingMinutes: rowShiftMins,
         shiftWorkingMinutes: rowShiftMins,
@@ -1222,39 +1221,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     }
   };
 
-  // Quick fill remaining unassigned machines with sensible defaults
-  const handleQuickFillEmpty = () => {
-    if (isShiftLocked) return;
-    if (!operators.length || !items.length) return;
-    patchRows((row, idx) => {
-      if (row.operatorName && row.itemId) return null;
-      const op = operators[idx % operators.length];
-      const it = items[idx % items.length];
-      const target = resolveMachineItemTarget(
-        row.machineId,
-        it.id,
-        items,
-        cycleTimes,
-        undefined,
-        shiftWorkingMinutes,
-        row.machineName
-      );
-      return {
-        operatorName: op,
-        itemId: it.id,
-        itemName: target.itemName,
-        operation: target.operation,
-        cycleTime: target.cycleTime,
-        totalWorkingMinutes: shiftWorkingMinutes,
-        stdOutput: target.stdOutput,
-        actualOutput: Math.max(0, target.stdOutput - 4),
-        rework: 1,
-        breakdown: { noDisc: 0, change: 10, power: 0, operator: 0, machineBreakdown: 0, fixProgSettings: 0, miscellaneous: 0 },
-        remarks: 'Standard production cycle logged',
-      };
-    });
-  };
-
   // Reset current shift sheet to blank rows
   const handleClearSheet = () => {
     if (isShiftLocked) return;
@@ -1570,17 +1536,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <span className="hidden sm:inline">+ Item</span>
               </button>
             </div>
-          )}
-
-          {!isShiftLocked && (
-            <button
-              onClick={handleQuickFillEmpty}
-              className="px-2.5 py-1.5 text-xs text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded font-medium flex items-center gap-1.5 transition-colors"
-              title="Auto-fill empty machine rows with standard sample jobs"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-              <span className="hidden sm:inline">Fill Remaining</span>
-            </button>
           )}
 
           {!isShiftLocked && (

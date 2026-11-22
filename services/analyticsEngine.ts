@@ -9,8 +9,14 @@
  * Ultra-lightweight with ZERO external libraries.
  */
 
-import { MachineShiftRow } from "@/types";
-import { calculateTotalBreakdown } from "@/services/storageService";
+import {
+  MachineShiftRow,
+  MachineMaster,
+  ItemMaster,
+  MachineItemCycleTime,
+  BreakdownMinutes,
+} from "@/types";
+import { calculateTotalBreakdown, isShiftRowEmpty } from "@/services/storageService";
 
 export interface EnrichedAnalyticsRow extends MachineShiftRow {
   allocatedPlannedMinutes: number;
@@ -42,7 +48,6 @@ export interface OeeMetrics {
   totalRework: number;
   goodOutput: number;
   availabilityPct: number;
-  performancePct: number;
   qualityPct: number;
   oeePct: number;
   planAchievementPct: number;
@@ -132,15 +137,7 @@ export interface MachineRollupItem {
  * Filter out completely empty/unlogged rows (e.g. idle machines with zero targets and zero activity).
  */
 export function isUnloggedEmptyRow(row: MachineShiftRow): boolean {
-  const actual = Number(row.actualOutput) || 0;
-  const std = Number(row.stdOutput) || 0;
-  const rework = Number(row.rework) || 0;
-  const bd = calculateTotalBreakdown(row.breakdown);
-  const itemId = (row.itemId || "").trim();
-  const itemName = (row.itemName || "").trim();
-  const operatorName = (row.operatorName || "").trim();
-
-  return actual === 0 && std === 0 && rework === 0 && bd === 0 && !itemId && !itemName && !operatorName;
+  return isShiftRowEmpty(row);
 }
 
 /**
@@ -234,6 +231,7 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
   let plannedMinutes = 0;
   let downtimeMinutes = 0;
   let idealRunMinutes = 0;
+  let goodIdealMinutes = 0;
   let totalActual = 0;
   let totalStd = 0;
   let totalRework = 0;
@@ -257,7 +255,10 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
     totalActual += Number(r.actualOutput) || 0;
     totalStd += Number(r.stdOutput) || 0;
     totalRework += Number(r.rework) || 0;
-    goodOutput += Number(r.goodOutput) || 0;
+    const rGood = Number(r.goodOutput) || 0;
+    goodOutput += rGood;
+    const ct = Number(r.cycleTime) || 0;
+    goodIdealMinutes += rGood * ct;
 
     const b = r.breakdown;
     if (b) {
@@ -278,14 +279,14 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
   downtimeMinutes = Number(downtimeMinutes.toFixed(2));
   const operatingMinutes = Number(Math.max(0, plannedMinutes - downtimeMinutes).toFixed(2));
   idealRunMinutes = Number(idealRunMinutes.toFixed(2));
+  goodIdealMinutes = Number(goodIdealMinutes.toFixed(2));
 
   const availabilityPct =
     plannedMinutes > 0 ? Number(((operatingMinutes / plannedMinutes) * 100).toFixed(2)) : 0;
-  const performancePct =
-    operatingMinutes > 0 ? Number(((idealRunMinutes / operatingMinutes) * 100).toFixed(2)) : 0;
   const qualityPct =
     totalActual > 0 ? Number(((goodOutput / totalActual) * 100).toFixed(2)) : 0;
-  const oeePct = Number(((availabilityPct * performancePct * qualityPct) / 10000).toFixed(2));
+  const oeePct =
+    plannedMinutes > 0 ? Number(((goodIdealMinutes / plannedMinutes) * 100).toFixed(2)) : 0;
   const planAchievementPct =
     totalStd > 0 ? Number(((totalActual / totalStd) * 100).toFixed(2)) : 0;
 
@@ -299,7 +300,6 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
     totalRework,
     goodOutput,
     availabilityPct,
-    performancePct,
     qualityPct,
     oeePct,
     planAchievementPct,
@@ -329,10 +329,14 @@ export function buildProductLineMachineMatrix(
   const productMap = new Map<string, EnrichedAnalyticsRow[]>();
 
   for (const r of enrichedRows) {
-    const rawName = (r.itemName || "").trim();
-    const rawId = (r.itemId || "").trim();
-    if (!rawName && !rawId) continue;
-    const key = (rawName || rawId).toLowerCase();
+    const rawName = (r.itemName ?? "").trim();
+    const rawId = (r.itemId ?? "").trim();
+    if (rawName.length === 0 && rawId.length === 0) continue;
+    const act = Number(r.actualOutput) || 0;
+    const rew = Number(r.rework) || 0;
+    if (act <= 0 && rew <= 0) continue;
+
+    const key = (rawName.length > 0 ? rawName : rawId).toLowerCase();
 
     const list = productMap.get(key) || [];
     list.push(r);
@@ -343,8 +347,10 @@ export function buildProductLineMachineMatrix(
 
   for (const [key, rows] of productMap.entries()) {
     const sample = rows[0];
-    const productName = sample.itemName || sample.itemId || key;
-    const productCode = sample.itemId || "";
+    const rawSampleName = (sample.itemName ?? "").trim();
+    const rawSampleId = (sample.itemId ?? "").trim();
+    const productName = rawSampleName.length > 0 ? rawSampleName : (rawSampleId.length > 0 ? rawSampleId : key);
+    const productCode = rawSampleId;
     const lines = Array.from(new Set(rows.map((r) => r.line || "Line 1"))).sort();
     const overallMetrics = calculateOeeMetrics(rows);
 
@@ -362,6 +368,15 @@ export function buildProductLineMachineMatrix(
 
     const matrix: ProductMatrixRow[] = [];
     for (const subRows of subMap.values()) {
+      const std = subRows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
+      const act = subRows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
+      const rew = subRows.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
+      const good = subRows.reduce((acc, r) => acc + (r.goodOutput || 0), 0);
+      const bd = subRows.reduce((acc, r) => acc + (r.totalBreakdownMinutes || 0), 0);
+
+      // Only show machines under a product's Product Traceability & Machine Matrix if they actually produced/ran that product
+      if (act <= 0 && rew <= 0) continue;
+
       const s = subRows[0];
       const line = s.line || "Line 1";
       const machineId = s.machineId || "";
@@ -370,12 +385,6 @@ export function buildProductLineMachineMatrix(
       const isTemp = subRows.some((r) => r.isTempMachine);
       const splitCount = subRows.filter((r) => r.isSplitRun).length;
       const runNos = Array.from(new Set(subRows.map((r) => r.runNo || 1))).sort((a, b) => a - b);
-
-      const std = subRows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
-      const act = subRows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
-      const rew = subRows.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
-      const good = subRows.reduce((acc, r) => acc + (r.goodOutput || 0), 0);
-      const bd = subRows.reduce((acc, r) => acc + (r.totalBreakdownMinutes || 0), 0);
 
       // Latest contextual date & shift
       const sortedByDate = [...subRows].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
@@ -400,6 +409,8 @@ export function buildProductLineMachineMatrix(
         latestLine: latest?.line || line,
       });
     }
+
+    if (matrix.length === 0) continue;
 
     // Sort matrix by Line then Machine
     matrix.sort((a, b) => {
@@ -441,12 +452,18 @@ export function groupByLine(enrichedRows: EnrichedAnalyticsRow[]): LineRollupIte
   for (const [line, rows] of lineMap.entries()) {
     const metrics = calculateOeeMetrics(rows);
 
-    // Summarize items
+    // Summarize items (only products actually produced or reworked)
     const itemMap = new Map<string, ItemSummary>();
     for (const r of rows) {
-      const name = r.itemName || r.itemId || "Unknown";
-      const id = r.itemId || name;
-      const key = `${id}__${name}`;
+      const act = Number(r.actualOutput) || 0;
+      const rew = Number(r.rework) || 0;
+      if (act <= 0 && rew <= 0) continue;
+      const rawName = (r.itemName ?? "").trim();
+      const rawId = (r.itemId ?? "").trim();
+      if (rawName.length === 0 && rawId.length === 0) continue;
+      const name = rawName.length > 0 ? rawName : rawId;
+      const id = rawId.length > 0 ? rawId : name;
+      const key = `${id.toLowerCase()}__${name.toLowerCase()}`;
       const existing = itemMap.get(key) || {
         itemId: id,
         itemName: name,
@@ -455,9 +472,9 @@ export function groupByLine(enrichedRows: EnrichedAnalyticsRow[]): LineRollupIte
         rework: 0,
         goodOutput: 0,
       };
-      existing.actualOutput += Number(r.actualOutput) || 0;
+      existing.actualOutput += act;
       existing.stdOutput += Number(r.stdOutput) || 0;
-      existing.rework += Number(r.rework) || 0;
+      existing.rework += rew;
       existing.goodOutput += Number(r.goodOutput) || 0;
       itemMap.set(key, existing);
     }
@@ -506,9 +523,15 @@ export function groupByShift(enrichedRows: EnrichedAnalyticsRow[]): ShiftRollupI
 
     const itemMap = new Map<string, ItemSummary>();
     for (const r of rows) {
-      const name = r.itemName || r.itemId || "Unknown";
-      const id = r.itemId || name;
-      const key = `${id}__${name}`;
+      const act = Number(r.actualOutput) || 0;
+      const rew = Number(r.rework) || 0;
+      if (act <= 0 && rew <= 0) continue;
+      const rawName = (r.itemName ?? "").trim();
+      const rawId = (r.itemId ?? "").trim();
+      if (rawName.length === 0 && rawId.length === 0) continue;
+      const name = rawName.length > 0 ? rawName : rawId;
+      const id = rawId.length > 0 ? rawId : name;
+      const key = `${id.toLowerCase()}__${name.toLowerCase()}`;
       const existing = itemMap.get(key) || {
         itemId: id,
         itemName: name,
@@ -517,9 +540,9 @@ export function groupByShift(enrichedRows: EnrichedAnalyticsRow[]): ShiftRollupI
         rework: 0,
         goodOutput: 0,
       };
-      existing.actualOutput += Number(r.actualOutput) || 0;
+      existing.actualOutput += act;
       existing.stdOutput += Number(r.stdOutput) || 0;
-      existing.rework += Number(r.rework) || 0;
+      existing.rework += rew;
       existing.goodOutput += Number(r.goodOutput) || 0;
       itemMap.set(key, existing);
     }
@@ -624,9 +647,15 @@ export function groupByPeriod(
 
     const itemMap = new Map<string, ItemSummary>();
     for (const r of rows) {
-      const name = r.itemName || r.itemId || "Unknown";
-      const id = r.itemId || name;
-      const key = `${id}__${name}`;
+      const act = Number(r.actualOutput) || 0;
+      const rew = Number(r.rework) || 0;
+      if (act <= 0 && rew <= 0) continue;
+      const rawName = (r.itemName ?? "").trim();
+      const rawId = (r.itemId ?? "").trim();
+      if (rawName.length === 0 && rawId.length === 0) continue;
+      const name = rawName.length > 0 ? rawName : rawId;
+      const id = rawId.length > 0 ? rawId : name;
+      const key = `${id.toLowerCase()}__${name.toLowerCase()}`;
       const existing = itemMap.get(key) || {
         itemId: id,
         itemName: name,
@@ -635,9 +664,9 @@ export function groupByPeriod(
         rework: 0,
         goodOutput: 0,
       };
-      existing.actualOutput += Number(r.actualOutput) || 0;
+      existing.actualOutput += act;
       existing.stdOutput += Number(r.stdOutput) || 0;
-      existing.rework += Number(r.rework) || 0;
+      existing.rework += rew;
       existing.goodOutput += Number(r.goodOutput) || 0;
       itemMap.set(key, existing);
     }
@@ -688,9 +717,15 @@ export function groupByMachine(enrichedRows: EnrichedAnalyticsRow[]): MachineRol
 
     const itemMap = new Map<string, ItemSummary>();
     for (const r of rows) {
-      const name = r.itemName || r.itemId || "Unknown";
-      const id = r.itemId || name;
-      const key = `${id}__${name}`;
+      const act = Number(r.actualOutput) || 0;
+      const rew = Number(r.rework) || 0;
+      if (act <= 0 && rew <= 0) continue;
+      const rawName = (r.itemName ?? "").trim();
+      const rawId = (r.itemId ?? "").trim();
+      if (rawName.length === 0 && rawId.length === 0) continue;
+      const name = rawName.length > 0 ? rawName : rawId;
+      const id = rawId.length > 0 ? rawId : name;
+      const key = `${id.toLowerCase()}__${name.toLowerCase()}`;
       const existing = itemMap.get(key) || {
         itemId: id,
         itemName: name,
@@ -699,9 +734,9 @@ export function groupByMachine(enrichedRows: EnrichedAnalyticsRow[]): MachineRol
         rework: 0,
         goodOutput: 0,
       };
-      existing.actualOutput += Number(r.actualOutput) || 0;
+      existing.actualOutput += act;
       existing.stdOutput += Number(r.stdOutput) || 0;
-      existing.rework += Number(r.rework) || 0;
+      existing.rework += rew;
       existing.goodOutput += Number(r.goodOutput) || 0;
       itemMap.set(key, existing);
     }
@@ -726,4 +761,474 @@ export function groupByMachine(enrichedRows: EnrichedAnalyticsRow[]): MachineRol
   }
 
   return result;
+}
+
+// ============================================================================
+// STEP 4: MACHINE DETAIL ANALYTICS BUILDER (MachineAnalyticsView)
+// ============================================================================
+
+export interface MachineConfiguredCapability {
+  itemId: string;
+  itemCode: string;
+  itemName: string;
+  operation: string;
+  cycleTime: number;
+  ranInPeriod: boolean;
+  periodActualOutput: number;
+  periodRunsCount: number;
+}
+
+export interface MachineOperationPerformed {
+  itemCode: string;
+  itemName: string;
+  operation: string;
+  runsCount: number;
+  avgCycleTime: number;
+  stdOutput: number;
+  actualOutput: number;
+  rework: number;
+  goodOutput: number;
+  downtimeMinutes: number;
+  availabilityPct: number;
+  qualityPct: number;
+  oeePct: number;
+}
+
+export interface MachineOperatorBreakdown {
+  operatorName: string;
+  shiftsCount: number;
+  runsCount: number;
+  itemsRun: string[];
+  stdOutput: number;
+  actualOutput: number;
+  rework: number;
+  goodOutput: number;
+  downtimeMinutes: number;
+  planAchievementPct: number;
+  oeePct: number;
+}
+
+export interface MachineDailySummary {
+  rowKey: string;
+  date: string;
+  itemId: string;
+  itemCode: string;
+  itemName: string;
+  operation: string;
+  isDowntimeOnly: boolean;
+  shiftsRun: string[];
+  runsCount: number;
+  avgCycleTime: number;
+  stdOutput: number;
+  actualOutput: number;
+  rework: number;
+  goodOutput: number;
+  downtimeMinutes: number;
+  planAchievementPct: number;
+  availabilityPct: number;
+  qualityPct: number;
+  oeePct: number;
+}
+
+export interface MachineShiftLogHistoryItem {
+  id: string;
+  date: string;
+  shift: string;
+  line: string;
+  runNo: number;
+  isSplitRun: boolean;
+  operatorName: string;
+  itemName: string;
+  operation: string;
+  cycleTime: number;
+  stdOutput: number;
+  actualOutput: number;
+  rework: number;
+  totalBdMinutes: number;
+  breakdown: BreakdownMinutes;
+  oeePct: number;
+  remarks: string;
+}
+
+export interface MachineDetailAnalytics {
+  machineMeta: {
+    id: string;
+    name: string;
+    line: string;
+    isTempMachine: boolean;
+  };
+  overallMetrics: OeeMetrics;
+  configuredCapabilities: MachineConfiguredCapability[];
+  operationsPerformed: MachineOperationPerformed[];
+  operatorBreakdown: MachineOperatorBreakdown[];
+  dailySummary: MachineDailySummary[];
+  shiftLogHistory: MachineShiftLogHistoryItem[];
+}
+
+export function buildMachineDetailAnalytics(params: {
+  machineId: string;
+  machineName?: string;
+  enrichedRows: EnrichedAnalyticsRow[];
+  masterData: {
+    machines: MachineMaster[];
+    items: ItemMaster[];
+    cycleTimes: MachineItemCycleTime[];
+  };
+  shiftFilter?: string;
+}): MachineDetailAnalytics {
+  const normId = (params.machineId || "").trim();
+  const normName = (params.machineName || "").trim().toLowerCase();
+
+  // 1. Filter rows for this machine
+  let machineRows = params.enrichedRows.filter((r) => {
+    if (normId && r.machineId === normId) return true;
+    if (normName && !r.machineId && (r.machineName || "").trim().toLowerCase() === normName) {
+      return true;
+    }
+    return false;
+  });
+
+  if (params.shiftFilter && params.shiftFilter.toUpperCase() !== "ALL") {
+    const sf = params.shiftFilter.trim().toLowerCase();
+    machineRows = machineRows.filter((r) => (r.shift || "").trim().toLowerCase() === sf);
+  }
+
+  // 2. Machine Meta
+  const found = params.masterData.machines.find(
+    (m) =>
+      (normId && m.id === normId) ||
+      (normName && (m.name || "").trim().toLowerCase() === normName)
+  );
+
+  const machineMeta = {
+    id: found?.id || normId || machineRows[0]?.machineId || "Unknown",
+    name: found?.name || params.machineName || machineRows[0]?.machineName || "Unknown Machine",
+    line: found?.line || machineRows[0]?.line || "Line 1",
+    isTempMachine: Boolean(
+      found?.id?.startsWith("temp_") ||
+        machineRows[0]?.isTempMachine ||
+        normId.startsWith("temp_")
+    ),
+  };
+
+  // 3. Overall Metrics
+  const overallMetrics = calculateOeeMetrics(machineRows);
+
+  // 4. Configured Capabilities
+  const itemMap = new Map<string, ItemMaster>();
+  for (const it of params.masterData.items) {
+    if (it.id) itemMap.set(it.id.trim().toLowerCase(), it);
+    if (it.itemCode) itemMap.set(it.itemCode.trim().toLowerCase(), it);
+    if (it.itemName) itemMap.set(it.itemName.trim().toLowerCase(), it);
+  }
+
+  const rawCts = (params.masterData.cycleTimes || []).filter(
+    (ct) => ct.machineId === normId || (found && ct.machineId === found.id)
+  );
+
+  const configuredCapabilities: MachineConfiguredCapability[] = rawCts.map((ct) => {
+    const rawCtItemId = (ct.itemId || "").trim().toLowerCase();
+    const it = itemMap.get(rawCtItemId);
+    const itemCode = it?.itemCode || "";
+    const itemName = it?.itemName || ct.itemId;
+    const op = (ct.operation || "").trim();
+    const cycleTime = Number(ct.cycleTime) || 0;
+
+    // Check performance in current period
+    const matchingRows = machineRows.filter((r) => {
+      const matchItem =
+        (r.itemId && r.itemId.trim().toLowerCase() === rawCtItemId) ||
+        (it && r.itemName && r.itemName.trim().toLowerCase() === it.itemName.trim().toLowerCase());
+      const matchOp =
+        !op || !r.operation || r.operation.trim().toLowerCase() === op.toLowerCase();
+      return matchItem && matchOp;
+    });
+
+    const periodActualOutput = matchingRows.reduce(
+      (sum, r) => sum + (Number(r.actualOutput) || 0),
+      0
+    );
+    const periodRunsCount = matchingRows.length;
+    const ranInPeriod = periodRunsCount > 0 && periodActualOutput > 0;
+
+    return {
+      itemId: ct.itemId,
+      itemCode,
+      itemName,
+      operation: op,
+      cycleTime,
+      ranInPeriod,
+      periodActualOutput,
+      periodRunsCount,
+    };
+  });
+
+  configuredCapabilities.sort((a, b) => {
+    if (a.ranInPeriod !== b.ranInPeriod) return a.ranInPeriod ? -1 : 1;
+    return a.itemName.localeCompare(b.itemName);
+  });
+
+  // 5. Operations Performed
+  const activeOpRows = machineRows.filter((r) => {
+    const hasItem = Boolean((r.itemId || "").trim() || (r.itemName || "").trim());
+    const hasOutput = (Number(r.actualOutput) || 0) > 0 || (Number(r.rework) || 0) > 0;
+    return hasItem && hasOutput;
+  });
+
+  const opGroupMap = new Map<string, EnrichedAnalyticsRow[]>();
+  for (const r of activeOpRows) {
+    const itemKey = (r.itemId || r.itemName || "").trim().toLowerCase();
+    const opKey = (r.operation || "").trim().toLowerCase();
+    const key = `${itemKey}::${opKey}`;
+    const list = opGroupMap.get(key) || [];
+    list.push(r);
+    opGroupMap.set(key, list);
+  }
+
+  const operationsPerformed: MachineOperationPerformed[] = [];
+  for (const groupRows of opGroupMap.values()) {
+    const s = groupRows[0];
+    const rawItemId = (s.itemId || "").trim().toLowerCase();
+    const it = itemMap.get(rawItemId);
+    const itemCode = it?.itemCode || "";
+    const itemName = it?.itemName || s.itemName || s.itemId || "Unknown Part";
+    const operation = s.operation || "—";
+    const runsCount = groupRows.length;
+
+    const totalCt = groupRows.reduce((sum, r) => sum + (Number(r.cycleTime) || 0), 0);
+    const avgCycleTime = Number((totalCt / (runsCount || 1)).toFixed(2));
+
+    const stdOutput = groupRows.reduce((sum, r) => sum + (Number(r.stdOutput) || 0), 0);
+    const actualOutput = groupRows.reduce((sum, r) => sum + (Number(r.actualOutput) || 0), 0);
+    const rework = groupRows.reduce((sum, r) => sum + (Number(r.rework) || 0), 0);
+    const goodOutput = groupRows.reduce((sum, r) => sum + (r.goodOutput || 0), 0);
+    const downtimeMinutes = Number(
+      groupRows.reduce((sum, r) => sum + (r.totalBreakdownMinutes || 0), 0).toFixed(2)
+    );
+
+    const groupMetrics = calculateOeeMetrics(groupRows);
+
+    operationsPerformed.push({
+      itemCode,
+      itemName,
+      operation,
+      runsCount,
+      avgCycleTime,
+      stdOutput,
+      actualOutput,
+      rework,
+      goodOutput,
+      downtimeMinutes,
+      availabilityPct: groupMetrics.availabilityPct,
+      qualityPct: groupMetrics.qualityPct,
+      oeePct: groupMetrics.oeePct,
+    });
+  }
+
+  operationsPerformed.sort((a, b) => b.actualOutput - a.actualOutput);
+
+  // 6. Operator Breakdown
+  const opMap = new Map<string, EnrichedAnalyticsRow[]>();
+  for (const r of machineRows) {
+    const opName = (r.operatorName || "").trim() || "Unassigned";
+    const list = opMap.get(opName) || [];
+    list.push(r);
+    opMap.set(opName, list);
+  }
+
+  const operatorBreakdown: MachineOperatorBreakdown[] = [];
+  for (const [opName, opRows] of opMap.entries()) {
+    const shiftsSet = new Set(opRows.map((r) => `${r.date || ""}__${r.shift || ""}`));
+    const itemsSet = new Set(
+      opRows.map((r) => r.itemName || r.itemId).filter(Boolean) as string[]
+    );
+    const opMetrics = calculateOeeMetrics(opRows);
+
+    operatorBreakdown.push({
+      operatorName: opName,
+      shiftsCount: shiftsSet.size,
+      runsCount: opRows.length,
+      itemsRun: Array.from(itemsSet),
+      stdOutput: opMetrics.totalStd,
+      actualOutput: opMetrics.totalActual,
+      rework: opMetrics.totalRework,
+      goodOutput: opMetrics.goodOutput,
+      downtimeMinutes: opMetrics.downtimeMinutes,
+      planAchievementPct: opMetrics.planAchievementPct,
+      oeePct: opMetrics.oeePct,
+    });
+  }
+
+  operatorBreakdown.sort((a, b) => {
+    if (b.shiftsCount !== a.shiftsCount) return b.shiftsCount - a.shiftsCount;
+    return b.actualOutput - a.actualOutput;
+  });
+
+  // 7. Daily Summary - grouped by (date, item, operation)
+  const dayGroupMap = new Map<string, EnrichedAnalyticsRow[]>();
+  for (const r of machineRows) {
+    const rawDate = r.date || "Unknown";
+    const rawItem = (r.itemId || r.itemName || "").trim();
+    const rawOp = (r.operation || "").trim();
+
+    let itemKey = rawItem.toLowerCase();
+    let opKey = rawOp.toLowerCase();
+
+    if (!itemKey) {
+      itemKey = "__NO_ITEM__";
+      opKey = "";
+    }
+
+    const groupKey = `${rawDate}::${itemKey}::${opKey}`;
+    const list = dayGroupMap.get(groupKey) || [];
+    list.push(r);
+    dayGroupMap.set(groupKey, list);
+  }
+
+  // Pre-index masterData items for fast lookup by id, code, or name
+  const itemMasterMap = new Map<string, ItemMaster>();
+  (params.masterData.items || []).forEach((it) => {
+    if (it.id) itemMasterMap.set(it.id.trim().toLowerCase(), it);
+    if (it.itemCode) itemMasterMap.set(it.itemCode.trim().toLowerCase(), it);
+    if (it.itemName) itemMasterMap.set(it.itemName.trim().toLowerCase(), it);
+  });
+
+  const dailySummary: MachineDailySummary[] = [];
+  for (const [groupKey, groupRows] of dayGroupMap.entries()) {
+    const firstRow = groupRows[0];
+    const date = firstRow.date || "Unknown";
+    const rawItem = (firstRow.itemId || firstRow.itemName || "").trim();
+    const isDowntimeOnly = !rawItem;
+
+    let itemId = firstRow.itemId || "";
+    let itemCode = "";
+    let itemName = firstRow.itemName || firstRow.itemId || "";
+    let operation = firstRow.operation || "—";
+
+    if (isDowntimeOnly) {
+      itemName = "No Item / Downtime Only";
+      itemCode = "";
+      itemId = "";
+      operation = "—";
+    } else {
+      const lookupKey = (itemId || itemCode || itemName).trim().toLowerCase();
+      const matched = itemMasterMap.get(lookupKey);
+      if (matched) {
+        if (!itemCode && matched.itemCode) itemCode = matched.itemCode;
+        if ((!itemName || itemName === itemId) && matched.itemName) itemName = matched.itemName;
+        if (!itemId && matched.id) itemId = matched.id;
+      }
+    }
+
+    const shiftsRun = Array.from(
+      new Set(groupRows.map((r) => r.shift).filter(Boolean) as string[])
+    ).sort();
+
+    const groupMetrics = calculateOeeMetrics(groupRows);
+
+    const ctRows = groupRows.filter((r) => Number(r.cycleTime) > 0);
+    const avgCycleTime =
+      ctRows.length > 0
+        ? Math.round(
+            (ctRows.reduce((sum, r) => sum + Number(r.cycleTime), 0) / ctRows.length) * 10
+          ) / 10
+        : 0;
+
+    const planAchievementPct =
+      groupMetrics.totalStd > 0
+        ? Math.round((groupMetrics.totalActual / groupMetrics.totalStd) * 1000) / 10
+        : groupMetrics.totalActual > 0
+        ? 100
+        : 0;
+
+    dailySummary.push({
+      rowKey: groupKey,
+      date,
+      itemId,
+      itemCode,
+      itemName,
+      operation,
+      isDowntimeOnly,
+      shiftsRun,
+      runsCount: groupRows.length,
+      avgCycleTime,
+      stdOutput: groupMetrics.totalStd,
+      actualOutput: groupMetrics.totalActual,
+      rework: groupMetrics.totalRework,
+      goodOutput: groupMetrics.goodOutput,
+      downtimeMinutes: groupMetrics.downtimeMinutes,
+      planAchievementPct,
+      availabilityPct: groupMetrics.availabilityPct,
+      qualityPct: groupMetrics.qualityPct,
+      oeePct: groupMetrics.oeePct,
+    });
+  }
+
+  // Sort dailySummary:
+  // by date DESC, then isDowntimeOnly ASC (real production items first), then actualOutput DESC, then itemName ASC
+  dailySummary.sort((a, b) => {
+    const dCmp = b.date.localeCompare(a.date);
+    if (dCmp !== 0) return dCmp;
+
+    if (a.isDowntimeOnly !== b.isDowntimeOnly) {
+      return a.isDowntimeOnly ? 1 : -1;
+    }
+
+    const outDiff = b.actualOutput - a.actualOutput;
+    if (outDiff !== 0) return outDiff;
+
+    return a.itemName.localeCompare(b.itemName);
+  });
+
+  // 8. Shift Log History
+  const sortedRows = [...machineRows].sort((a, b) => {
+    const dCmp = (b.date || "").localeCompare(a.date || "");
+    if (dCmp !== 0) return dCmp;
+    const sCmp = (a.shift || "").localeCompare(b.shift || "");
+    if (sCmp !== 0) return sCmp;
+    return (Number(a.runNo) || 1) - (Number(b.runNo) || 1);
+  });
+
+  const shiftLogHistory: MachineShiftLogHistoryItem[] = sortedRows.map((r) => {
+    const rowMetrics = calculateOeeMetrics([r]);
+    const bd = r.breakdown || {
+      noDisc: 0,
+      change: 0,
+      power: 0,
+      operator: 0,
+      machineBreakdown: 0,
+      fixProgSettings: 0,
+      miscellaneous: 0,
+    };
+
+    return {
+      id: r.id,
+      date: r.date,
+      shift: r.shift,
+      line: r.line,
+      runNo: Number(r.runNo) || 1,
+      isSplitRun: Boolean(r.isSplitRun),
+      operatorName: (r.operatorName || "").trim() || "Unassigned",
+      itemName: r.itemName || r.itemId || "—",
+      operation: r.operation || "—",
+      cycleTime: Number(r.cycleTime) || 0,
+      stdOutput: Number(r.stdOutput) || 0,
+      actualOutput: Number(r.actualOutput) || 0,
+      rework: Number(r.rework) || 0,
+      totalBdMinutes: Number(r.totalBreakdownMinutes) || 0,
+      breakdown: bd,
+      oeePct: rowMetrics.oeePct,
+      remarks: r.remarks || "",
+    };
+  });
+
+  return {
+    machineMeta,
+    overallMetrics,
+    configuredCapabilities,
+    operationsPerformed,
+    operatorBreakdown,
+    dailySummary,
+    shiftLogHistory,
+  };
 }

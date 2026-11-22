@@ -193,7 +193,6 @@ function buildLineEfficiencyData(
       "Variance (Pcs)": lineVariance,
       "Line Efficiency %": `${lineEff}%`,
       "Availability %": `${lineMetrics.availabilityPct}%`,
-      "Performance %": `${lineMetrics.performancePct}%`,
       "Quality %": `${lineMetrics.qualityPct}%`,
       "OEE %": `${lineMetrics.oeePct}%`,
       "Shift A Target": shiftAStd,
@@ -232,7 +231,6 @@ function buildLineEfficiencyData(
     "Variance (Pcs)": grandAct - grandStd,
     "Line Efficiency %": `${grandEff}%`,
     "Availability %": `${plantMetrics.availabilityPct}%`,
-    "Performance %": `${plantMetrics.performancePct}%`,
     "Quality %": `${plantMetrics.qualityPct}%`,
     "OEE %": `${plantMetrics.oeePct}%`,
     "Shift A Target": grandShiftAStd,
@@ -358,7 +356,6 @@ function buildMachineEfficiencyData(
       "Variance": act - std,
       "Machine Efficiency %": std > 0 ? `${eff}%` : "—",
       "Availability %": machMetrics.plannedMinutes > 0 ? `${machMetrics.availabilityPct}%` : "—",
-      "Performance %": machMetrics.operatingMinutes > 0 ? `${machMetrics.performancePct}%` : "—",
       "Quality %": machMetrics.totalActual > 0 ? `${machMetrics.qualityPct}%` : "—",
       "OEE %": machMetrics.plannedMinutes > 0 ? `${machMetrics.oeePct}%` : "—",
       "Shift A Output": aAct,
@@ -386,20 +383,24 @@ function buildItemProductionData(
   // Canonical item index for consistent resolution across masterData, rollups, and shift logs
   const itemLookup = new Map<string, { id?: string; itemCode: string; itemName: string }>();
   for (const it of (masterData?.items || [])) {
+    const id = (it.id ?? "").trim().toLowerCase();
+    const code = (it.itemCode ?? "").trim().toLowerCase();
+    const name = (it.itemName ?? "").trim().toLowerCase();
     const info = { id: it.id, itemCode: it.itemCode || "", itemName: it.itemName || "" };
-    if (it.id) itemLookup.set(it.id.trim().toLowerCase(), info);
-    if (it.itemCode) itemLookup.set(it.itemCode.trim().toLowerCase(), info);
-    if (it.itemName) itemLookup.set(it.itemName.trim().toLowerCase(), info);
+    if (id.length > 0) itemLookup.set(id, info);
+    if (code.length > 0) itemLookup.set(code, info);
+    if (name.length > 0) itemLookup.set(name, info);
   }
 
   const resolve = (rawId?: string, rawCode?: string, rawName?: string) => {
-    const id = (rawId || "").trim();
-    const code = (rawCode || "").trim();
-    const name = (rawName || "").trim();
+    const id = (rawId ?? "").trim();
+    const code = (rawCode ?? "").trim();
+    const name = (rawName ?? "").trim();
+    const norm = (s: string) => s.toLowerCase();
     const matched =
-      (id ? itemLookup.get(id.toLowerCase()) : null) ||
-      (code ? itemLookup.get(code.toLowerCase()) : null) ||
-      (name ? itemLookup.get(name.toLowerCase()) : null);
+      (id.length > 0 ? itemLookup.get(norm(id)) : null) ||
+      (code.length > 0 ? itemLookup.get(norm(code)) : null) ||
+      (name.length > 0 ? itemLookup.get(norm(name)) : null);
 
     const itemCode = matched?.itemCode || code || (id && !id.startsWith("item_") && !id.startsWith("it_") ? id : "—");
     const itemName = matched?.itemName || name || (itemCode !== "—" ? itemCode : "Unknown Part");
@@ -455,10 +456,15 @@ function buildItemProductionData(
     }
   }
 
-  // 2. Accumulate period quantities from current rows
+  // 2. Accumulate period quantities from current rows (only active rows)
   for (const r of rows) {
-    if (!r.itemId && !r.itemName) continue;
-    const resolved = resolve(r.itemId, undefined, r.itemName);
+    const act = Number(r.actualOutput) || 0;
+    const rew = Number(r.rework) || 0;
+    if (act <= 0 && rew <= 0) continue;
+    const rawId = (r.itemId ?? "").trim();
+    const rawName = (r.itemName ?? "").trim();
+    if (rawId.length === 0 && rawName.length === 0) continue;
+    const resolved = resolve(rawId, undefined, rawName);
     if (!map.has(resolved.canonicalKey)) {
       map.set(resolved.canonicalKey, {
         canonicalKey: resolved.canonicalKey,
@@ -509,7 +515,6 @@ function buildItemProductionData(
         "Period Efficiency %":
           it.periodStd > 0 ? `${Math.round((it.periodAct / it.periodStd) * 100)}%` : "—",
         "Availability %": itemMetrics.plannedMinutes > 0 ? `${itemMetrics.availabilityPct}%` : "—",
-        "Performance %": itemMetrics.operatingMinutes > 0 ? `${itemMetrics.performancePct}%` : "—",
         "Quality %": itemMetrics.totalActual > 0 ? `${itemMetrics.qualityPct}%` : "—",
         "OEE %": itemMetrics.plannedMinutes > 0 ? `${itemMetrics.oeePct}%` : "—",
       };
@@ -544,7 +549,6 @@ export function buildProductLineMachineMatrixData(
         "Good Output (Pcs)": m.goodOutput,
         "Downtime (mins)": m.breakdownMinutes,
         "Availability %": `${m.metrics.availabilityPct}%`,
-        "Performance %": `${m.metrics.performancePct}%`,
         "Quality %": `${m.metrics.qualityPct}%`,
         "OEE %": `${m.metrics.oeePct}%`,
         "Plan Achievement %": `${m.metrics.planAchievementPct}%`,

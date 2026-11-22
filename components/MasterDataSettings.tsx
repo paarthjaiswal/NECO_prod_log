@@ -59,8 +59,11 @@ interface MasterDataSettingsProps {
     id: string;
     oldName: string;
     oldCode?: string;
+    oldOperation?: string;
     newName: string;
     newCode: string;
+    newOperation?: string;
+    operationRenames?: Array<{ oldOp: string; newOp: string }>;
   }) => void;
 }
 
@@ -114,6 +117,11 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
   const [editItemName, setEditItemName] = useState<string>("");
   const [editItemCode, setEditItemCode] = useState<string>("");
+  const [editSingleOp, setEditSingleOp] = useState<string>("");
+  const [isMultiOpEdit, setIsMultiOpEdit] = useState<boolean>(false);
+  const [editOpEntries, setEditOpEntries] = useState<
+    Array<{ id: string; original: string; current: string }>
+  >([]);
 
   const handleAddMachine = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -310,35 +318,82 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
       alert("Item code cannot be empty.");
       return;
     }
-    if (cleanName === it.itemName && cleanCode === it.itemCode) {
+
+    let newOperation = "";
+    const operationRenames: Array<{ oldOp: string; newOp: string }> = [];
+
+    if (isMultiOpEdit) {
+      const opList: string[] = [];
+      const seen = new Set<string>();
+      for (const entry of editOpEntries) {
+        const cur = entry.current.trim();
+        if (cur && !seen.has(cur.toLowerCase())) {
+          seen.add(cur.toLowerCase());
+          opList.push(cur);
+        }
+        const orig = entry.original.trim();
+        if (orig && cur && orig.toLowerCase() !== cur.toLowerCase()) {
+          operationRenames.push({ oldOp: orig, newOp: cur });
+        }
+      }
+      if (opList.length === 0) {
+        alert("At least one operation is required.");
+        return;
+      }
+      newOperation = opList.join(", ");
+    } else {
+      newOperation = editSingleOp.trim();
+      if (!newOperation) {
+        alert("Operation cannot be empty.");
+        return;
+      }
+      const oldOp = (it.operation || "").trim();
+      if (oldOp && oldOp.toLowerCase() !== newOperation.toLowerCase()) {
+        operationRenames.push({ oldOp, newOp: newOperation });
+      }
+    }
+
+    const isSameName = cleanName === it.itemName;
+    const isSameCode = cleanCode === (it.itemCode || "");
+    const isSameOp = newOperation === (it.operation || "").trim();
+    const hasRenames = operationRenames.length > 0;
+
+    if (isSameName && isSameCode && isSameOp && !hasRenames) {
       setEditingItemId(null);
       return;
     }
 
     await runWithFeedback(
       async () => {
-        await updateItemMaster({
+        const res = await updateItemMaster({
           id: it.id,
           oldName: it.itemName,
           oldCode: it.itemCode,
+          oldOperation: it.operation || "",
           newName: cleanName,
           newCode: cleanCode,
+          newOperation: newOperation,
+          operationRenames,
         });
+
         if (onRenameItem) {
           onRenameItem({
             id: it.id,
             oldName: it.itemName,
             oldCode: it.itemCode,
+            oldOperation: it.operation || "",
             newName: cleanName,
             newCode: cleanCode,
+            newOperation: newOperation,
+            operationRenames: res?.renames ?? operationRenames,
           });
         }
         await onRefreshMasterData();
         setEditingItemId(null);
       },
       {
-        loadingMessage: "Updating item...",
-        successTitle: "Item Updated",
+        loadingMessage: "Updating item & operations...",
+        successTitle: "Item & Operations Updated",
         successDetail: `Updated ${cleanName} (${cleanCode})`,
         errorTitle: "Could Not Update Item",
       }
@@ -1252,7 +1307,120 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                           it.itemName
                         )}
                       </td>
-                      <td className="px-3 py-2 text-slate-600">{it.operation}</td>
+                      <td className="px-3 py-2 text-slate-600">
+                        {isEditing ? (
+                          isMultiOpEdit ? (
+                            <div className="space-y-1.5 py-1">
+                              <div className="flex flex-wrap gap-1.5 items-center">
+                                {editOpEntries.map((entry, idx) => (
+                                  <div
+                                    key={entry.id}
+                                    className="inline-flex items-center gap-1 bg-slate-100 border border-slate-300 rounded px-1.5 py-0.5 text-xs"
+                                  >
+                                    <input
+                                      type="text"
+                                      value={entry.current}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        setEditOpEntries((prev) =>
+                                          prev.map((op) =>
+                                            op.id === entry.id ? { ...op, current: val } : op
+                                          )
+                                        );
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          e.preventDefault();
+                                          handleSaveItemEdit(it);
+                                        } else if (e.key === "Escape") {
+                                          setEditingItemId(null);
+                                        }
+                                      }}
+                                      className="w-24 px-1 py-0.5 bg-white border border-slate-200 rounded text-xs text-slate-800 font-medium focus:outline-none focus:border-slate-800"
+                                      placeholder={`Op #${idx + 1}`}
+                                    />
+                                    {editOpEntries.length > 1 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditOpEntries((prev) =>
+                                            prev.filter((op) => op.id !== entry.id)
+                                          );
+                                        }}
+                                        className="text-slate-400 hover:text-rose-600 cursor-pointer p-0.5"
+                                        title="Remove operation"
+                                      >
+                                        <X className="w-3 h-3" />
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditOpEntries((prev) => [
+                                      ...prev,
+                                      {
+                                        id: `op_${Date.now()}_${Math.random()}`,
+                                        original: "",
+                                        current: "",
+                                      },
+                                    ]);
+                                  }}
+                                  className="inline-flex items-center gap-0.5 px-2 py-0.5 text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded cursor-pointer"
+                                  title="Add another operation"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                  <span>Add Op</span>
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={editSingleOp}
+                                onChange={(e) => setEditSingleOp(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    handleSaveItemEdit(it);
+                                  } else if (e.key === "Escape") {
+                                    setEditingItemId(null);
+                                  }
+                                }}
+                                className="w-full px-2 py-1 text-xs border border-slate-300 rounded focus:border-slate-800 focus:outline-none bg-slate-50 focus:bg-white"
+                                placeholder="Operation (e.g. OP-10 Turning)"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const parts = editSingleOp
+                                    .split(",")
+                                    .map((p) => p.trim())
+                                    .filter(Boolean);
+                                  const initial =
+                                    parts.length > 0 ? parts : [editSingleOp.trim() || ""];
+                                  setEditOpEntries(
+                                    initial.map((p, idx) => ({
+                                      id: `op_${idx}_${Date.now()}`,
+                                      original: p,
+                                      current: p,
+                                    }))
+                                  );
+                                  setIsMultiOpEdit(true);
+                                }}
+                                className="shrink-0 px-1.5 py-1 text-[10px] font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded cursor-pointer"
+                                title="Split into multiple operations"
+                              >
+                                + Multi-Op
+                              </button>
+                            </div>
+                          )
+                        ) : (
+                          it.operation
+                        )}
+                      </td>
                       <td className="px-3 py-2 text-right">
                         {isEditing ? (
                           <div className="flex items-center justify-end gap-1">
@@ -1282,9 +1450,30 @@ export const MasterDataSettings: React.FC<MasterDataSettingsProps> = ({
                                   setEditingItemId(it.id);
                                   setEditItemName(it.itemName);
                                   setEditItemCode(it.itemCode || "");
+                                  const rawOp = (it.operation || "").trim();
+                                  const isMulti = rawOp.includes(",");
+                                  if (isMulti) {
+                                    const parts = rawOp
+                                      .split(",")
+                                      .map((p) => p.trim())
+                                      .filter(Boolean);
+                                    setEditOpEntries(
+                                      parts.map((p, idx) => ({
+                                        id: `op_${idx}_${Date.now()}`,
+                                        original: p,
+                                        current: p,
+                                      }))
+                                    );
+                                    setIsMultiOpEdit(true);
+                                    setEditSingleOp("");
+                                  } else {
+                                    setEditSingleOp(rawOp);
+                                    setIsMultiOpEdit(false);
+                                    setEditOpEntries([]);
+                                  }
                                 }}
                                 className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
-                                title="Edit item name & code"
+                                title="Edit item name, code & operation"
                               >
                                 <Edit2 className="w-3.5 h-3.5" />
                               </button>

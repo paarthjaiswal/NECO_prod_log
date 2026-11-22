@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Clock,
   Download,
@@ -8,7 +8,6 @@ import {
   Calendar,
   Layers,
   Package,
-  Activity,
   Filter,
   RotateCcw,
   ChevronDown,
@@ -18,6 +17,7 @@ import {
   ArrowUpDown,
   CheckCircle2,
   AlertTriangle,
+  Target,
 } from "lucide-react";
 import {
   MachineShiftRow,
@@ -39,6 +39,7 @@ import {
   EnrichedAnalyticsRow,
   OeeMetrics,
 } from "@/services/analyticsEngine";
+import { MachineAnalyticsView } from "./MachineAnalyticsView";
 
 interface AnalyticsPreviewProps {
   rows: MachineShiftRow[];
@@ -114,8 +115,87 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   // Data loaded from Supabase
   const [historicalLogs, setHistoricalLogs] = useState<MachineShiftRow[]>([]);
 
+  // --------------------------------------------------------------------------
+  // MACHINE DRILLDOWN STATE & URL SYNC
+  // --------------------------------------------------------------------------
+  const [selectedAnalyticsMachineId, setSelectedAnalyticsMachineId] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        return new URLSearchParams(window.location.search).get("analyticsMachineId") || null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  });
+
+  const updateAnalyticsMachineUrl = useCallback((machineId: string | null) => {
+    if (typeof window === "undefined") return;
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      if (machineId) {
+        searchParams.set("analyticsMachineId", machineId);
+      } else {
+        searchParams.delete("analyticsMachineId");
+      }
+      const queryStr = searchParams.toString();
+      const newUrl = queryStr ? `${window.location.pathname}?${queryStr}` : window.location.pathname;
+      window.history.replaceState(null, "", newUrl);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleSelectAnalyticsMachine = useCallback(
+    (machineId: string | null) => {
+      setSelectedAnalyticsMachineId(machineId);
+      updateAnalyticsMachineUrl(machineId);
+    },
+    [updateAnalyticsMachineUrl]
+  );
+
+  // Sync state if URL changes externally (e.g. browser back/forward, tab click reset)
+  useEffect(() => {
+    const handlePopState = () => {
+      try {
+        const id = new URLSearchParams(window.location.search).get("analyticsMachineId");
+        setSelectedAnalyticsMachineId(id);
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const handleDateRangeChange = useCallback(
+    (from: string, to: string, preset?: string) => {
+      setFromDate(from);
+      setToDate(to);
+      if (
+        preset &&
+        (["today", "yesterday", "thisWeek", "lastWeek", "thisMonth", "custom"] as const).includes(
+          preset as PresetKey
+        )
+      ) {
+        setActivePreset(preset as PresetKey);
+      } else {
+        setActivePreset("custom");
+      }
+    },
+    []
+  );
+
+  const lastFetchedRangeRef = useRef<string>("");
+
   const fetchRange = useCallback(
     async (from: string, to: string) => {
+      const rangeKey = `${from}_to_${to}`;
+      if (lastFetchedRangeRef.current === rangeKey) {
+        return;
+      }
+      lastFetchedRangeRef.current = rangeKey;
+
       await runWithFeedback(
         async () => {
           const data = await getAnalyticsLogs(from, to);
@@ -145,6 +225,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   const handleApplyCustomDates = () => {
     setActivePreset("custom");
+    lastFetchedRangeRef.current = "";
     fetchRange(fromDate, toDate);
   };
 
@@ -400,6 +481,33 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     return "bg-rose-100 text-rose-800 border-rose-300";
   };
 
+  if (selectedAnalyticsMachineId) {
+    return (
+      <div className="space-y-4 max-w-[1600px] mx-auto pb-12">
+        <MachineAnalyticsView
+          machineId={selectedAnalyticsMachineId}
+          onSelectMachine={handleSelectAnalyticsMachine}
+          onBackToAnalytics={() => handleSelectAnalyticsMachine(null)}
+          onOpenShiftEntry={onOpenMachine}
+          enrichedRows={enrichedAllRows}
+          masterData={
+            masterData || {
+              lines: [],
+              machines: [],
+              items: [],
+              operators: [],
+              cycleTimes: [],
+            }
+          }
+          fromDate={fromDate}
+          toDate={toDate}
+          activePreset={activePreset}
+          onDateRangeChange={handleDateRangeChange}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4 max-w-[1600px] mx-auto pb-12">
       {/* ==================================================================== */}
@@ -646,7 +754,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider">Overall Equipment Effectiveness</span>
             <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-white/70 border border-current">
-              A × P × Q
+              Good Run Time / Planned Time
             </span>
           </div>
           <div className="my-2">
@@ -698,33 +806,35 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           </div>
         </div>
 
-        {/* CARD 3: Performance */}
+        {/* CARD 3: Plan Achievement */}
         <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-2xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between text-xs font-bold text-slate-700 mb-1">
               <span className="flex items-center gap-1.5">
-                <Activity className="w-3.5 h-3.5 text-purple-600" />
-                <span>Performance</span>
+                <Target className="w-3.5 h-3.5 text-purple-600" />
+                <span>Plan Achievement</span>
               </span>
-              <span className="text-sm font-extrabold text-slate-900">{overallMetrics.performancePct}%</span>
+              <span className="text-sm font-extrabold text-slate-900">{overallMetrics.planAchievementPct}%</span>
             </div>
             <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden my-2">
               <div
                 className="bg-purple-600 h-full rounded-full transition-all duration-300"
-                style={{ width: `${Math.min(100, overallMetrics.performancePct)}%` }}
+                style={{ width: `${Math.min(100, overallMetrics.planAchievementPct)}%` }}
               />
             </div>
           </div>
           <div className="space-y-1 text-xs text-slate-600 pt-1 border-t border-slate-100">
             <div className="flex justify-between">
-              <span className="text-slate-500">Actual vs Target:</span>
+              <span className="text-slate-500">Actual Output:</span>
               <span className="font-mono font-bold text-slate-800">
-                {overallMetrics.totalActual.toLocaleString()} / {overallMetrics.totalStd.toLocaleString()} pcs
+                {overallMetrics.totalActual.toLocaleString()} pcs
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-500">Plan Achievement:</span>
-              <span className="font-mono font-bold text-purple-700">{overallMetrics.planAchievementPct}%</span>
+              <span className="text-slate-500">Scheduled Target:</span>
+              <span className="font-mono font-bold text-slate-600">
+                {overallMetrics.totalStd.toLocaleString()} pcs
+              </span>
             </div>
           </div>
         </div>
@@ -1036,7 +1146,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                 <th className="px-3 py-2 text-right">Good</th>
                                 <th className="px-3 py-2 text-right">Downtime</th>
                                 <th className="px-3 py-2 text-right">Avail %</th>
-                                <th className="px-3 py-2 text-right">Perf %</th>
                                 <th className="px-3 py-2 text-right">Qual %</th>
                                 <th className="px-3 py-2 text-right font-black">OEE %</th>
                                 <th className="px-3 py-2 text-center">Jump</th>
@@ -1053,17 +1162,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                       <button
                                         type="button"
                                         onClick={() =>
-                                          onOpenMachine &&
-                                          onOpenMachine({
-                                            machineId: m.machineId,
-                                            line: m.latestLine,
-                                            date: m.latestDate,
-                                            shift: m.latestShift as ShiftType,
-                                            fromTab: "analytics",
-                                          })
+                                          handleSelectAnalyticsMachine(m.machineId)
                                         }
                                         className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
-                                        title="Jump to this machine in Operator Kiosk"
+                                        title="View Machine Analytics Drilldown"
                                       >
                                         <span>{m.machineName}</span>
                                         <ExternalLink className="w-3 h-3 opacity-60" />
@@ -1091,7 +1193,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                   <td className="px-3 py-2 text-right text-emerald-700 font-bold">{m.goodOutput}</td>
                                   <td className="px-3 py-2 text-right text-rose-600">{m.breakdownMinutes}m</td>
                                   <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
-                                  <td className="px-3 py-2 text-right text-slate-700">{m.metrics.performancePct}%</td>
                                   <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
                                   <td className="px-3 py-2 text-right font-black">
                                     <span
@@ -1106,17 +1207,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        onOpenMachine &&
-                                        onOpenMachine({
-                                          machineId: m.machineId,
-                                          line: m.latestLine,
-                                          date: m.latestDate,
-                                          shift: m.latestShift as ShiftType,
-                                          fromTab: "analytics",
-                                        })
+                                        handleSelectAnalyticsMachine(m.machineId)
                                       }
                                       className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
-                                      title="Open in Machine Cockpit"
+                                      title="View Machine Analytics Drilldown"
                                     >
                                       <ExternalLink className="w-3.5 h-3.5" />
                                     </button>
@@ -1157,7 +1251,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <th className="px-3 py-2.5 text-right">Rework</th>
                     <th className="px-3 py-2.5 text-right">Downtime</th>
                     <th className="px-3 py-2.5 text-right">Availability</th>
-                    <th className="px-3 py-2.5 text-right">Performance</th>
                     <th className="px-3 py-2.5 text-right">Quality</th>
                     <th className="px-3 py-2.5 text-right font-black">Line OEE</th>
                   </tr>
@@ -1179,7 +1272,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       <td className="px-3 py-2 text-right text-amber-600">{l.metrics.totalRework.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-rose-600">{l.metrics.downtimeMinutes}m</td>
                       <td className="px-3 py-2 text-right text-slate-700">{l.metrics.availabilityPct}%</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{l.metrics.performancePct}%</td>
                       <td className="px-3 py-2 text-right text-slate-700">{l.metrics.qualityPct}%</td>
                       <td className="px-3 py-2 text-right">
                         <span
@@ -1220,7 +1312,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <th className="px-3 py-2.5 text-right">Rework</th>
                     <th className="px-3 py-2.5 text-right">Downtime</th>
                     <th className="px-3 py-2.5 text-right">Availability</th>
-                    <th className="px-3 py-2.5 text-right">Performance</th>
                     <th className="px-3 py-2.5 text-right">Quality</th>
                     <th className="px-3 py-2.5 text-right font-black">Shift OEE</th>
                   </tr>
@@ -1240,7 +1331,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       <td className="px-3 py-2 text-right text-amber-600">{s.metrics.totalRework.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-rose-600">{s.metrics.downtimeMinutes}m</td>
                       <td className="px-3 py-2 text-right text-slate-700">{s.metrics.availabilityPct}%</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{s.metrics.performancePct}%</td>
                       <td className="px-3 py-2 text-right text-slate-700">{s.metrics.qualityPct}%</td>
                       <td className="px-3 py-2 text-right">
                         <span
@@ -1309,7 +1399,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <th className="px-3 py-2.5 text-right">Rework</th>
                     <th className="px-3 py-2.5 text-right">Downtime</th>
                     <th className="px-3 py-2.5 text-right">Avail %</th>
-                    <th className="px-3 py-2.5 text-right">Perf %</th>
                     <th className="px-3 py-2.5 text-right">Qual %</th>
                     <th className="px-3 py-2.5 text-right font-black">Period OEE</th>
                   </tr>
@@ -1348,7 +1437,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       <td className="px-3 py-2 text-right text-amber-600">{p.metrics.totalRework.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-rose-600">{p.metrics.downtimeMinutes}m</td>
                       <td className="px-3 py-2 text-right text-slate-700">{p.metrics.availabilityPct}%</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{p.metrics.performancePct}%</td>
                       <td className="px-3 py-2 text-right text-slate-700">{p.metrics.qualityPct}%</td>
                       <td className="px-3 py-2 text-right">
                         <span
@@ -1419,7 +1507,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <th className="px-3 py-2.5 text-right">Rework</th>
                     <th className="px-3 py-2.5 text-right">Downtime</th>
                     <th className="px-3 py-2.5 text-right">Avail %</th>
-                    <th className="px-3 py-2.5 text-right">Perf %</th>
                     <th className="px-3 py-2.5 text-right">Qual %</th>
                     <th className="px-3 py-2.5 text-right font-black">Machine OEE</th>
                     <th className="px-3 py-2.5 text-center">Jump</th>
@@ -1433,17 +1520,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                           <button
                             type="button"
                             onClick={() =>
-                              onOpenMachine &&
-                              onOpenMachine({
-                                machineId: m.machineId,
-                                line: m.latestLine,
-                                date: m.latestDate,
-                                shift: m.latestShift as ShiftType,
-                                fromTab: "analytics",
-                              })
+                              handleSelectAnalyticsMachine(m.machineId)
                             }
                             className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
-                            title="Jump to this machine in Operator Kiosk"
+                            title="View Machine Analytics Drilldown"
                           >
                             <span>{m.machineName}</span>
                             <ExternalLink className="w-3 h-3 opacity-60" />
@@ -1475,7 +1555,6 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       <td className="px-3 py-2 text-right text-amber-600">{m.metrics.totalRework.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-rose-600">{m.metrics.downtimeMinutes}m</td>
                       <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.performancePct}%</td>
                       <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
                       <td className="px-3 py-2 text-right">
                         <span
@@ -1490,17 +1569,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                         <button
                           type="button"
                           onClick={() =>
-                            onOpenMachine &&
-                            onOpenMachine({
-                              machineId: m.machineId,
-                              line: m.latestLine,
-                              date: m.latestDate,
-                              shift: m.latestShift as ShiftType,
-                              fromTab: "analytics",
-                            })
+                            handleSelectAnalyticsMachine(m.machineId)
                           }
                           className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
-                          title="Open in Machine Cockpit"
+                          title="View Machine Analytics Drilldown"
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
                         </button>

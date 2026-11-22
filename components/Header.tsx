@@ -83,17 +83,21 @@ export const Header: React.FC<HeaderProps> = ({
 
   const handleLogout = async () => {
     setIsLoggingOut(true);
-    await runWithFeedback(
-      async () => {
-        await logoutUnitHead();
-        window.location.reload();
-      },
-      {
-        loadingMessage: "Locking session...",
-        successTitle: "Returned to Open-Book Mode",
-        errorTitle: "Failed to Sign Out",
-      }
-    );
+    try {
+      await runWithFeedback(
+        async () => {
+          await logoutUnitHead();
+          window.location.reload();
+        },
+        {
+          loadingMessage: "Locking session...",
+          successTitle: "Returned to Open-Book Mode",
+          errorTitle: "Failed to Sign Out",
+        }
+      );
+    } finally {
+      setIsLoggingOut(false);
+    }
   };
 
   return (

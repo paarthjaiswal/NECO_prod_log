@@ -32,6 +32,7 @@ import {
   calculateMachineGroupTimeBalance,
   calculateTotalBreakdown,
   evaluateShiftLock,
+  isShiftRowEmpty,
 } from "@/services/storageService";
 import { useFeedback } from "@/context/FeedbackContext";
 
@@ -103,20 +104,7 @@ const formatMsToIstString = (ms: number): string => {
  * - Appends valid temporary machines (isTempMachine or machineId starts with "temp_") for this line.
  */
 function isPopulatedUiRow(r: MachineShiftRow): boolean {
-  const bdTotal = calculateTotalBreakdown(r.breakdown);
-
-  return (
-    (Number(r.actualOutput) || 0) > 0 ||
-    (Number(r.stdOutput) || 0) > 0 ||
-    (Number(r.rework) || 0) > 0 ||
-    Boolean(r.operatorName && r.operatorName.trim()) ||
-    Boolean(r.itemId && r.itemId.trim()) ||
-    Boolean(r.itemName && r.itemName.trim()) ||
-    Boolean(r.operation && r.operation.trim()) ||
-    (Number(r.cycleTime) || 0) > 0 ||
-    bdTotal > 0 ||
-    Boolean(r.remarks && r.remarks.trim())
-  );
+  return !isShiftRowEmpty(r);
 }
 
 export function ensureAllLineMachinesInRows(
@@ -397,13 +385,19 @@ export default function DashboardClient({
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams(window.location.search);
       if (activeTab && activeTab !== "sheet") params.set("tab", activeTab);
+      else params.delete("tab");
       if (selectedDate) params.set("date", selectedDate);
       if (selectedShift) params.set("shift", selectedShift);
       if (selectedLine) params.set("line", selectedLine);
       if (activeTab === "kiosk" && selectedMachineId) {
         params.set("machineId", selectedMachineId);
+      } else {
+        params.delete("machineId");
+      }
+      if (activeTab !== "analytics") {
+        params.delete("analyticsMachineId");
       }
 
       const queryString = params.toString();
@@ -432,6 +426,20 @@ export default function DashboardClient({
     setSelectedMachineId(null);
     setReturnTab(null);
     setActiveTab(newTab);
+    if (typeof window !== "undefined") {
+      try {
+        const searchParams = new URLSearchParams(window.location.search);
+        if (searchParams.has("analyticsMachineId")) {
+          searchParams.delete("analyticsMachineId");
+          const qStr = searchParams.toString();
+          const newUrl = qStr ? `${window.location.pathname}?${qStr}` : window.location.pathname;
+          window.history.replaceState(null, "", newUrl);
+          window.dispatchEvent(new Event("popstate"));
+        }
+      } catch {
+        // ignore
+      }
+    }
   }, []);
 
   // Live server-anchored clock state
@@ -757,7 +765,8 @@ export default function DashboardClient({
     // Do NOT restore unsaved localStorage draft if shift is locked
     if (!isShiftLocked) {
       try {
-        const rawDraft = localStorage.getItem(draftKey);
+        const activeDraftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
+        const rawDraft = localStorage.getItem(activeDraftKey);
         if (rawDraft) {
           const parsed = JSON.parse(rawDraft);
           if (
@@ -787,7 +796,7 @@ export default function DashboardClient({
               setHasUnsavedDraft(true);
               return;
             } else {
-              localStorage.removeItem(draftKey);
+              localStorage.removeItem(activeDraftKey);
             }
           }
         }
@@ -826,17 +835,8 @@ export default function DashboardClient({
     return () => {
       isMounted = false;
     };
-  }, [
-    selectedDate,
-    selectedShift,
-    selectedLine,
-    isShiftLocked,
-    draftKey,
-    masterData.machines,
-    currentLineMachines,
-    activeShiftWorkingMinutes,
-    runWithFeedback,
-  ]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, selectedShift, selectedLine]);
 
   const handleRowsChange = (updatedRows: MachineShiftRow[]) => {
     if (isShiftLocked) return;
@@ -1152,19 +1152,45 @@ export default function DashboardClient({
     id: string;
     oldName: string;
     oldCode?: string;
+    oldOperation?: string;
     newName: string;
     newCode: string;
+    newOperation?: string;
+    operationRenames?: Array<{ oldOp: string; newOp: string }>;
   }) => {
     setCurrentShiftRows((prevRows) => {
+      const renameMap = new Map<string, string>();
+      if (params.operationRenames && params.operationRenames.length > 0) {
+        for (const ren of params.operationRenames) {
+          if (ren.oldOp && ren.newOp) {
+            renameMap.set(ren.oldOp.trim().toLowerCase(), ren.newOp.trim());
+          }
+        }
+      } else if (
+        params.oldOperation &&
+        params.newOperation &&
+        params.oldOperation.trim().toLowerCase() !== params.newOperation.trim().toLowerCase()
+      ) {
+        renameMap.set(params.oldOperation.trim().toLowerCase(), params.newOperation.trim());
+      }
+
       const updated = prevRows.map((r) => {
         if (
           r.itemId === params.id ||
           (params.oldName && r.itemName === params.oldName)
         ) {
+          let updatedOp = r.operation;
+          if (r.operation) {
+            const matchedNewOp = renameMap.get(r.operation.trim().toLowerCase());
+            if (matchedNewOp) {
+              updatedOp = matchedNewOp;
+            }
+          }
           return {
             ...r,
             itemName: params.newName,
             itemId: r.itemId || params.id,
+            operation: updatedOp,
           };
         }
         return r;

@@ -25,28 +25,31 @@ export default function UnitHeadLoginPage() {
     setError(null);
     setIsSubmitting(true);
 
-    const res = await runWithFeedback(
-      async () => {
-        const result = await loginUnitHead(password, email);
-        if (!result.success) {
-          throw new Error(result.error || "Invalid Unit Head credentials.");
+    try {
+      const res = await runWithFeedback(
+        async () => {
+          const result = await loginUnitHead(password, email);
+          if (!result.success) {
+            throw new Error(result.error || "Invalid Unit Head credentials.");
+          }
+          return result;
+        },
+        {
+          loadingMessage: "Verifying Unit Head credentials...",
+          successTitle: "Unit Head Override Active",
+          successDetail: "Administrative privileges granted.",
+          errorTitle: "Authentication Failed",
         }
-        return result;
-      },
-      {
-        loadingMessage: "Verifying Unit Head credentials...",
-        successTitle: "Unit Head Override Active",
-        successDetail: "Administrative privileges granted.",
-        errorTitle: "Authentication Failed",
-      }
-    );
+      );
 
-    setIsSubmitting(false);
-    if (res?.success) {
-      router.push("/");
-      router.refresh();
-    } else {
-      setError("Invalid Unit Head credentials.");
+      if (res?.success) {
+        router.push("/");
+        router.refresh();
+      } else {
+        setError("Invalid Unit Head credentials.");
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 

@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { createAdminClient } from "@/utils/supabase/server";
 import { getIsUnitHead } from "@/actions/authActions";
-import { evaluateShiftLock } from "@/services/storageService";
+import { evaluateShiftLock, isShiftRowEmpty } from "@/services/storageService";
 import { getFallbackFactoryTimeContext } from "@/utils/factoryTime";
 import {
   MachineShiftRow,
@@ -290,7 +290,7 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
  * CRITICAL: Never include total_bd_minutes or bd_*_pct in the write payload
  * because they are GENERATED ALWAYS AS ... STORED columns in PostgreSQL.
  */
-function mapUiRowToDbRow(uiRow: MachineShiftRow) {
+function mapUiRowToDbRow(uiRow: MachineShiftRow, validItemIdSet?: Set<string>) {
   const rawShift = uiRow.shift ?? "Shift A";
   const shiftCode = extractShiftCode(rawShift);
   const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
@@ -300,6 +300,17 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     runNo === 1
       ? `${uiRow.date}_${cleanShift}_${uiRow.line}_${uiRow.machineId}`
       : `${uiRow.date}_${cleanShift}_${uiRow.line}_${uiRow.machineId}_r${runNo}`;
+
+  const rawItemId = (uiRow.itemId || "").trim();
+  const rawItemName = (uiRow.itemName || "").trim();
+
+  // Validate item_id against validItemIdSet if provided. If empty or invalid, null it out cleanly.
+  const isItemValid = rawItemId.length > 0 && (!validItemIdSet || validItemIdSet.has(rawItemId));
+  const finalItemId = isItemValid ? rawItemId : null;
+  const finalItemName = isItemValid ? rawItemName : "";
+  const finalOperation = isItemValid ? (uiRow.operation?.trim() ?? "") : "";
+  const finalCycleTime = isItemValid ? Number(Math.max(0, Number(uiRow.cycleTime) || 0).toFixed(2)) : 0;
+  const finalStdOutput = isItemValid ? Math.round(Number(uiRow.stdOutput) || 0) : 0;
 
   return {
     id: deterministicId,
@@ -312,12 +323,12 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow) {
     machine_id: uiRow.machineId,
     machine_name: uiRow.machineName,
     operator_name: uiRow.operatorName?.trim() ?? "",
-    item_id: uiRow.itemId?.trim() ?? "",
-    item_name: uiRow.itemName?.trim() ?? "",
-    operation: uiRow.operation?.trim() ?? "",
-    cycle_time: Number(Math.max(0, Number(uiRow.cycleTime) || 0).toFixed(2)),
+    item_id: finalItemId,
+    item_name: finalItemName,
+    operation: finalOperation,
+    cycle_time: finalCycleTime,
     total_working_minutes: Math.round(Number(uiRow.totalWorkingMinutes) || 1305),
-    std_output: Math.round(Number(uiRow.stdOutput) || 0),
+    std_output: finalStdOutput,
     actual_output: Math.round(Number(uiRow.actualOutput) || 0),
     rework: Math.round(Number(uiRow.rework) || 0),
     bd_no_disc: Number(Math.max(0, Number(uiRow.breakdown?.noDisc) || 0).toFixed(2)),
@@ -469,13 +480,7 @@ function isPopulatedDbLogRow(log: DbShiftLogRow): boolean {
 
   return (
     (Number(log.actual_output) || 0) > 0 ||
-    (Number(log.std_output) || 0) > 0 ||
     (Number(log.rework) || 0) > 0 ||
-    Boolean(log.operator_name && log.operator_name.trim()) ||
-    Boolean(log.item_id && log.item_id.trim()) ||
-    Boolean(log.item_name && log.item_name.trim()) ||
-    Boolean(log.operation && log.operation.trim()) ||
-    (Number(log.cycle_time) || 0) > 0 ||
     bdTotal > 0 ||
     Boolean(log.remarks && log.remarks.trim())
   );
@@ -1016,10 +1021,12 @@ async function syncMachineItemCycleTimes(
   const comboCounts = new Map<string, number>();
   for (const row of rows) {
     if (row.isTempMachine || row.machineId?.startsWith("temp_")) continue;
+    if (isShiftRowEmpty(row)) continue;
     const ct = Number(row.cycleTime);
     const op = row.operation?.trim();
-    if (row.machineId && row.itemId && op && ct > 0) {
-      const key = `${row.machineId}::${row.itemId}::${op}`;
+    const itemId = row.itemId?.trim();
+    if (row.machineId && itemId && op && ct > 0) {
+      const key = `${row.machineId}::${itemId}::${op}`;
       comboCounts.set(key, (comboCounts.get(key) || 0) + 1);
     }
   }
@@ -1039,18 +1046,20 @@ async function syncMachineItemCycleTimes(
 
   for (const row of rows) {
     if (row.isTempMachine || row.machineId?.startsWith("temp_")) continue;
+    if (isShiftRowEmpty(row)) continue;
     const ct = Number(row.cycleTime);
     const op = row.operation?.trim();
-    if (row.machineId && row.itemId && op && ct > 0) {
-      const key = `${row.machineId}::${row.itemId}::${op}`;
+    const itemId = row.itemId?.trim();
+    if (row.machineId && itemId && op && ct > 0) {
+      const key = `${row.machineId}::${itemId}::${op}`;
       const count = comboCounts.get(key) || 0;
       // Only auto-upsert if combination appears once across that machine, or if runNo === 1
       if (count === 1 || (row.runNo || 1) === 1) {
         if (!validPairs.has(key)) {
           validPairs.set(key, {
-            id: `ct_${row.machineId}_${row.itemId}_${op.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+            id: `ct_${row.machineId}_${itemId}_${op.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
             machine_id: row.machineId,
-            item_id: row.itemId,
+            item_id: itemId,
             operation: op,
             cycle_time: ct,
             is_active: true,
@@ -1125,9 +1134,47 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
     }
   }
 
-  // 1. Normalize runNo sequentially (1, 2, 3...) per machineId and generate deterministic id
+  const supabase = createAdminClient();
+
+  // Distinct (date, shift, line) scopes represented in the incoming payload
+  const scopes = new Map<string, { date: string; shift: string; line: string }>();
+  for (const row of rows) {
+    const rawShift = row.shift ?? "Shift A";
+    const shiftCode = extractShiftCode(rawShift);
+    const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
+    const scopeKey = `${row.date}__${cleanShift}__${row.line}`;
+    if (!scopes.has(scopeKey)) {
+      scopes.set(scopeKey, { date: row.date, shift: cleanShift, line: row.line });
+    }
+  }
+
+  // 1. Strict Server-Side Filter: Only non-empty rows are saved to public.shift_logs
+  const activeRows = rows.filter((r) => !isShiftRowEmpty(r));
+
+  // If ALL rows in the shift are empty, clean up all logs for these scopes and return
+  if (activeRows.length === 0) {
+    for (const scope of scopes.values()) {
+      const { error: delError } = await supabase
+        .from("shift_logs")
+        .delete()
+        .eq("log_date", scope.date)
+        .eq("shift", scope.shift)
+        .eq("line", scope.line);
+      if (delError) {
+        console.warn("Failed to prune cleared shift sheet from shift_logs:", delError.message);
+      }
+    }
+    revalidatePath("/");
+    return { success: true, count: 0, rows: [] };
+  }
+
+  // 2. Fetch valid item IDs from public.items to sanitize item_id foreign references
+  const { data: dbItems } = await supabase.from("items").select("id");
+  const validItemIdSet = new Set((dbItems || []).map((i) => i.id.trim()));
+
+  // 3. Normalize runNo sequentially (1, 2, 3...) per machineId and generate deterministic id
   const machineRunCounters = new Map<string, number>();
-  const normalizedRows: MachineShiftRow[] = rows.map((r) => {
+  const normalizedRows: MachineShiftRow[] = activeRows.map((r) => {
     const rawShift = r.shift ?? "Shift A";
     const shiftCode = extractShiftCode(rawShift);
     const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
@@ -1149,10 +1196,9 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
     };
   });
 
-  const supabase = createAdminClient();
-  const dbPayloads = normalizedRows.map((r) => mapUiRowToDbRow(r));
+  const dbPayloads = normalizedRows.map((r) => mapUiRowToDbRow(r, validItemIdSet));
 
-  // 2. Deduplicate dbPayloads in memory before touching Supabase
+  // 4. Deduplicate dbPayloads in memory before touching Supabase
   type DbPayload = ReturnType<typeof mapUiRowToDbRow>;
   const dedupedMap = new Map<string, DbPayload>();
   const seenCompositeKeys = new Set<string>();
@@ -1175,40 +1221,29 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
   }
 
   const dedupedPayloads = Array.from(dedupedMap.values());
-  if (dedupedPayloads.length === 0) return { success: true, count: 0, rows: [] };
+  const activeIds = dedupedPayloads.map((p) => p.id).filter(Boolean);
 
-  // 3. Delete Stale / Removed Rows for (log_date, shift, line) BEFORE Calling .upsert()
-  const savedIds = dedupedPayloads.map((p) => p.id).filter(Boolean);
-  if (savedIds.length > 0) {
-    // Collect distinct (log_date, shift, line) scopes present in dedupedPayloads
-    const scopes = new Map<string, { date: string; shift: string; line: string; ids: string[] }>();
-    for (const p of dedupedPayloads) {
-      const scopeKey = `${p.log_date}__${p.shift}__${p.line}`;
-      if (!scopes.has(scopeKey)) {
-        scopes.set(scopeKey, { date: p.log_date, shift: p.shift, line: p.line, ids: [] });
-      }
-      scopes.get(scopeKey)!.ids.push(p.id);
+  // 5. Delete Stale / Removed / Blanked Rows for (log_date, shift, line) BEFORE Calling .upsert()
+  for (const scope of scopes.values()) {
+    let delQuery = supabase
+      .from("shift_logs")
+      .delete()
+      .eq("log_date", scope.date)
+      .eq("shift", scope.shift)
+      .eq("line", scope.line);
+
+    if (activeIds.length > 0) {
+      const inClause = `(${activeIds.map((id) => `"${id.replace(/"/g, "")}"`).join(",")})`;
+      delQuery = delQuery.not("id", "in", inClause);
     }
 
-    for (const scope of scopes.values()) {
-      if (scope.ids.length > 0) {
-        const inClause = `(${scope.ids.map((id) => `"${id.replace(/"/g, "")}"`).join(",")})`;
-        const { error: delError } = await supabase
-          .from("shift_logs")
-          .delete()
-          .eq("log_date", scope.date)
-          .eq("shift", scope.shift)
-          .eq("line", scope.line)
-          .not("id", "in", inClause);
-
-        if (delError) {
-          console.warn("Failed to prune removed split rows from shift_logs before upsert:", delError.message);
-        }
-      }
+    const { error: delError } = await delQuery;
+    if (delError) {
+      console.warn("Failed to prune removed/blank rows from shift_logs before upsert:", delError.message);
     }
   }
 
-  // 4. Upsert Explicitly on Primary Key { onConflict: "id" }
+  // 6. Upsert Explicitly on Primary Key { onConflict: "id" }
   const { data, error } = await supabase
     .from("shift_logs")
     .upsert(dedupedPayloads, {
@@ -1218,7 +1253,7 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
 
   if (error) throw new Error(error.message);
 
-  // Auto-sync valid Machine × Item × Operation cycle times in background
+  // Auto-sync valid Machine × Item × Operation cycle times in background (only for valid active rows)
   await syncMachineItemCycleTimes(supabase, normalizedRows);
 
   revalidatePath("/");
@@ -1245,6 +1280,31 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
       ? `${row.date}_${cleanShift}_${row.line}_${row.machineId}`
       : `${row.date}_${cleanShift}_${row.line}_${row.machineId}_r${runNo}`;
 
+  // If the single machine row is empty, clean it up from shift_logs
+  if (isShiftRowEmpty(row)) {
+    const { error: delError } = await supabase
+      .from("shift_logs")
+      .delete()
+      .eq("id", deterministicId);
+    if (delError) {
+      console.warn("Failed to delete cleared machine row from shift_logs:", delError.message);
+    }
+    revalidatePath("/");
+    return {
+      success: true,
+      row: {
+        ...row,
+        shift: cleanShift,
+        runNo,
+        id: deterministicId,
+      },
+    };
+  }
+
+  // Fetch valid item IDs from public.items to sanitize item_id foreign references
+  const { data: dbItems } = await supabase.from("items").select("id");
+  const validItemIdSet = new Set((dbItems || []).map((i) => i.id.trim()));
+
   const normalizedRow: MachineShiftRow = {
     ...row,
     shift: cleanShift,
@@ -1252,7 +1312,7 @@ export async function updateSingleMachineLog(row: MachineShiftRow) {
     id: deterministicId,
   };
 
-  const dbPayload = mapUiRowToDbRow(normalizedRow);
+  const dbPayload = mapUiRowToDbRow(normalizedRow, validItemIdSet);
 
   const { data, error } = await supabase
     .from("shift_logs")
@@ -1290,8 +1350,32 @@ export async function saveMachineRuns(runs: MachineShiftRow[]) {
   const shiftCode = extractShiftCode(rawShift);
   const cleanShift = resolveCleanShiftDisplayName(shiftCode, rawShift);
 
-  // 1. Normalize runNo sequentially 1, 2, 3... and deterministic id
-  const normalizedRuns: MachineShiftRow[] = runs.map((r, idx) => {
+  // 1. Filter out empty runs
+  const activeRuns = runs.filter((r) => !isShiftRowEmpty(r));
+
+  // If ALL runs for this machine are empty, delete any existing saved rows for this machine
+  if (activeRuns.length === 0) {
+    const { error: delError } = await supabase
+      .from("shift_logs")
+      .delete()
+      .eq("log_date", first.date)
+      .eq("shift", cleanShift)
+      .eq("line", first.line)
+      .eq("machine_id", first.machineId);
+
+    if (delError) {
+      console.warn("Failed to prune cleared machine runs from shift_logs:", delError.message);
+    }
+    revalidatePath("/");
+    return { success: true, count: 0, rows: [] };
+  }
+
+  // 2. Fetch valid item IDs from public.items to sanitize item_id foreign references
+  const { data: dbItems } = await supabase.from("items").select("id");
+  const validItemIdSet = new Set((dbItems || []).map((i) => i.id.trim()));
+
+  // 3. Normalize runNo sequentially 1, 2, 3... and deterministic id
+  const normalizedRuns: MachineShiftRow[] = activeRuns.map((r, idx) => {
     const runNo = idx + 1;
     const deterministicId =
       runNo === 1
@@ -1305,9 +1389,9 @@ export async function saveMachineRuns(runs: MachineShiftRow[]) {
     };
   });
 
-  const dbPayloads = normalizedRuns.map((r) => mapUiRowToDbRow(r));
+  const dbPayloads = normalizedRuns.map((r) => mapUiRowToDbRow(r, validItemIdSet));
 
-  // 2. Deduplicate dbPayloads in memory before touching Supabase
+  // 4. Deduplicate dbPayloads in memory before touching Supabase
   type DbPayload = ReturnType<typeof mapUiRowToDbRow>;
   const dedupedMap = new Map<string, DbPayload>();
   const seenCompositeKeys = new Set<string>();
@@ -1330,26 +1414,28 @@ export async function saveMachineRuns(runs: MachineShiftRow[]) {
   }
 
   const dedupedPayloads = Array.from(dedupedMap.values());
-  const savedIds = dedupedPayloads.map((p) => p.id).filter(Boolean);
+  const activeIds = dedupedPayloads.map((p) => p.id).filter(Boolean);
 
-  // 3. Clean up any removed split runs for this machine on this date/shift/line BEFORE .upsert()
-  if (savedIds.length > 0) {
-    const inClause = `(${savedIds.map((id) => `"${id.replace(/"/g, "")}"`).join(",")})`;
-    const { error: delError } = await supabase
-      .from("shift_logs")
-      .delete()
-      .eq("log_date", first.date)
-      .eq("shift", cleanShift)
-      .eq("line", first.line)
-      .eq("machine_id", first.machineId)
-      .not("id", "in", inClause);
+  // 5. Clean up any removed / blanked split runs for this machine on this date/shift/line BEFORE .upsert()
+  let delQuery = supabase
+    .from("shift_logs")
+    .delete()
+    .eq("log_date", first.date)
+    .eq("shift", cleanShift)
+    .eq("line", first.line)
+    .eq("machine_id", first.machineId);
 
-    if (delError) {
-      console.warn("Failed to prune removed runs for machine before upsert:", delError.message);
-    }
+  if (activeIds.length > 0) {
+    const inClause = `(${activeIds.map((id) => `"${id.replace(/"/g, "")}"`).join(",")})`;
+    delQuery = delQuery.not("id", "in", inClause);
   }
 
-  // 4. Upsert Explicitly on Primary Key { onConflict: "id" }
+  const { error: delError } = await delQuery;
+  if (delError) {
+    console.warn("Failed to prune removed runs for machine before upsert:", delError.message);
+  }
+
+  // 6. Upsert Explicitly on Primary Key { onConflict: "id" }
   const { data, error } = await supabase
     .from("shift_logs")
     .upsert(dedupedPayloads, {
@@ -1601,8 +1687,11 @@ export async function updateItemMaster(input: {
   id: string;
   oldName: string;
   oldCode?: string;
+  oldOperation?: string;
   newName: string;
   newCode: string;
+  newOperation?: string;
+  operationRenames?: Array<{ oldOp: string; newOp: string }>;
 }) {
   const isAdmin = await isUnitHeadSession();
   if (!isAdmin) {
@@ -1614,6 +1703,8 @@ export async function updateItemMaster(input: {
   const trimmedNewCode = (input.newCode || "").trim().toUpperCase();
   const trimmedOldName = (input.oldName || "").trim();
   const trimmedOldCode = (input.oldCode || "").trim().toUpperCase();
+  const rawOldOp = (input.oldOperation || "").trim();
+  const rawNewOp = (input.newOperation ?? input.oldOperation ?? "").trim();
 
   if (!trimmedNewName) {
     throw new Error("Item name cannot be empty.");
@@ -1622,7 +1713,29 @@ export async function updateItemMaster(input: {
     throw new Error("Item code cannot be empty.");
   }
 
-  // Fetch all items to identify siblings (multi-operation items) and duplicate code check
+  // 1. Parse and validate operations
+  const opTokens = rawNewOp
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  const seenOps = new Set<string>();
+  const normalizedOps: string[] = [];
+  for (const op of opTokens) {
+    const lower = op.toLowerCase();
+    if (!seenOps.has(lower)) {
+      seenOps.add(lower);
+      normalizedOps.push(op);
+    }
+  }
+
+  if (normalizedOps.length === 0) {
+    throw new Error("At least one operation is required.");
+  }
+
+  const normalizedNewOpString = normalizedOps.join(", ");
+
+  // 2. Fetch all items to identify siblings (multi-operation items) and duplicate code check
   const { data: allItems, error: itemsErr } = await supabase
     .from("items")
     .select("*");
@@ -1662,17 +1775,56 @@ export async function updateItemMaster(input: {
 
   const idsToUpdate = Array.from(siblingIds);
 
-  const { error: updateErr } = await supabase
+  // 3. Update public.items:
+  // Update the edited row with item_name, item_code, and operation
+  const { error: updateMainErr } = await supabase
     .from("items")
     .update({
       item_name: trimmedNewName,
       item_code: trimmedNewCode,
+      operation: normalizedNewOpString,
     })
-    .in("id", idsToUpdate);
+    .eq("id", input.id);
 
-  if (updateErr) throw new Error(updateErr.message);
+  if (updateMainErr) throw new Error(updateMainErr.message);
 
-  // Cascade to public.shift_logs
+  // If there are other sibling rows sharing item_name/code, update their item_name & code too
+  const otherSiblingIds = idsToUpdate.filter((id) => id !== input.id);
+  if (otherSiblingIds.length > 0) {
+    const { error: updateSiblingsErr } = await supabase
+      .from("items")
+      .update({
+        item_name: trimmedNewName,
+        item_code: trimmedNewCode,
+      })
+      .in("id", otherSiblingIds);
+
+    if (updateSiblingsErr) {
+      console.warn("Failed to update sibling items name/code:", updateSiblingsErr.message);
+    }
+  }
+
+  // 4. Determine Operation Renames (renames array)
+  const renames: Array<{ oldOp: string; newOp: string }> = [];
+  if (input.operationRenames && input.operationRenames.length > 0) {
+    for (const r of input.operationRenames) {
+      const oldOpTrim = (r.oldOp || "").trim();
+      const newOpTrim = (r.newOp || "").trim();
+      if (oldOpTrim && newOpTrim && oldOpTrim.toLowerCase() !== newOpTrim.toLowerCase()) {
+        renames.push({ oldOp: oldOpTrim, newOp: newOpTrim });
+      }
+    }
+  } else if (
+    rawOldOp &&
+    !rawOldOp.includes(",") &&
+    !normalizedNewOpString.includes(",") &&
+    rawOldOp.toLowerCase() !== normalizedNewOpString.toLowerCase()
+  ) {
+    renames.push({ oldOp: rawOldOp, newOp: normalizedNewOpString });
+  }
+
+  // 5. Cascade to public.shift_logs
+  // Update item_name by item_id
   const { error: cascadeIdErr } = await supabase
     .from("shift_logs")
     .update({ item_name: trimmedNewName })
@@ -1693,8 +1845,83 @@ export async function updateItemMaster(input: {
     }
   }
 
+  // Cascade renamed operations to public.shift_logs
+  for (const { oldOp, newOp } of renames) {
+    const { error: opCascadeErr } = await supabase
+      .from("shift_logs")
+      .update({ operation: newOp })
+      .in("item_id", idsToUpdate)
+      .eq("operation", oldOp);
+
+    if (opCascadeErr) {
+      console.error(`Failed to cascade operation "${oldOp}" -> "${newOp}" in shift_logs:`, opCascadeErr);
+    }
+  }
+
+  // 6. Cascade Renamed Operations to public.machine_item_cycle_times (Collision-Safe)
+  for (const { oldOp, newOp } of renames) {
+    const { data: matchedCycleTimes, error: fetchCtErr } = await supabase
+      .from("machine_item_cycle_times")
+      .select("*")
+      .in("item_id", idsToUpdate)
+      .eq("operation", oldOp);
+
+    if (fetchCtErr) {
+      console.error(`Failed to fetch cycle times for operation "${oldOp}":`, fetchCtErr);
+      continue;
+    }
+
+    if (matchedCycleTimes && matchedCycleTimes.length > 0) {
+      for (const ct of matchedCycleTimes) {
+        // Check if a row already exists for (machine_id, item_id, newOp)
+        const { data: existingConflict } = await supabase
+          .from("machine_item_cycle_times")
+          .select("id")
+          .eq("machine_id", ct.machine_id)
+          .eq("item_id", ct.item_id)
+          .eq("operation", newOp)
+          .maybeSingle();
+
+        if (existingConflict) {
+          // Conflict found: delete the duplicate old row
+          if (ct.id) {
+            await supabase.from("machine_item_cycle_times").delete().eq("id", ct.id);
+          } else {
+            await supabase
+              .from("machine_item_cycle_times")
+              .delete()
+              .eq("machine_id", ct.machine_id)
+              .eq("item_id", ct.item_id)
+              .eq("operation", oldOp);
+          }
+        } else {
+          // No conflict: safe to update operation
+          if (ct.id) {
+            await supabase
+              .from("machine_item_cycle_times")
+              .update({
+                operation: newOp,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", ct.id);
+          } else {
+            await supabase
+              .from("machine_item_cycle_times")
+              .update({
+                operation: newOp,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("machine_id", ct.machine_id)
+              .eq("item_id", ct.item_id)
+              .eq("operation", oldOp);
+          }
+        }
+      }
+    }
+  }
+
   revalidatePath("/");
-  return { success: true };
+  return { success: true, renames };
 }
 
 export async function upsertMachineItemCycleTime(entry: MachineItemCycleTime) {
@@ -1866,10 +2093,13 @@ export async function getAnalyticsLogs(
   }
 
   const PAGE_SIZE = 1000;
+  const MAX_PAGES = 50;
   let offset = 0;
+  let pageCount = 0;
   const allRows: DbShiftLogRow[] = [];
 
-  while (true) {
+  while (pageCount < MAX_PAGES) {
+    pageCount++;
     let query = supabase
       .from("shift_logs")
       .select("*")
@@ -1886,7 +2116,10 @@ export async function getAnalyticsLogs(
     }
 
     const { data, error } = await query;
-    if (error) throw new Error(error.message);
+    if (error) {
+      console.error("getAnalyticsLogs query error:", error);
+      break;
+    }
 
     const chunk = (data as DbShiftLogRow[]) || [];
     allRows.push(...chunk);
@@ -1936,9 +2169,12 @@ export async function getItemProductionRollups(
           itemCode: it.item_code || "",
           itemName: it.item_name || "",
         };
-        if (it.id) itemCodeMap.set(it.id.trim().toLowerCase(), info);
-        if (it.item_code) itemCodeMap.set(it.item_code.trim().toLowerCase(), info);
-        if (it.item_name) itemCodeMap.set(it.item_name.trim().toLowerCase(), info);
+        const idKey = (it.id || "").trim().toLowerCase();
+        const codeKey = (it.item_code || "").trim().toLowerCase();
+        const nameKey = (it.item_name || "").trim().toLowerCase();
+        if (idKey.length > 0) itemCodeMap.set(idKey, info);
+        if (codeKey.length > 0) itemCodeMap.set(codeKey, info);
+        if (nameKey.length > 0) itemCodeMap.set(nameKey, info);
       }
     }
   } catch {
@@ -1964,10 +2200,13 @@ export async function getItemProductionRollups(
     const rawName = (row.item_name || "").trim();
     if (!rawId && !rawName) continue;
 
+    const idKey = rawId.toLowerCase();
+    const nameKey = rawName.toLowerCase();
+
     // Resolve item metadata
     const masterInfo =
-      (rawId ? itemCodeMap.get(rawId.toLowerCase()) : null) ||
-      (rawName ? itemCodeMap.get(rawName.toLowerCase()) : null);
+      (idKey.length > 0 ? itemCodeMap.get(idKey) : null) ||
+      (nameKey.length > 0 ? itemCodeMap.get(nameKey) : null);
 
     const itemCode = masterInfo?.itemCode || (rawId.startsWith("item_") || rawId.startsWith("it_") ? "" : rawId);
     const itemName = masterInfo?.itemName || rawName || itemCode || "Unknown Part";
