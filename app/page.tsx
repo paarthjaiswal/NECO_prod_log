@@ -2,12 +2,13 @@ import DashboardClient from "@/components/DashboardClient";
 import {
   getMasterData,
   getShiftSheetRows,
+  getShiftItemProduction,
   getFactoryTimeContext,
 } from "@/actions/shiftActions";
 import { getIsUnitHead } from "@/actions/authActions";
 import { getFallbackFactoryTimeContext } from "@/utils/factoryTime";
 import { PRODUCTION_LINES } from "@/data/initialData";
-import { MasterDataState, MachineShiftRow, ShiftType } from "@/types";
+import { MasterDataState, MachineShiftRow, ShiftType, ShiftItemProductionRow } from "@/types";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,7 @@ export default async function HomePage() {
   };
 
   let initialRows: MachineShiftRow[] = [];
+  let initialShiftItemTotals: ShiftItemProductionRow[] = [];
   let initialDate = "";
   let initialShift: ShiftType = "Shift A (7AM-3:30PM)";
   let isAdmin = false;
@@ -42,11 +44,12 @@ export default async function HomePage() {
       initialMasterData = fetchedMaster;
     }
 
-    initialRows = await getShiftSheetRows(
-      initialDate,
-      initialShift,
-      initialLine
-    );
+    const [freshRows, freshItemProd] = await Promise.all([
+      getShiftSheetRows(initialDate, initialShift, initialLine),
+      getShiftItemProduction(initialDate, initialShift, initialLine),
+    ]);
+    initialRows = freshRows;
+    initialShiftItemTotals = freshItemProd;
   } catch (error) {
     console.error(
       "Supabase unreachable or error on initial load:",
@@ -60,12 +63,14 @@ export default async function HomePage() {
       initialShift = fallbackCtx.autoSelectedShift;
     }
     initialRows = [];
+    initialShiftItemTotals = [];
   }
 
   return (
     <DashboardClient
       initialMasterData={initialMasterData}
       initialRows={initialRows}
+      initialShiftItemTotals={initialShiftItemTotals}
       initialDate={initialDate}
       initialShift={initialShift}
       initialLine={initialLine}

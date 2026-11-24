@@ -24,6 +24,7 @@ import {
   MasterDataState,
   ShiftType,
   OpenMachineParams,
+  ShiftItemProductionRow,
 } from "@/types";
 import {
   exportHistoricalToCSV,
@@ -31,7 +32,7 @@ import {
   exportFilteredAnalyticsWorkbook,
   exportActiveAnalyticsTabExcel,
 } from "@/services/excelExport";
-import { getAnalyticsLogs } from "@/actions/shiftActions";
+import { getAnalyticsLogs, getAnalyticsItemProduction } from "@/actions/shiftActions";
 import { useFeedback } from "@/context/FeedbackContext";
 import {
   computeAllocatedPlannedMinutes,
@@ -120,6 +121,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   // Data loaded from Supabase
   const [historicalLogs, setHistoricalLogs] = useState<MachineShiftRow[]>([]);
+  const [historicalItemProduction, setHistoricalItemProduction] = useState<ShiftItemProductionRow[]>([]);
 
   // --------------------------------------------------------------------------
   // MACHINE DRILLDOWN STATE & URL SYNC
@@ -204,9 +206,13 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
       await runWithFeedback(
         async () => {
-          const data = await getAnalyticsLogs(from, to);
-          setHistoricalLogs(data || []);
-          return data;
+          const [logsData, itemProdData] = await Promise.all([
+            getAnalyticsLogs(from, to),
+            getAnalyticsItemProduction(from, to),
+          ]);
+          setHistoricalLogs(logsData || []);
+          setHistoricalItemProduction(itemProdData || []);
+          return logsData;
         },
         {
           loadingMessage: "Loading analytics data...",
@@ -297,6 +303,16 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       if (r.operatorName) opSet.add(r.operatorName);
     }
 
+    for (const itemProd of historicalItemProduction) {
+      if (itemProd.itemName || itemProd.itemId || itemProd.itemKey) {
+        const pKey = (itemProd.itemId || itemProd.itemName || itemProd.itemKey || "").trim();
+        const pName = itemProd.itemName || itemProd.itemCode || pKey;
+        if (pKey && !prodMap.has(pKey)) prodMap.set(pKey, pName);
+      }
+      if (itemProd.line) lineSet.add(itemProd.line);
+      if (itemProd.shift) shiftSet.add(itemProd.shift);
+    }
+
     // Include masterData lines if not yet in shift_logs
     if (masterData?.lines) {
       masterData.lines.forEach((l) => lineSet.add(l.name));
@@ -309,7 +325,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       machines: Array.from(machMap.values()).sort((a, b) => a.name.localeCompare(b.name)),
       operators: Array.from(opSet).sort(),
     };
-  }, [enrichedAllRows, masterData]);
+  }, [enrichedAllRows, historicalItemProduction, masterData]);
 
   const hasActiveFacetFilters =
     filterProduct !== "all" ||
@@ -382,6 +398,32 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     splitRunsOnly,
   ]);
 
+  // Filtered shift-level finished goods totals reflecting active filters
+  const filteredShiftItemTotals = useMemo(() => {
+    return historicalItemProduction.filter((r) => {
+      if (filterLine !== "all" && (r.line || "").toLowerCase() !== filterLine.toLowerCase()) {
+        return false;
+      }
+      if (filterShift !== "all" && (r.shift || "").toLowerCase() !== filterShift.toLowerCase()) {
+        return false;
+      }
+      if (filterProduct !== "all") {
+        const target = filterProduct.toLowerCase();
+        const matchName = (r.itemName || "").toLowerCase() === target;
+        const matchCode = (r.itemCode || "").toLowerCase() === target;
+        const matchId = (r.itemId || "").toLowerCase() === target;
+        const matchKey = (r.itemKey || "").toLowerCase() === target;
+        if (!matchName && !matchCode && !matchId && !matchKey) return false;
+      }
+      return true;
+    });
+  }, [historicalItemProduction, filterLine, filterShift, filterProduct]);
+
+  // Total finished goods produced across all items for active filter range
+  const totalFinishedProduction = useMemo(() => {
+    return filteredShiftItemTotals.reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
+  }, [filteredShiftItemTotals]);
+
   // Overall OEE Metrics reflecting active filters
   const overallMetrics: OeeMetrics = useMemo(() => {
     return calculateOeeMetrics(filteredRows);
@@ -400,7 +442,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   // Tab 1: Product Matrix
   const productMatrix = useMemo(() => {
-    const list = buildProductLineMachineMatrix(filteredRows);
+    const list = buildProductLineMachineMatrix(filteredRows, filteredShiftItemTotals);
     if (!productSearch.trim()) return list;
     const q = productSearch.trim().toLowerCase();
     return list.filter(
@@ -409,22 +451,22 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         p.productCode.toLowerCase().includes(q) ||
         p.lines.some((l) => l.toLowerCase().includes(q))
     );
-  }, [filteredRows, productSearch]);
+  }, [filteredRows, filteredShiftItemTotals, productSearch]);
 
   // Tab 2: Line Rollups
   const lineRollups = useMemo(() => {
-    return groupByLine(filteredRows);
-  }, [filteredRows]);
+    return groupByLine(filteredRows, filteredShiftItemTotals);
+  }, [filteredRows, filteredShiftItemTotals]);
 
   // Tab 3: Shift Rollups
   const shiftRollups = useMemo(() => {
-    return groupByShift(filteredRows);
-  }, [filteredRows]);
+    return groupByShift(filteredRows, filteredShiftItemTotals);
+  }, [filteredRows, filteredShiftItemTotals]);
 
   // Tab 4: Period Rollups
   const periodRollups = useMemo(() => {
-    return groupByPeriod(filteredRows, periodGranularity);
-  }, [filteredRows, periodGranularity]);
+    return groupByPeriod(filteredRows, periodGranularity, filteredShiftItemTotals);
+  }, [filteredRows, periodGranularity, filteredShiftItemTotals]);
 
   // Tab 5: Machine Rollups
   const machineRollups = useMemo(() => {
@@ -490,6 +532,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         activeFilters: activeFiltersMeta,
         periodGranularity,
         masterData,
+        shiftItemTotals: filteredShiftItemTotals,
       });
       notifySuccess(
         "Excel Export Complete",
@@ -504,6 +547,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     activeFiltersMeta,
     periodGranularity,
     masterData,
+    filteredShiftItemTotals,
     fromDate,
     toDate,
     notifySuccess,
@@ -533,6 +577,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           product: prod,
           itemRows,
           activeFilters: activeFiltersMeta,
+          shiftItemTotals: filteredShiftItemTotals,
         });
 
         notifySuccess(
@@ -544,7 +589,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         notifyError("Export Failed", `Failed to generate Excel for ${prod.productName}.`);
       }
     },
-    [filteredRows, activeFiltersMeta, notifySuccess, notifyError]
+    [filteredRows, activeFiltersMeta, filteredShiftItemTotals, notifySuccess, notifyError]
   );
 
   const handleExportActiveTab = useCallback(
@@ -561,6 +606,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           activeFilters: activeFiltersMeta,
           periodGranularity,
           masterData,
+          shiftItemTotals: filteredShiftItemTotals,
         });
 
         const tabNames: Record<TabType, string> = {
@@ -588,6 +634,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       activeFiltersMeta,
       periodGranularity,
       masterData,
+      filteredShiftItemTotals,
       fromDate,
       toDate,
       notifySuccess,
@@ -975,6 +1022,20 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 {overallMetrics.totalStd.toLocaleString()} pcs
               </span>
             </div>
+            <div className="flex justify-between items-baseline pt-1 border-t border-slate-100">
+              <div>
+                <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                  <Package className="w-3 h-3" />
+                  <span>Total Prod (Pre-QC):</span>
+                </span>
+                <span className="text-[10px] text-slate-400 block font-normal ml-4">
+                  Pre-QC (100% Assumed)
+                </span>
+              </div>
+              <span className="font-mono font-bold text-emerald-700">
+                {totalFinishedProduction.toLocaleString()} pcs
+              </span>
+            </div>
           </div>
         </div>
 
@@ -1250,26 +1311,37 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
                         {/* Product KPI Mini Bar */}
                         <div className="flex items-center gap-3 text-xs">
+                          <div className="text-right px-2.5 py-1 bg-emerald-50 rounded border border-emerald-200">
+                            <span className="text-[10px] text-emerald-700 font-bold uppercase block tracking-wider">
+                              Total Prod (Pre-QC)
+                            </span>
+                            <span className="font-mono font-extrabold text-emerald-800 text-xs">
+                              {(prod.preQcProduction ?? prod.finishedProduction ?? 0).toLocaleString()} pcs
+                            </span>
+                            <span className="text-[9px] text-emerald-600 block font-medium">
+                              QC Pass: 100% (Assumed)
+                            </span>
+                          </div>
                           <div className="text-right">
-                            <span className="text-[10px] text-slate-500 uppercase block">Actual Output</span>
+                            <span className="text-[10px] text-slate-500 uppercase block">Machine Ops</span>
                             <span className="font-mono font-bold text-slate-900">
-                              {prod.metrics.totalActual.toLocaleString()} pcs
+                              {prod.metrics.totalActual.toLocaleString()} ops
                             </span>
                           </div>
                           <div className="text-right">
-                            <span className="text-[10px] text-slate-500 uppercase block">Good Output</span>
+                            <span className="text-[10px] text-slate-500 uppercase block">Good Ops</span>
                             <span className="font-mono font-bold text-emerald-700">
-                              {prod.metrics.goodOutput.toLocaleString()} pcs
+                              {prod.metrics.goodOutput.toLocaleString()} ops
                             </span>
                           </div>
                           <div className="text-right">
-                            <span className="text-[10px] text-slate-500 uppercase block">Rework</span>
+                            <span className="text-[10px] text-slate-500 uppercase block">In-Proc Rework</span>
                             <span className="font-mono font-bold text-amber-600">
-                              {prod.metrics.totalRework.toLocaleString()} pcs
+                              {prod.metrics.totalRework.toLocaleString()} ops
                             </span>
                           </div>
                           <div className="text-right pl-2 border-l border-slate-200">
-                            <span className="text-[10px] text-slate-500 uppercase block">Product OEE</span>
+                            <span className="text-[10px] text-slate-500 uppercase block">Machine OEE</span>
                             <span
                               className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
                                 prod.metrics.oeePct
@@ -1437,6 +1509,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <th className="px-3 py-2.5 text-right">Target (Std)</th>
                     <th className="px-3 py-2.5 text-right">Actual Output</th>
                     <th className="px-3 py-2.5 text-right">Good Output</th>
+                    <th className="px-3 py-2.5 text-right text-emerald-400" title="Authoritative Total Production (Pre-QC - 100% Assumed Passed)">Total Prod (Pre-QC)</th>
                     <th className="px-3 py-2.5 text-right">Rework</th>
                     <th className="px-3 py-2.5 text-right">Downtime</th>
                     <th className="px-3 py-2.5 text-right">Availability</th>
@@ -1457,6 +1530,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       </td>
                       <td className="px-3 py-2 text-right text-emerald-700 font-bold">
                         {l.metrics.goodOutput.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700 font-black bg-emerald-50/50">
+                        {(l.preQcProduction ?? l.finishedProduction ?? 0).toLocaleString()}
                       </td>
                       <td className="px-3 py-2 text-right text-amber-600">{l.metrics.totalRework.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-rose-600">{l.metrics.downtimeMinutes}m</td>
@@ -1510,6 +1586,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <th className="px-3 py-2.5 text-right">Target (Std)</th>
                     <th className="px-3 py-2.5 text-right">Actual Output</th>
                     <th className="px-3 py-2.5 text-right">Good Output</th>
+                    <th className="px-3 py-2.5 text-right text-emerald-400" title="Authoritative Total Production (Pre-QC - 100% Assumed Passed)">Total Prod (Pre-QC)</th>
                     <th className="px-3 py-2.5 text-right">Rework</th>
                     <th className="px-3 py-2.5 text-right">Downtime</th>
                     <th className="px-3 py-2.5 text-right">Availability</th>
@@ -1528,6 +1605,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       </td>
                       <td className="px-3 py-2 text-right text-emerald-700 font-bold">
                         {s.metrics.goodOutput.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700 font-black bg-emerald-50/50">
+                        {(s.preQcProduction ?? s.finishedProduction ?? 0).toLocaleString()}
                       </td>
                       <td className="px-3 py-2 text-right text-amber-600">{s.metrics.totalRework.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-rose-600">{s.metrics.downtimeMinutes}m</td>
@@ -1609,6 +1689,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <th className="px-3 py-2.5 text-right">Target (Std)</th>
                     <th className="px-3 py-2.5 text-right">Actual Output</th>
                     <th className="px-3 py-2.5 text-right">Good Output</th>
+                    <th className="px-3 py-2.5 text-right text-emerald-400" title="Authoritative Total Production (Pre-QC - 100% Assumed Passed)">Total Prod (Pre-QC)</th>
                     <th className="px-3 py-2.5 text-right">Rework</th>
                     <th className="px-3 py-2.5 text-right">Downtime</th>
                     <th className="px-3 py-2.5 text-right">Avail %</th>
@@ -1646,6 +1727,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                       </td>
                       <td className="px-3 py-2 text-right text-emerald-700 font-bold">
                         {p.metrics.goodOutput.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700 font-black bg-emerald-50/50">
+                        {(p.preQcProduction ?? p.finishedProduction ?? 0).toLocaleString()}
                       </td>
                       <td className="px-3 py-2 text-right text-amber-600">{p.metrics.totalRework.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right text-rose-600">{p.metrics.downtimeMinutes}m</td>

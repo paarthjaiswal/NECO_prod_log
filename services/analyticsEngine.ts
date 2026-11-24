@@ -15,8 +15,9 @@ import {
   ItemMaster,
   MachineItemCycleTime,
   BreakdownMinutes,
+  ShiftItemProductionRow,
 } from "@/types";
-import { calculateTotalBreakdown, isShiftRowEmpty } from "@/services/storageService";
+import { calculateTotalBreakdown, isShiftRowEmpty, buildCanonicalItemKey } from "@/services/storageService";
 
 export interface EnrichedAnalyticsRow extends MachineShiftRow {
   allocatedPlannedMinutes: number;
@@ -76,6 +77,36 @@ export interface ProductMatrixRow {
   latestLine: string;
 }
 
+export interface ProductQcMetrics {
+  preQcProduction: number;      // Authoritative count from shift_item_production.total_production
+  qcPassed: number;             // Currently === preQcProduction (100% assumed pending QC module)
+  qcRejected: number;           // Currently 0
+  qcPassPct: number;            // preQcProduction > 0 ? 100 : 0
+  isQcAssumed: boolean;         // true until Quality Inspection module is connected
+  hasLoggedProduction: boolean; // true if at least one shift_item_production row exists
+}
+
+/**
+ * Future-proof QC resolver:
+ * Currently assumes 100% pass rate for pre-QC finished production.
+ * Once a dedicated Quality Inspection module is added, this function can be easily swapped
+ * to read real inspection lots/rejections without breaking existing downstream consumers.
+ */
+export function resolveProductQcMetrics(
+  preQcProduction: number,
+  hasLoggedProduction: boolean = true
+): ProductQcMetrics {
+  const prod = Math.max(0, Number(preQcProduction) || 0);
+  return {
+    preQcProduction: prod,
+    qcPassed: prod,
+    qcRejected: 0,
+    qcPassPct: prod > 0 ? 100 : 0,
+    isQcAssumed: true,
+    hasLoggedProduction,
+  };
+}
+
 export interface ProductMatrixItem {
   productKey: string;
   productName: string;
@@ -83,6 +114,11 @@ export interface ProductMatrixItem {
   metrics: OeeMetrics;
   lines: string[];
   matrix: ProductMatrixRow[];
+  preQcProduction: number;
+  finishedProduction: number; // Kept for backwards-compatibility aliased to preQcProduction
+  dailyPreQcProduction: Record<string, number>;
+  dailyFinishedProduction: Record<string, number>; // Kept for backwards-compatibility
+  qcMetrics: ProductQcMetrics;
 }
 
 export interface ItemSummary {
@@ -101,6 +137,9 @@ export interface LineRollupItem {
   machineCount: number;
   permMachineCount: number;
   tempMachineCount: number;
+  preQcProduction: number;
+  finishedProduction: number;
+  qcMetrics: ProductQcMetrics;
 }
 
 export interface ShiftRollupItem {
@@ -108,6 +147,9 @@ export interface ShiftRollupItem {
   metrics: OeeMetrics;
   topItems: ItemSummary[];
   machineCount: number;
+  preQcProduction: number;
+  finishedProduction: number;
+  qcMetrics: ProductQcMetrics;
 }
 
 export interface PeriodRollupItem {
@@ -118,6 +160,9 @@ export interface PeriodRollupItem {
   activeDates: string[];
   activeShifts: string[];
   activeLines: string[];
+  preQcProduction: number;
+  finishedProduction: number;
+  qcMetrics: ProductQcMetrics;
 }
 
 export interface MachineRollupItem {
@@ -324,7 +369,8 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
  * Groups by Product (canonical itemName / itemId), returning overall OEE + Line & Machine Matrix Table.
  */
 export function buildProductLineMachineMatrix(
-  enrichedRows: EnrichedAnalyticsRow[]
+  enrichedRows: EnrichedAnalyticsRow[],
+  shiftItemTotals?: ShiftItemProductionRow[]
 ): ProductMatrixItem[] {
   const productMap = new Map<string, EnrichedAnalyticsRow[]>();
 
@@ -419,6 +465,30 @@ export function buildProductLineMachineMatrix(
       return a.machineName.localeCompare(b.machineName);
     });
 
+    // Finished / Pre-QC production totals from shift_item_production
+    let preQcProduction = 0;
+    let hasLoggedProduction = false;
+    const dailyPreQc: Record<string, number> = {};
+    if (shiftItemTotals && shiftItemTotals.length > 0) {
+      for (const p of shiftItemTotals) {
+        const pKey = p.itemKey || buildCanonicalItemKey(p.itemCode, p.itemName);
+        const matches =
+          pKey === key ||
+          (p.itemCode && productCode && p.itemCode.trim().toLowerCase() === productCode.trim().toLowerCase()) ||
+          (p.itemName && productName && p.itemName.trim().toLowerCase() === productName.trim().toLowerCase());
+        if (matches) {
+          hasLoggedProduction = true;
+          const qty = Number(p.totalProduction) || 0;
+          preQcProduction += qty;
+          if (p.date) {
+            dailyPreQc[p.date] = (dailyPreQc[p.date] || 0) + qty;
+          }
+        }
+      }
+    }
+
+    const qcMetrics = resolveProductQcMetrics(preQcProduction, hasLoggedProduction);
+
     result.push({
       productKey: key,
       productName,
@@ -426,18 +496,69 @@ export function buildProductLineMachineMatrix(
       metrics: overallMetrics,
       lines,
       matrix,
+      preQcProduction,
+      finishedProduction: preQcProduction,
+      dailyPreQcProduction: dailyPreQc,
+      dailyFinishedProduction: dailyPreQc,
+      qcMetrics,
     });
   }
 
-  // Sort products by Actual Output descending
-  result.sort((a, b) => b.metrics.totalActual - a.metrics.totalActual);
+  // Include any finished production items that had no machine operations logged
+  if (shiftItemTotals && shiftItemTotals.length > 0) {
+    const presentKeys = new Set(result.map((r) => r.productKey));
+    const extraMap = new Map<string, ShiftItemProductionRow[]>();
+    for (const p of shiftItemTotals) {
+      const k = p.itemKey || buildCanonicalItemKey(p.itemCode, p.itemName);
+      if (!k || presentKeys.has(k)) continue;
+      const list = extraMap.get(k) || [];
+      list.push(p);
+      extraMap.set(k, list);
+    }
+    for (const [k, pRows] of extraMap.entries()) {
+      const sample = pRows[0];
+      const preQcProduction = pRows.reduce((acc, r) => acc + (Number(r.totalProduction) || 0), 0);
+      const dailyPreQc: Record<string, number> = {};
+      for (const r of pRows) {
+        if (r.date) {
+          dailyPreQc[r.date] = (dailyPreQc[r.date] || 0) + (Number(r.totalProduction) || 0);
+        }
+      }
+      const lines = Array.from(new Set(pRows.map((r) => r.line || "Line 1"))).sort();
+      const qcMetrics = resolveProductQcMetrics(preQcProduction, true);
+      result.push({
+        productKey: k,
+        productName: sample.itemName || sample.itemCode || k,
+        productCode: sample.itemCode || "",
+        metrics: calculateOeeMetrics([]),
+        lines,
+        matrix: [],
+        preQcProduction,
+        finishedProduction: preQcProduction,
+        dailyPreQcProduction: dailyPreQc,
+        dailyFinishedProduction: dailyPreQc,
+        qcMetrics,
+      });
+    }
+  }
+
+  // Sort products by Actual Output descending, fallback to Finished Production
+  result.sort((a, b) => {
+    if (b.metrics.totalActual !== a.metrics.totalActual) {
+      return b.metrics.totalActual - a.metrics.totalActual;
+    }
+    return b.finishedProduction - a.finishedProduction;
+  });
   return result;
 }
 
 /**
  * Step 3B: Group By Line
  */
-export function groupByLine(enrichedRows: EnrichedAnalyticsRow[]): LineRollupItem[] {
+export function groupByLine(
+  enrichedRows: EnrichedAnalyticsRow[],
+  shiftItemTotals?: ShiftItemProductionRow[]
+): LineRollupItem[] {
   const lineMap = new Map<string, EnrichedAnalyticsRow[]>();
 
   for (const r of enrichedRows) {
@@ -489,6 +610,14 @@ export function groupByLine(enrichedRows: EnrichedAnalyticsRow[]): LineRollupIte
     );
     const permMachinesCount = machines.size - tempMachines.size;
 
+    const linePreQc = (shiftItemTotals || [])
+      .filter((r) => (r.line || "Line 1").toLowerCase() === line.toLowerCase())
+      .reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
+    const lineHasLogged = (shiftItemTotals || []).some(
+      (r) => (r.line || "Line 1").toLowerCase() === line.toLowerCase()
+    );
+    const qcMetrics = resolveProductQcMetrics(linePreQc, lineHasLogged);
+
     result.push({
       line,
       metrics,
@@ -496,6 +625,9 @@ export function groupByLine(enrichedRows: EnrichedAnalyticsRow[]): LineRollupIte
       machineCount: machines.size,
       permMachineCount: Math.max(0, permMachinesCount),
       tempMachineCount: tempMachines.size,
+      preQcProduction: linePreQc,
+      finishedProduction: linePreQc,
+      qcMetrics,
     });
   }
 
@@ -506,7 +638,10 @@ export function groupByLine(enrichedRows: EnrichedAnalyticsRow[]): LineRollupIte
 /**
  * Step 3C: Group By Shift
  */
-export function groupByShift(enrichedRows: EnrichedAnalyticsRow[]): ShiftRollupItem[] {
+export function groupByShift(
+  enrichedRows: EnrichedAnalyticsRow[],
+  shiftItemTotals?: ShiftItemProductionRow[]
+): ShiftRollupItem[] {
   const shiftMap = new Map<string, EnrichedAnalyticsRow[]>();
 
   for (const r of enrichedRows) {
@@ -550,11 +685,22 @@ export function groupByShift(enrichedRows: EnrichedAnalyticsRow[]): ShiftRollupI
     const topItems = Array.from(itemMap.values()).sort((a, b) => b.actualOutput - a.actualOutput);
     const machines = new Set(rows.map((r) => r.machineId || r.machineName));
 
+    const shiftPreQc = (shiftItemTotals || [])
+      .filter((r) => (r.shift || "Shift A").toLowerCase() === shift.toLowerCase())
+      .reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
+    const shiftHasLogged = (shiftItemTotals || []).some(
+      (r) => (r.shift || "Shift A").toLowerCase() === shift.toLowerCase()
+    );
+    const qcMetrics = resolveProductQcMetrics(shiftPreQc, shiftHasLogged);
+
     result.push({
       shift,
       metrics,
       topItems,
       machineCount: machines.size,
+      preQcProduction: shiftPreQc,
+      finishedProduction: shiftPreQc,
+      qcMetrics,
     });
   }
 
@@ -603,7 +749,8 @@ export function getIsoWeekInfo(dateStr: string): {
  */
 export function groupByPeriod(
   enrichedRows: EnrichedAnalyticsRow[],
-  granularity: "day" | "week"
+  granularity: "day" | "week",
+  shiftItemTotals?: ShiftItemProductionRow[]
 ): PeriodRollupItem[] {
   const periodMap = new Map<string, { label: string; rows: EnrichedAnalyticsRow[] }>();
 
@@ -638,6 +785,38 @@ export function groupByPeriod(
     const existing = periodMap.get(periodKey) || { label: periodLabel, rows: [] };
     existing.rows.push(r);
     periodMap.set(periodKey, existing);
+  }
+
+  // Also include any period keys present in shiftItemTotals
+  if (shiftItemTotals && shiftItemTotals.length > 0) {
+    for (const p of shiftItemTotals) {
+      const dateStr = p.date || "";
+      if (!dateStr) continue;
+      let pKey: string;
+      let pLabel: string;
+      if (granularity === "day") {
+        pKey = dateStr;
+        try {
+          const parts = dateStr.split("-");
+          if (parts.length === 3) {
+            const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+            const monthIdx = parseInt(parts[1], 10) - 1;
+            pLabel = `${parts[2]} ${months[monthIdx] || parts[1]} ${parts[0]}`;
+          } else {
+            pLabel = dateStr;
+          }
+        } catch {
+          pLabel = dateStr;
+        }
+      } else {
+        const weekInfo = getIsoWeekInfo(dateStr);
+        pKey = weekInfo.weekKey;
+        pLabel = weekInfo.label;
+      }
+      if (!periodMap.has(pKey)) {
+        periodMap.set(pKey, { label: pLabel, rows: [] });
+      }
+    }
   }
 
   const result: PeriodRollupItem[] = [];
@@ -676,6 +855,20 @@ export function groupByPeriod(
     const activeShifts = Array.from(new Set(rows.map((r) => r.shift).filter(Boolean) as string[])).sort();
     const activeLines = Array.from(new Set(rows.map((r) => r.line).filter(Boolean) as string[])).sort();
 
+    const periodPreQc = (shiftItemTotals || [])
+      .filter((r) => {
+        if (!r.date) return false;
+        if (granularity === "day") return r.date === periodKey;
+        return getIsoWeekInfo(r.date).weekKey === periodKey;
+      })
+      .reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
+    const periodHasLogged = (shiftItemTotals || []).some((r) => {
+      if (!r.date) return false;
+      if (granularity === "day") return r.date === periodKey;
+      return getIsoWeekInfo(r.date).weekKey === periodKey;
+    });
+    const qcMetrics = resolveProductQcMetrics(periodPreQc, periodHasLogged);
+
     result.push({
       periodKey,
       periodLabel: label,
@@ -684,6 +877,9 @@ export function groupByPeriod(
       activeDates,
       activeShifts,
       activeLines,
+      preQcProduction: periodPreQc,
+      finishedProduction: periodPreQc,
+      qcMetrics,
     });
   }
 

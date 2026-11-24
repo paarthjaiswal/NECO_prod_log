@@ -46,6 +46,19 @@ export interface ItemMaster {
   stdOutput?: number;
 }
 
+export interface ShiftItemProductionRow {
+  id?: string;
+  date: string;
+  shift: ShiftType;
+  line: string;
+  itemKey: string;
+  itemId?: string | null;
+  itemCode: string;
+  itemName: string;
+  totalProduction: number;
+  remarks?: string;
+}
+
 export interface ItemProductionRollup {
   itemId: string;
   itemCode?: string;
@@ -55,6 +68,9 @@ export interface ItemProductionRollup {
   tillNowOutput: number;
   tillNowStd: number;
   tillNowRework: number;
+  todayFinished?: number;
+  mtdFinished?: number;
+  tillNowFinished?: number;
 }
 
 export interface BreakdownMinutes {

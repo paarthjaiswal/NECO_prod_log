@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx-js-style";
-import { MachineShiftRow, MasterDataState, ItemProductionRollup } from "@/types";
+import { MachineShiftRow, MasterDataState, ItemProductionRollup, ShiftItemProductionRow } from "@/types";
 import { calculateTotalBreakdown } from "@/services/storageService";
 import { INITIAL_MACHINES, PRODUCTION_LINES } from "@/data/initialData";
 import {
@@ -93,6 +93,10 @@ export function getHeaderFill(header: string): string {
     norm.includes("oee") ||
     norm.includes("avail") ||
     norm.includes("qual") ||
+    norm.includes("finished") ||
+    norm.includes("pre-qc") ||
+    norm.includes("preqc") ||
+    norm.includes("total prod") ||
     norm === "availability %" ||
     norm === "quality %" ||
     norm === "oee %" ||
@@ -1860,6 +1864,7 @@ export interface ExportItemTraceabilityParams {
     tempOnly?: boolean;
     splitOnly?: boolean;
   };
+  shiftItemTotals?: ShiftItemProductionRow[];
 }
 
 export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams): void {
@@ -1965,6 +1970,8 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     { label: "Availability %", value: `${overallMetrics.availabilityPct}%` },
     { label: "Plan %", value: `${overallMetrics.planAchievementPct}%` },
     { label: "Quality %", value: `${overallMetrics.qualityPct}%` },
+    { label: "Total Prod (Pre-QC)", value: `${(product.preQcProduction ?? product.finishedProduction ?? 0).toLocaleString()} pcs` },
+    { label: "Quality Inspection", value: "100.00% Passed (Assumed - Pre-QC)" },
     { label: "Actual Output", value: overallMetrics.totalActual },
     { label: "Scheduled Target", value: overallMetrics.totalStd },
     { label: "Good Output", value: overallMetrics.goodOutput },
@@ -1999,6 +2006,7 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     "Std Output",
     "Actual Output",
     "Good Output",
+    "Total Prod (Pre-QC)",
     "Rework",
     "Plan %",
     "Total BD (m)",
@@ -2013,6 +2021,7 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     const lines = Array.from(new Set(dRows.map((r) => r.line || "Line 1"))).sort().join(", ");
     const mCount = new Set(dRows.map((r) => r.machineId || r.machineName)).size;
     const shifts = Array.from(new Set(dRows.map((r) => r.shift))).sort().join(", ");
+    const dayPreQc = product.dailyPreQcProduction?.[d] ?? product.dailyFinishedProduction?.[d] ?? 0;
 
     return [
       d,
@@ -2022,6 +2031,7 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
       dMetrics.totalStd,
       dMetrics.totalActual,
       dMetrics.goodOutput,
+      dayPreQc,
       dMetrics.totalRework,
       `${dMetrics.planAchievementPct}%`,
       dMetrics.downtimeMinutes,
@@ -2039,6 +2049,7 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     overallMetrics.totalStd,
     overallMetrics.totalActual,
     overallMetrics.goodOutput,
+    product.preQcProduction ?? product.finishedProduction ?? 0,
     overallMetrics.totalRework,
     `${overallMetrics.planAchievementPct}%`,
     overallMetrics.downtimeMinutes,
@@ -2234,14 +2245,20 @@ export interface ExportFilteredAnalyticsParams {
   activeFilters: ActiveFiltersMetadata;
   periodGranularity?: "day" | "week";
   masterData?: MasterDataState;
+  shiftItemTotals?: ShiftItemProductionRow[];
 }
 
 export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsParams): void {
-  const { filteredRows, activeFilters, periodGranularity = "day" } = params;
+  const { filteredRows, activeFilters, periodGranularity = "day", shiftItemTotals } = params;
   const wb = XLSX.utils.book_new();
   const usedNames = new Set<string>();
 
   const overallMetrics = calculateOeeMetrics(filteredRows);
+  const totalPreQc = (shiftItemTotals || []).reduce(
+    (sum, r) => sum + (Number(r.totalProduction) || 0),
+    0
+  );
+
   const metadataList = buildFilterMetadataList({
     reportTitle: "Executive Manufacturing Analytics & OEE Report",
     ...activeFilters,
@@ -2252,6 +2269,8 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     { label: "Availability %", value: `${overallMetrics.availabilityPct}%` },
     { label: "Plan %", value: `${overallMetrics.planAchievementPct}%` },
     { label: "Quality %", value: `${overallMetrics.qualityPct}%` },
+    { label: "Total Prod (Pre-QC)", value: `${totalPreQc.toLocaleString()} pcs` },
+    { label: "Quality Pass Rate", value: "100.00% (Assumed - Pre-QC)" },
     { label: "Actual Output", value: overallMetrics.totalActual },
     { label: "Scheduled Target", value: overallMetrics.totalStd },
     { label: "Good Output", value: overallMetrics.goodOutput },
@@ -2276,6 +2295,9 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     sectionTitle: "PRODUCTION VOLUME TOTALS",
     headers: ["Metric", "Value", "Unit"],
     rows: [
+      ["Total Production (Pre-QC)", totalPreQc, "pcs"],
+      ["QC Passed Output (Assumed)", totalPreQc, "pcs"],
+      ["QC Rejected Output (Assumed)", 0, "pcs"],
       ["Scheduled Target (Std)", overallMetrics.totalStd, "pcs"],
       ["Actual Output", overallMetrics.totalActual, "pcs"],
       ["Good Output", overallMetrics.goodOutput, "pcs"],
@@ -2371,7 +2393,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
   // --------------------------------------------------------------------------
   // Sheet 2: By Product
   // --------------------------------------------------------------------------
-  const products = buildProductLineMachineMatrix(filteredRows);
+  const products = buildProductLineMachineMatrix(filteredRows, shiftItemTotals);
   const pHeaders = [
     "Product Name",
     "Product Code",
@@ -2380,6 +2402,8 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     "Target (Std)",
     "Actual Output",
     "Good Output",
+    "Total Prod (Pre-QC)",
+    "QC Pass % (Assumed)",
     "Rework",
     "Plan %",
     "Downtime (m)",
@@ -2395,6 +2419,8 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     p.metrics.totalStd,
     p.metrics.totalActual,
     p.metrics.goodOutput,
+    p.preQcProduction ?? p.finishedProduction ?? 0,
+    "100.00%",
     p.metrics.totalRework,
     `${p.metrics.planAchievementPct}%`,
     p.metrics.downtimeMinutes,
@@ -2410,6 +2436,8 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     overallMetrics.totalStd,
     overallMetrics.totalActual,
     overallMetrics.goodOutput,
+    products.reduce((acc, p) => acc + (p.preQcProduction ?? p.finishedProduction ?? 0), 0),
+    "100.00%",
     overallMetrics.totalRework,
     `${overallMetrics.planAchievementPct}%`,
     overallMetrics.downtimeMinutes,
@@ -2431,7 +2459,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
   // --------------------------------------------------------------------------
   // Sheet 3: By Line
   // --------------------------------------------------------------------------
-  const lines = groupByLine(filteredRows);
+  const lines = groupByLine(filteredRows, shiftItemTotals);
   const lHeaders = [
     "Line Name",
     "Total Machines",
@@ -2440,6 +2468,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     "Target (Std)",
     "Actual Output",
     "Good Output",
+    "Total Prod (Pre-QC)",
     "Rework",
     "Plan %",
     "Downtime (m)",
@@ -2455,6 +2484,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     l.metrics.totalStd,
     l.metrics.totalActual,
     l.metrics.goodOutput,
+    l.preQcProduction ?? l.finishedProduction ?? 0,
     l.metrics.totalRework,
     `${l.metrics.planAchievementPct}%`,
     l.metrics.downtimeMinutes,
@@ -2470,6 +2500,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     overallMetrics.totalStd,
     overallMetrics.totalActual,
     overallMetrics.goodOutput,
+    lines.reduce((acc, l) => acc + (l.preQcProduction ?? l.finishedProduction ?? 0), 0),
     overallMetrics.totalRework,
     `${overallMetrics.planAchievementPct}%`,
     overallMetrics.downtimeMinutes,
@@ -2491,13 +2522,14 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
   // --------------------------------------------------------------------------
   // Sheet 4: By Shift
   // --------------------------------------------------------------------------
-  const shifts = groupByShift(filteredRows);
+  const shifts = groupByShift(filteredRows, shiftItemTotals);
   const sHeaders = [
     "Shift Name",
     "Active Machines",
     "Target (Std)",
     "Actual Output",
     "Good Output",
+    "Total Prod (Pre-QC)",
     "Rework",
     "Plan %",
     "Downtime (m)",
@@ -2511,6 +2543,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     s.metrics.totalStd,
     s.metrics.totalActual,
     s.metrics.goodOutput,
+    s.preQcProduction ?? s.finishedProduction ?? 0,
     s.metrics.totalRework,
     `${s.metrics.planAchievementPct}%`,
     s.metrics.downtimeMinutes,
@@ -2524,6 +2557,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     overallMetrics.totalStd,
     overallMetrics.totalActual,
     overallMetrics.goodOutput,
+    shifts.reduce((acc, s) => acc + (s.preQcProduction ?? s.finishedProduction ?? 0), 0),
     overallMetrics.totalRework,
     `${overallMetrics.planAchievementPct}%`,
     overallMetrics.downtimeMinutes,
@@ -2545,7 +2579,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
   // --------------------------------------------------------------------------
   // Sheet 5: By Day / By Week
   // --------------------------------------------------------------------------
-  const periods = groupByPeriod(filteredRows, periodGranularity);
+  const periods = groupByPeriod(filteredRows, periodGranularity, shiftItemTotals);
   const periodLabel = periodGranularity === "week" ? "ISO Week Range" : "Date";
   const perHeaders = [
     periodLabel,
@@ -2553,6 +2587,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     "Target (Std)",
     "Actual Output",
     "Good Output",
+    "Total Prod (Pre-QC)",
     "Rework",
     "Plan %",
     "Downtime (m)",
@@ -2566,6 +2601,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     p.metrics.totalStd,
     p.metrics.totalActual,
     p.metrics.goodOutput,
+    p.preQcProduction ?? p.finishedProduction ?? 0,
     p.metrics.totalRework,
     `${p.metrics.planAchievementPct}%`,
     p.metrics.downtimeMinutes,
@@ -2579,6 +2615,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     overallMetrics.totalStd,
     overallMetrics.totalActual,
     overallMetrics.goodOutput,
+    periods.reduce((acc, p) => acc + (p.preQcProduction ?? p.finishedProduction ?? 0), 0),
     overallMetrics.totalRework,
     `${overallMetrics.planAchievementPct}%`,
     overallMetrics.downtimeMinutes,
@@ -2764,10 +2801,11 @@ export interface ExportActiveAnalyticsTabParams {
   activeFilters: ActiveFiltersMetadata;
   periodGranularity?: "day" | "week";
   masterData?: MasterDataState;
+  shiftItemTotals?: ShiftItemProductionRow[];
 }
 
 export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabParams): void {
-  const { tab, filteredRows, activeFilters, periodGranularity = "day" } = params;
+  const { tab, filteredRows, activeFilters, periodGranularity = "day", shiftItemTotals } = params;
   const wb = XLSX.utils.book_new();
   const usedNames = new Set<string>();
 
@@ -2810,7 +2848,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "OEE %",
     ];
 
-    const products = buildProductLineMachineMatrix(filteredRows);
+    const products = buildProductLineMachineMatrix(filteredRows, shiftItemTotals);
     for (const p of products) {
       for (const m of p.matrix) {
         tabRows.push([
@@ -2879,6 +2917,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "Target (Std)",
       "Actual Output",
       "Good Output",
+      "Total Prod (Pre-QC)",
       "Rework",
       "Plan %",
       "Downtime (m)",
@@ -2887,7 +2926,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "Line OEE %",
     ];
 
-    const lines = groupByLine(filteredRows);
+    const lines = groupByLine(filteredRows, shiftItemTotals);
     tabRows = lines.map((l) => [
       l.line,
       l.machineCount,
@@ -2896,6 +2935,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       l.metrics.totalStd,
       l.metrics.totalActual,
       l.metrics.goodOutput,
+      l.preQcProduction ?? l.finishedProduction ?? 0,
       l.metrics.totalRework,
       `${l.metrics.planAchievementPct}%`,
       l.metrics.downtimeMinutes,
@@ -2912,6 +2952,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       overallMetrics.totalStd,
       overallMetrics.totalActual,
       overallMetrics.goodOutput,
+      lines.reduce((acc, l) => acc + (l.preQcProduction ?? l.finishedProduction ?? 0), 0),
       overallMetrics.totalRework,
       `${overallMetrics.planAchievementPct}%`,
       overallMetrics.downtimeMinutes,
@@ -2928,6 +2969,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "Target (Std)",
       "Actual Output",
       "Good Output",
+      "Total Prod (Pre-QC)",
       "Rework",
       "Plan %",
       "Downtime (m)",
@@ -2936,13 +2978,14 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "Shift OEE %",
     ];
 
-    const shifts = groupByShift(filteredRows);
+    const shifts = groupByShift(filteredRows, shiftItemTotals);
     tabRows = shifts.map((s) => [
       s.shift,
       s.machineCount,
       s.metrics.totalStd,
       s.metrics.totalActual,
       s.metrics.goodOutput,
+      s.preQcProduction ?? s.finishedProduction ?? 0,
       s.metrics.totalRework,
       `${s.metrics.planAchievementPct}%`,
       s.metrics.downtimeMinutes,
@@ -2957,6 +3000,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       overallMetrics.totalStd,
       overallMetrics.totalActual,
       overallMetrics.goodOutput,
+      shifts.reduce((acc, s) => acc + (s.preQcProduction ?? s.finishedProduction ?? 0), 0),
       overallMetrics.totalRework,
       `${overallMetrics.planAchievementPct}%`,
       overallMetrics.downtimeMinutes,
@@ -2974,6 +3018,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "Target (Std)",
       "Actual Output",
       "Good Output",
+      "Total Prod (Pre-QC)",
       "Rework",
       "Plan %",
       "Downtime (m)",
@@ -2982,13 +3027,14 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "Period OEE %",
     ];
 
-    const periods = groupByPeriod(filteredRows, periodGranularity);
+    const periods = groupByPeriod(filteredRows, periodGranularity, shiftItemTotals);
     tabRows = periods.map((p) => [
       p.periodLabel,
       p.itemsProduced.length,
       p.metrics.totalStd,
       p.metrics.totalActual,
       p.metrics.goodOutput,
+      p.preQcProduction ?? p.finishedProduction ?? 0,
       p.metrics.totalRework,
       `${p.metrics.planAchievementPct}%`,
       p.metrics.downtimeMinutes,
@@ -3003,6 +3049,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       overallMetrics.totalStd,
       overallMetrics.totalActual,
       overallMetrics.goodOutput,
+      periods.reduce((acc, p) => acc + (p.preQcProduction ?? p.finishedProduction ?? 0), 0),
       overallMetrics.totalRework,
       `${overallMetrics.planAchievementPct}%`,
       overallMetrics.downtimeMinutes,

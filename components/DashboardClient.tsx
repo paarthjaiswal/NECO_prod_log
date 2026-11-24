@@ -13,10 +13,13 @@ import {
   ShiftType,
   ShiftLockInfo,
   OpenMachineParams,
+  ShiftItemProductionRow,
 } from "@/types";
 import {
   getShiftSheetRows,
   saveShiftSheetRows,
+  getShiftItemProduction,
+  saveShiftItemProduction,
   updateSingleMachineLog,
   saveMachineRuns,
   getMasterData,
@@ -323,6 +326,7 @@ export function ensureAllLineMachinesInRows(
 export interface DashboardClientProps {
   initialMasterData: MasterDataState;
   initialRows: MachineShiftRow[];
+  initialShiftItemTotals?: ShiftItemProductionRow[];
   initialDate: string;
   initialShift: ShiftType;
   initialLine: string;
@@ -333,6 +337,7 @@ export interface DashboardClientProps {
 export default function DashboardClient({
   initialMasterData,
   initialRows,
+  initialShiftItemTotals = [],
   initialDate,
   initialShift,
   initialLine,
@@ -349,6 +354,8 @@ export default function DashboardClient({
   const [selectedDate, setSelectedDate] = useState<string>(initialDate);
   const [selectedShift, setSelectedShift] = useState<ShiftType>(initialShift);
   const [selectedLine, setSelectedLine] = useState<string>(initialLine);
+  const [shiftItemTotals, setShiftItemTotals] =
+    useState<ShiftItemProductionRow[]>(initialShiftItemTotals);
 
   // Read URL query parameters on initial mount (client-only to prevent hydration mismatch)
   useEffect(() => {
@@ -807,11 +814,10 @@ export default function DashboardClient({
 
     runWithFeedback(
       async () => {
-        const freshRows = await getShiftSheetRows(
-          selectedDate,
-          selectedShift,
-          selectedLine
-        );
+        const [freshRows, freshItemProd] = await Promise.all([
+          getShiftSheetRows(selectedDate, selectedShift, selectedLine),
+          getShiftItemProduction(selectedDate, selectedShift, selectedLine),
+        ]);
         if (isMounted) {
           const reconciled = ensureAllLineMachinesInRows(
             freshRows,
@@ -822,6 +828,7 @@ export default function DashboardClient({
             activeShiftWorkingMinutes
           );
           setCurrentShiftRows(reconciled);
+          setShiftItemTotals(freshItemProd || []);
           setHasUnsavedDraft(false);
         }
         return freshRows;
@@ -855,11 +862,10 @@ export default function DashboardClient({
 
     await runWithFeedback(
       async () => {
-        const freshRows = await getShiftSheetRows(
-          selectedDate,
-          selectedShift,
-          selectedLine
-        );
+        const [freshRows, freshItemProd] = await Promise.all([
+          getShiftSheetRows(selectedDate, selectedShift, selectedLine),
+          getShiftItemProduction(selectedDate, selectedShift, selectedLine),
+        ]);
         const reconciled = ensureAllLineMachinesInRows(
           freshRows,
           currentLineMachines,
@@ -869,6 +875,7 @@ export default function DashboardClient({
           activeShiftWorkingMinutes
         );
         setCurrentShiftRows(reconciled);
+        setShiftItemTotals(freshItemProd || []);
         return reconciled;
       },
       {
@@ -880,7 +887,10 @@ export default function DashboardClient({
     );
   };
 
-  const handleSaveShiftSheet = async (rowsToSave: MachineShiftRow[]) => {
+  const handleSaveShiftSheet = async (
+    rowsToSave: MachineShiftRow[],
+    itemTotalsToSave?: ShiftItemProductionRow[]
+  ) => {
     if (isShiftLocked) {
       alert(shiftLock.reason || "Shift is locked. Data is read-only.");
       return;
@@ -961,7 +971,11 @@ export default function DashboardClient({
 
     await runWithFeedback(
       async () => {
-        const result = await saveShiftSheetRows(sanitizedRows);
+        const totalsToSave = itemTotalsToSave !== undefined ? itemTotalsToSave : shiftItemTotals;
+        const [result] = await Promise.all([
+          saveShiftSheetRows(sanitizedRows),
+          saveShiftItemProduction(selectedDate, selectedShift, selectedLine, totalsToSave),
+        ]);
         if (result?.success && result?.rows) {
           const reconciled = ensureAllLineMachinesInRows(
             result.rows,
@@ -972,6 +986,9 @@ export default function DashboardClient({
             activeShiftWorkingMinutes
           );
           setCurrentShiftRows(reconciled);
+          if (itemTotalsToSave !== undefined) {
+            setShiftItemTotals(itemTotalsToSave);
+          }
           setHasUnsavedDraft(false);
           try {
             localStorage.removeItem(draftKey);
@@ -983,7 +1000,7 @@ export default function DashboardClient({
         throw new Error("Save operation failed on server.");
       },
       {
-        loadingMessage: "Saving shift log...",
+        loadingMessage: "Saving shift log & finished production...",
         successTitle: "Shift Log Saved",
         successDetail: `${selectedLine} • ${selectedShift} synced to database`,
         errorTitle: "Could Not Save Shift Log",
@@ -1226,11 +1243,10 @@ export default function DashboardClient({
     }
     await runWithFeedback(
       async () => {
-        const freshRows = await getShiftSheetRows(
-          selectedDate,
-          selectedShift,
-          selectedLine
-        );
+        const [freshRows, freshItemProd] = await Promise.all([
+          getShiftSheetRows(selectedDate, selectedShift, selectedLine),
+          getShiftItemProduction(selectedDate, selectedShift, selectedLine),
+        ]);
         const reconciled = ensureAllLineMachinesInRows(
           freshRows,
           currentLineMachines,
@@ -1240,6 +1256,7 @@ export default function DashboardClient({
           activeShiftWorkingMinutes
         );
         setCurrentShiftRows(reconciled);
+        setShiftItemTotals(freshItemProd || []);
         setHasUnsavedDraft(false);
         return reconciled;
       },
@@ -1266,7 +1283,7 @@ export default function DashboardClient({
         productionLines={availableLines}
         shifts={availableShifts}
         hasUnsavedChanges={hasUnsavedDraft}
-        onSaveShiftLog={() => handleSaveShiftSheet(displayRows)}
+        onSaveShiftLog={() => handleSaveShiftSheet(displayRows, shiftItemTotals)}
         onExportExcel={handleExportExcel}
         onResetDemo={handleResetDemo}
         isSaving={isPending}
@@ -1284,6 +1301,8 @@ export default function DashboardClient({
             onRowsChange={handleRowsChange}
             onSave={handleSaveShiftSheet}
             onSaveShift={handleSaveShiftSheet}
+            shiftItemTotals={shiftItemTotals}
+            onShiftItemTotalsChange={setShiftItemTotals}
             isSaving={isPending}
             currentDate={selectedDate}
             selectedDate={selectedDate}

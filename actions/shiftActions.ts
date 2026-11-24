@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { createAdminClient } from "@/utils/supabase/server";
 import { getIsUnitHead } from "@/actions/authActions";
-import { evaluateShiftLock, isShiftRowEmpty } from "@/services/storageService";
+import { evaluateShiftLock, isShiftRowEmpty, buildCanonicalItemKey } from "@/services/storageService";
 import { getFallbackFactoryTimeContext } from "@/utils/factoryTime";
 import {
   MachineShiftRow,
@@ -17,11 +17,26 @@ import {
   MachineItemCycleTime,
   FactoryTimeContext,
   ItemProductionRollup,
+  ShiftItemProductionRow,
 } from "@/types";
 
 // ============================================================================
 // DATABASE ROW INTERFACES (Matches your upgraded Supabase SQL Schema)
 // ============================================================================
+
+export interface DbShiftItemProductionRow {
+  id: string;
+  log_date: string;
+  shift: string;
+  line: string;
+  item_key: string;
+  item_id: string | null;
+  item_code: string;
+  item_name: string;
+  total_production: number;
+  remarks: string;
+  updated_at: string;
+}
 
 export interface DbShiftLogRow {
   id: string;
@@ -1920,6 +1935,69 @@ export async function updateItemMaster(input: {
     }
   }
 
+  // 7. Cascade to public.shift_item_production
+  const oldItemKey = buildCanonicalItemKey(trimmedOldCode, trimmedOldName);
+  const newItemKey = buildCanonicalItemKey(trimmedNewCode, trimmedNewName);
+
+  if (trimmedOldName !== trimmedNewName || trimmedOldCode !== trimmedNewCode || oldItemKey !== newItemKey) {
+    try {
+      const { data: prodRows } = await supabase
+        .from("shift_item_production")
+        .select("*")
+        .or(`item_key.eq.${oldItemKey},item_id.in.(${idsToUpdate.join(",")}),item_name.eq.${trimmedOldName}`);
+
+      if (prodRows && prodRows.length > 0) {
+        for (const row of prodRows) {
+          // Check if a row with newItemKey already exists for the same (log_date, shift, line)
+          const { data: collision } = await supabase
+            .from("shift_item_production")
+            .select("id, total_production, remarks")
+            .eq("log_date", row.log_date)
+            .eq("shift", row.shift)
+            .eq("line", row.line)
+            .eq("item_key", newItemKey)
+            .neq("id", row.id)
+            .maybeSingle();
+
+          if (collision) {
+            // Merge into existing collision row: sum total_production, combine remarks, delete old row
+            const combinedTotal = (Number(collision.total_production) || 0) + (Number(row.total_production) || 0);
+            const combinedRemarks = [collision.remarks, row.remarks].filter(Boolean).join(" | ");
+            await supabase
+              .from("shift_item_production")
+              .update({
+                total_production: combinedTotal,
+                remarks: combinedRemarks,
+                item_name: trimmedNewName,
+                item_code: trimmedNewCode,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", collision.id);
+
+            await supabase
+              .from("shift_item_production")
+              .delete()
+              .eq("id", row.id);
+          } else {
+            // Update row cleanly
+            await supabase
+              .from("shift_item_production")
+              .update({
+                item_key: newItemKey,
+                item_name: trimmedNewName,
+                item_code: trimmedNewCode,
+                item_id: input.id,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", row.id);
+          }
+        }
+      }
+    } catch (sipErr) {
+      console.error("Failed to cascade rename to shift_item_production:", sipErr);
+    }
+  }
+
   revalidatePath("/");
   return { success: true, renames };
 }
@@ -2134,6 +2212,168 @@ export async function getAnalyticsLogs(
 }
 
 /**
+ * ============================================================================
+ * SHIFT FINISHED GOODS PRODUCTION (public.shift_item_production)
+ * ============================================================================
+ */
+
+export async function getShiftItemProduction(
+  date: string,
+  shift: string,
+  line: string
+): Promise<ShiftItemProductionRow[]> {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .from("shift_item_production")
+    .select("*")
+    .eq("log_date", date)
+    .eq("shift", shift)
+    .eq("line", line)
+    .order("item_code", { ascending: true });
+
+  if (error) {
+    console.error("Failed to fetch shift_item_production:", error);
+    return [];
+  }
+
+  return (data || []).map((row: DbShiftItemProductionRow) => ({
+    id: row.id,
+    date: row.log_date,
+    shift: row.shift as ShiftType,
+    line: row.line,
+    itemKey: row.item_key,
+    itemId: row.item_id,
+    itemCode: row.item_code || "",
+    itemName: row.item_name || "",
+    totalProduction: Number(row.total_production) || 0,
+    remarks: row.remarks || "",
+  }));
+}
+
+export async function saveShiftItemProduction(
+  date: string,
+  shift: string,
+  line: string,
+  rows: ShiftItemProductionRow[]
+): Promise<{ success: boolean; savedCount: number }> {
+  const supabase = createAdminClient();
+
+  // 1. Delete existing rows for this date, shift, and line first (so clearing to 0 cleans DB)
+  const { error: delErr } = await supabase
+    .from("shift_item_production")
+    .delete()
+    .eq("log_date", date)
+    .eq("shift", shift)
+    .eq("line", line);
+
+  if (delErr) {
+    console.error("Failed to delete existing shift_item_production:", delErr);
+    throw new Error(`Failed to clear existing finished production: ${delErr.message}`);
+  }
+
+  // 2. Filter out empty rows ((Number(r.totalProduction) || 0) <= 0 && !(r.remarks || "").trim())
+  const nonEmptyRows = (rows || []).filter((r) => {
+    const qty = Number(r.totalProduction) || 0;
+    const rem = (r.remarks || "").trim();
+    return qty > 0 || rem.length > 0;
+  });
+
+  if (nonEmptyRows.length === 0) {
+    revalidatePath("/");
+    return { success: true, savedCount: 0 };
+  }
+
+  // 3. Deduplicate by itemKey (if duplicates exist, keep the last non-empty entry)
+  const dedupMap = new Map<string, ShiftItemProductionRow>();
+  for (const r of nonEmptyRows) {
+    const key = r.itemKey || buildCanonicalItemKey(r.itemCode, r.itemName);
+    if (!key) continue;
+    dedupMap.set(key, { ...r, itemKey: key });
+  }
+
+  const payloads = Array.from(dedupMap.values()).map((r) => ({
+    log_date: date,
+    shift: shift,
+    line: line,
+    item_key: r.itemKey,
+    item_id: r.itemId || null,
+    item_code: (r.itemCode || "").trim(),
+    item_name: (r.itemName || "").trim(),
+    total_production: Math.max(0, Math.round(Number(r.totalProduction) || 0)),
+    remarks: (r.remarks || "").trim(),
+    updated_at: new Date().toISOString(),
+  }));
+
+  if (payloads.length === 0) {
+    revalidatePath("/");
+    return { success: true, savedCount: 0 };
+  }
+
+  const { error: insertErr } = await supabase
+    .from("shift_item_production")
+    .insert(payloads);
+
+  if (insertErr) {
+    console.error("Failed to insert shift_item_production:", insertErr);
+    throw new Error(`Failed to save finished production: ${insertErr.message}`);
+  }
+
+  revalidatePath("/");
+  return { success: true, savedCount: payloads.length };
+}
+
+export async function getAnalyticsItemProduction(
+  fromDate: string,
+  toDate: string
+): Promise<ShiftItemProductionRow[]> {
+  const supabase = createAdminClient();
+
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES = 50;
+  let offset = 0;
+  let pageCount = 0;
+  const allRows: DbShiftItemProductionRow[] = [];
+
+  while (pageCount < MAX_PAGES) {
+    pageCount++;
+    const query = supabase
+      .from("shift_item_production")
+      .select("*")
+      .gte("log_date", fromDate)
+      .lte("log_date", toDate)
+      .order("log_date", { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    const { data, error } = await query;
+    if (error) {
+      console.error("getAnalyticsItemProduction query error:", error);
+      break;
+    }
+
+    const chunk = (data as DbShiftItemProductionRow[]) || [];
+    allRows.push(...chunk);
+
+    if (chunk.length < PAGE_SIZE) {
+      break;
+    }
+    offset += PAGE_SIZE;
+  }
+
+  return allRows.map((row: DbShiftItemProductionRow) => ({
+    id: row.id,
+    date: row.log_date,
+    shift: row.shift as ShiftType,
+    line: row.line,
+    itemKey: row.item_key,
+    itemId: row.item_id,
+    itemCode: row.item_code || "",
+    itemName: row.item_name || "",
+    totalProduction: Number(row.total_production) || 0,
+    remarks: row.remarks || "",
+  }));
+}
+
+/**
  * STEP 1: Item Production Rollups
  * Aggregates production totals per item across:
  * - todayOutput: sum of actual_output where log_date === todayDateIst
@@ -2141,6 +2381,7 @@ export async function getAnalyticsLogs(
  * - tillNowOutput: cumulative sum of actual_output across all dates in shift_logs
  * - tillNowStd: cumulative sum of std_output across all dates
  * - tillNowRework: cumulative sum of rework across all dates
+ * - todayFinished / mtdFinished / tillNowFinished: from public.shift_item_production
  */
 export async function getItemProductionRollups(
   todayDateIst?: string
@@ -2223,6 +2464,9 @@ export async function getItemProductionRollups(
         tillNowOutput: 0,
         tillNowStd: 0,
         tillNowRework: 0,
+        todayFinished: 0,
+        mtdFinished: 0,
+        tillNowFinished: 0,
       });
     }
 
@@ -2242,6 +2486,72 @@ export async function getItemProductionRollups(
     if (logDate >= mtdStart && logDate <= refDate) {
       entry.mtdOutput += act;
     }
+  }
+
+  // 3. Query public.shift_item_production for finished goods rollups
+  try {
+    const { data: finishedRows, error: finishedErr } = await supabase
+      .from("shift_item_production")
+      .select("item_key, item_code, item_name, item_id, log_date, total_production")
+      .gt("total_production", 0)
+      .limit(25000);
+
+    if (finishedErr) {
+      console.error("Failed to fetch shift_item_production rollups:", finishedErr);
+    } else if (finishedRows) {
+      for (const row of finishedRows) {
+        const qty = Number(row.total_production) || 0;
+        if (qty <= 0) continue;
+
+        const rawCode = (row.item_code || "").trim();
+        const rawName = (row.item_name || "").trim();
+        const rawKey = (row.item_key || "").trim();
+        const rawId = (row.item_id || "").trim();
+
+        const idKey = rawId.toLowerCase();
+        const codeKey = rawCode.toLowerCase();
+        const nameKey = rawName.toLowerCase();
+
+        const masterInfo =
+          (idKey.length > 0 ? itemCodeMap.get(idKey) : null) ||
+          (codeKey.length > 0 ? itemCodeMap.get(codeKey) : null) ||
+          (nameKey.length > 0 ? itemCodeMap.get(nameKey) : null);
+
+        const itemCode = masterInfo?.itemCode || rawCode;
+        const itemName = masterInfo?.itemName || rawName || itemCode || "Unknown Part";
+        const itemId = masterInfo?.id || rawId || "";
+        const groupKey = (itemCode || itemId || rawName || rawKey).toLowerCase();
+
+        if (!rollupsMap.has(groupKey)) {
+          rollupsMap.set(groupKey, {
+            itemId: itemId || groupKey,
+            itemCode,
+            itemName,
+            todayOutput: 0,
+            mtdOutput: 0,
+            tillNowOutput: 0,
+            tillNowStd: 0,
+            tillNowRework: 0,
+            todayFinished: 0,
+            mtdFinished: 0,
+            tillNowFinished: 0,
+          });
+        }
+
+        const entry = rollupsMap.get(groupKey)!;
+        entry.tillNowFinished = (entry.tillNowFinished || 0) + qty;
+
+        const logDate = row.log_date || "";
+        if (logDate === refDate) {
+          entry.todayFinished = (entry.todayFinished || 0) + qty;
+        }
+        if (logDate >= mtdStart && logDate <= refDate) {
+          entry.mtdFinished = (entry.mtdFinished || 0) + qty;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error computing finished rollups:", err);
   }
 
   return Array.from(rollupsMap.values()).sort(

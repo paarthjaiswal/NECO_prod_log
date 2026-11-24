@@ -69,6 +69,15 @@ export function calculateEfficiency(
 }
 
 /**
+ * Builds a single canonical key for an item from its code and name.
+ * Returns (itemCode || "").trim().toLowerCase() || (itemName || "").trim().toLowerCase().
+ * Collapses multi-row items sharing the same code/name into ONE shift production entry.
+ */
+export function buildCanonicalItemKey(itemCode?: string | null, itemName?: string | null): string {
+  return (itemCode || "").trim().toLowerCase() || (itemName || "").trim().toLowerCase();
+}
+
+/**
  * Deduplicates ItemMaster array by normalized itemName and/or itemCode
  * so each unique component/part appears only once in dropdown menus.
  */

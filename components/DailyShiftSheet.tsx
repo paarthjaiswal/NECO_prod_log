@@ -21,6 +21,7 @@ import {
   ShiftType,
   ShiftLockInfo,
   OpenMachineParams,
+  ShiftItemProductionRow,
 } from '@/types';
 import {
   calculateEfficiency,
@@ -29,6 +30,7 @@ import {
   getOperationsForItem,
   getUniqueItems,
   getCanonicalItemId,
+  buildCanonicalItemKey,
   calculateDowntimePct,
   calculateMachineGroupTimeBalance,
   calculateSplitRowSuggestedStd,
@@ -139,9 +141,9 @@ interface DailyShiftSheetProps {
   currentLine: string;
   isShiftLocked: boolean;
   isAdmin: boolean;
-  onSaveShift: (rowsToSave: MachineShiftRow[]) => Promise<void>;
+  onSaveShift: (rowsToSave: MachineShiftRow[], itemTotalsToSave?: ShiftItemProductionRow[]) => Promise<void> | void;
   // Backwards compatibility props
-  onSave?: (rowsToSave: MachineShiftRow[]) => void | Promise<void>;
+  onSave?: (rowsToSave: MachineShiftRow[], itemTotalsToSave?: ShiftItemProductionRow[]) => void | Promise<void>;
   isSaving?: boolean;
   selectedDate?: string;
   selectedShift?: ShiftType;
@@ -153,6 +155,8 @@ interface DailyShiftSheetProps {
   onOpenMachine?: (params: OpenMachineParams) => void;
   isReadOnly?: boolean;
   shiftLock?: ShiftLockInfo;
+  shiftItemTotals?: ShiftItemProductionRow[];
+  onShiftItemTotalsChange?: (totals: ShiftItemProductionRow[]) => void;
 }
 
 export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
@@ -178,6 +182,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   onOpenMachine,
   isReadOnly: propReadOnly,
   shiftLock,
+  shiftItemTotals: propShiftItemTotals,
+  onShiftItemTotalsChange,
 }) => {
   const currentDate = propCurrentDate ?? propSelectedDate ?? "";
   const selectedDate = currentDate;
@@ -194,6 +200,223 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   const items = useMemo(() => masterData?.items ?? [], [masterData?.items]);
   const uniqueItems = useMemo(() => getUniqueItems(items), [items]);
   const cycleTimes = useMemo(() => masterData?.cycleTimes ?? [], [masterData?.cycleTimes]);
+
+  // --------------------------------------------------------------------------
+  // SHIFT FINISHED PRODUCTION (Item Totals) State & Logic
+  // --------------------------------------------------------------------------
+  const [manualItemKeys, setManualItemKeys] = useState<string[]>([]);
+  const itemTotalsMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        totalProduction: number;
+        remarks: string;
+        itemCode: string;
+        itemName: string;
+        itemId?: string | null;
+      }
+    >();
+    if (propShiftItemTotals) {
+      for (const t of propShiftItemTotals) {
+        const k = t.itemKey || buildCanonicalItemKey(t.itemCode, t.itemName);
+        if (k) {
+          map.set(k, {
+            totalProduction: Number(t.totalProduction) || 0,
+            remarks: t.remarks || "",
+            itemCode: t.itemCode || "",
+            itemName: t.itemName || "",
+            itemId: t.itemId || null,
+          });
+        }
+      }
+    }
+    return map;
+  }, [propShiftItemTotals]);
+
+  // Derive unique products and their machine ops from machine rows above
+  const machineOpsByItemKey = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        itemCode: string;
+        itemName: string;
+        itemId: string;
+        opsMap: Map<string, number>;
+      }
+    >();
+
+    for (const r of rows) {
+      const matchItem = items.find((it) => it.id === r.itemId);
+      const itemCode = (matchItem?.itemCode || "").trim();
+      const itemName = (r.itemName || matchItem?.itemName || "").trim();
+      const itemKey = buildCanonicalItemKey(itemCode, itemName);
+      if (!itemKey) continue;
+
+      if (!map.has(itemKey)) {
+        map.set(itemKey, {
+          itemCode,
+          itemName,
+          itemId: r.itemId || "",
+          opsMap: new Map<string, number>(),
+        });
+      }
+
+      const entry = map.get(itemKey)!;
+      if (!entry.itemCode && itemCode) entry.itemCode = itemCode;
+      if (!entry.itemName && itemName) entry.itemName = itemName;
+      if (!entry.itemId && r.itemId) entry.itemId = r.itemId;
+
+      const op = (r.operation || "-").trim();
+      const act = Number(r.actualOutput) || 0;
+      entry.opsMap.set(op, (entry.opsMap.get(op) || 0) + act);
+    }
+    return map;
+  }, [rows, items]);
+
+  // Combine machine items, saved items, and manually added items
+  const displayedFinishedItems = useMemo(() => {
+    const allKeys = new Set<string>();
+    for (const k of machineOpsByItemKey.keys()) allKeys.add(k);
+    for (const k of itemTotalsMap.keys()) allKeys.add(k);
+    for (const k of manualItemKeys) allKeys.add(k);
+
+    const list: Array<{
+      itemKey: string;
+      itemCode: string;
+      itemName: string;
+      itemId?: string | null;
+      hasMachineRows: boolean;
+      opsSummary: Array<{ op: string; totalAct: number }>;
+      totalProduction: number;
+      remarks: string;
+    }> = [];
+
+    for (const key of allKeys) {
+      const machineStat = machineOpsByItemKey.get(key);
+      const savedStat = itemTotalsMap.get(key);
+
+      const masterMatch = items.find(
+        (it) => buildCanonicalItemKey(it.itemCode, it.itemName) === key
+      );
+
+      const itemCode =
+        machineStat?.itemCode || savedStat?.itemCode || masterMatch?.itemCode || "";
+      const itemName =
+        machineStat?.itemName || savedStat?.itemName || masterMatch?.itemName || key;
+      const itemId =
+        machineStat?.itemId || savedStat?.itemId || masterMatch?.id || null;
+      const hasMachineRows = Boolean(machineStat);
+
+      const opsSummary: Array<{ op: string; totalAct: number }> = [];
+      if (machineStat) {
+        for (const [op, totalAct] of machineStat.opsMap.entries()) {
+          opsSummary.push({ op, totalAct });
+        }
+      }
+
+      const totalProduction = savedStat?.totalProduction ?? 0;
+      const remarks = savedStat?.remarks ?? "";
+
+      list.push({
+        itemKey: key,
+        itemCode,
+        itemName,
+        itemId,
+        hasMachineRows,
+        opsSummary,
+        totalProduction,
+        remarks,
+      });
+    }
+
+    return list.sort((a, b) => {
+      if (a.hasMachineRows !== b.hasMachineRows) {
+        return a.hasMachineRows ? -1 : 1;
+      }
+      return (a.itemCode || a.itemName).localeCompare(b.itemCode || b.itemName);
+    });
+  }, [machineOpsByItemKey, itemTotalsMap, manualItemKeys, items]);
+
+  const availableToAddItems = useMemo(() => {
+    const presentKeys = new Set(displayedFinishedItems.map((d) => d.itemKey));
+    return uniqueItems.filter((it) => {
+      const k = buildCanonicalItemKey(it.itemCode, it.itemName);
+      return k && !presentKeys.has(k);
+    });
+  }, [displayedFinishedItems, uniqueItems]);
+
+  const handleUpdateFinishedItem = (
+    itemKey: string,
+    field: "totalProduction" | "remarks",
+    value: string | number
+  ) => {
+    if (isReadOnly || !onShiftItemTotalsChange) return;
+    const currentList = propShiftItemTotals || [];
+    let found = false;
+    const nextList: ShiftItemProductionRow[] = currentList.map((row) => {
+      const k = row.itemKey || buildCanonicalItemKey(row.itemCode, row.itemName);
+      if (k === itemKey) {
+        found = true;
+        return {
+          ...row,
+          [field]:
+            field === "totalProduction"
+              ? Math.max(0, parseInt(String(value), 10) || 0)
+              : String(value),
+        };
+      }
+      return row;
+    });
+
+    if (!found) {
+      const dItem = displayedFinishedItems.find((d) => d.itemKey === itemKey);
+      nextList.push({
+        date: currentDate,
+        shift: currentShift,
+        line: currentLine,
+        itemKey,
+        itemId: dItem?.itemId || null,
+        itemCode: dItem?.itemCode || "",
+        itemName: dItem?.itemName || "",
+        totalProduction:
+          field === "totalProduction"
+            ? Math.max(0, parseInt(String(value), 10) || 0)
+            : 0,
+        remarks: field === "remarks" ? String(value) : "",
+      });
+    }
+
+    onShiftItemTotalsChange(nextList);
+  };
+
+  const handleAddManualItem = (itemId: string) => {
+    if (isReadOnly) return;
+    const match = items.find((it) => it.id === itemId);
+    if (!match) return;
+    const key = buildCanonicalItemKey(match.itemCode, match.itemName);
+    if (!key) return;
+
+    setManualItemKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+  };
+
+  const handleRemoveManualItem = (itemKey: string) => {
+    if (isReadOnly) return;
+    setManualItemKeys((prev) => prev.filter((k) => k !== itemKey));
+    if (onShiftItemTotalsChange && propShiftItemTotals) {
+      const nextList = propShiftItemTotals.filter((row) => {
+        const k = row.itemKey || buildCanonicalItemKey(row.itemCode, row.itemName);
+        return k !== itemKey;
+      });
+      onShiftItemTotalsChange(nextList);
+    }
+  };
+
+  const totalFinishedPcsThisShift = useMemo(() => {
+    return displayedFinishedItems.reduce(
+      (sum, item) => sum + (Number(item.totalProduction) || 0),
+      0
+    );
+  }, [displayedFinishedItems]);
 
   // Memoized operations lookup map to prevent 16x regex/array filtering on every keystroke
   const getOperations = useMemo(() => {
@@ -1308,15 +1531,30 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       return;
     }
 
-    onSave(
-      cleanRows.map((r) => ({
-        ...r,
-        date: currentDate || r.date,
-        shift: currentShift || r.shift,
-        line: currentLine || r.line,
-        totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes,
-      }))
-    );
+    const finishedTotalsToSave: ShiftItemProductionRow[] = displayedFinishedItems
+      .filter((it) => (Number(it.totalProduction) || 0) > 0 || (it.remarks || "").trim().length > 0)
+      .map((it) => ({
+        date: currentDate,
+        shift: currentShift,
+        line: currentLine,
+        itemKey: it.itemKey,
+        itemId: it.itemId || null,
+        itemCode: it.itemCode,
+        itemName: it.itemName,
+        totalProduction: it.totalProduction,
+        remarks: it.remarks,
+      }));
+
+    const cleanRowsToSave = cleanRows.map((r) => ({
+      ...r,
+      date: currentDate || r.date,
+      shift: currentShift || r.shift,
+      line: currentLine || r.line,
+      totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes,
+    }));
+
+    onSave(cleanRowsToSave, finishedTotalsToSave);
+    onSaveShift(cleanRowsToSave, finishedTotalsToSave);
   };
 
   // Calculations for summary footer row
@@ -2900,6 +3138,219 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
           <div className="text-slate-500 text-[11px]">
             Arrow Keys / Enter / TAB navigate cells. Click &apos;+Fill&apos; badge to auto-balance shift minutes.
           </div>
+        </div>
+      </div>
+
+      {/* ================================================================= */}
+      {/* SHIFT FINISHED PRODUCTION (TOTAL ITEM PRODUCTION PER SHIFT)       */}
+      {/* ================================================================= */}
+      <div className="bg-white rounded-lg border border-slate-200 shadow-2xs overflow-hidden mt-3">
+        {/* Header Strip */}
+        <div className="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded bg-emerald-950/80 border border-emerald-500/50 flex items-center justify-center text-emerald-400 font-bold text-sm">
+              📦
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-bold tracking-tight text-white">
+                  Shift Finished Production (Item Totals)
+                </h3>
+                <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-900/80 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded">
+                  Authoritative Finished Output
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 mt-0.5">
+                Enter total finished pieces produced for each item on this shift. Machine OEE above is tracked separately.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 flex-wrap">
+            {/* Quick Add Product Dropdown */}
+            {!isReadOnly && availableToAddItems.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-slate-400 font-medium">Add Item:</span>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) handleAddManualItem(e.target.value);
+                  }}
+                  className="bg-slate-800 border border-slate-700 text-white text-xs rounded px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                >
+                  <option value="" disabled>
+                    + Add Item to Shift...
+                  </option>
+                  {availableToAddItems.map((it) => (
+                    <option key={it.id} value={it.id}>
+                      {it.itemCode ? `[${it.itemCode}] ` : ""}{it.itemName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={handleSaveWithValidation}
+                disabled={isSaving}
+                className={`px-3.5 py-1.5 text-xs font-bold rounded flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-60 disabled:cursor-not-allowed ${
+                  unbalancedCount > 0
+                    ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                    : 'bg-emerald-600 hover:bg-emerald-500 text-slate-950'
+                }`}
+              >
+                {isSaving ? (
+                  <span>Saving to Cloud...</span>
+                ) : (
+                  <span>Save Shift & Finished Output</span>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold uppercase tracking-wider text-[11px]">
+                <th className="py-2.5 px-3">Item Code & Name</th>
+                <th className="py-2.5 px-3">Machine Ops Logged (Reference Only)</th>
+                <th className="py-2.5 px-3 w-48 text-right">Total Production (Finished Pcs)</th>
+                <th className="py-2.5 px-3 w-64">Remarks (Optional)</th>
+                {!isReadOnly && <th className="py-2.5 px-3 w-16 text-center">Action</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {displayedFinishedItems.length === 0 ? (
+                <tr>
+                  <td colSpan={isReadOnly ? 4 : 5} className="py-8 text-center text-slate-500 italic">
+                    No products assigned to machine rows above yet. Assign an item to a machine or use &apos;+ Add Item&apos; above.
+                  </td>
+                </tr>
+              ) : (
+                displayedFinishedItems.map((item) => (
+                  <tr
+                    key={item.itemKey}
+                    className="hover:bg-slate-50/80 transition-colors"
+                  >
+                    {/* Item Code & Name */}
+                    <td className="py-2.5 px-3">
+                      <div className="flex items-center gap-2">
+                        {item.itemCode && (
+                          <span className="font-mono font-bold text-slate-700 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded text-[11px]">
+                            {item.itemCode}
+                          </span>
+                        )}
+                        <span className="font-semibold text-slate-900">
+                          {item.itemName}
+                        </span>
+                        {!item.hasMachineRows && (
+                          <span className="text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-300 px-1.5 py-0.2 rounded">
+                            Manual
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* Machine Ops Logged */}
+                    <td className="py-2.5 px-3">
+                      {item.opsSummary.length > 0 ? (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {item.opsSummary.map((op, idx) => (
+                            <span
+                              key={idx}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700 text-[11px] font-mono"
+                            >
+                              <strong className="text-slate-900">{op.op}:</strong>{" "}
+                              <span>{op.totalAct.toLocaleString()} pcs</span>
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 text-[11px] italic">
+                          No machine operations logged on this shift
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Total Production (Finished Pcs) Input */}
+                    <td className="py-2 px-3 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          disabled={isReadOnly}
+                          value={item.totalProduction > 0 ? item.totalProduction : ""}
+                          placeholder="0"
+                          onChange={(e) =>
+                            handleUpdateFinishedItem(item.itemKey, "totalProduction", e.target.value)
+                          }
+                          className="w-36 text-right font-mono font-bold text-sm px-2.5 py-1 rounded border border-slate-300 focus:border-emerald-600 focus:bg-white bg-slate-50 text-slate-900 focus:outline-none disabled:bg-slate-100 disabled:text-slate-500"
+                        />
+                        <span className="text-[11px] font-medium text-slate-500 w-7 text-left">
+                          pcs
+                        </span>
+                      </div>
+                    </td>
+
+                    {/* Remarks Input */}
+                    <td className="py-2 px-3">
+                      <input
+                        type="text"
+                        disabled={isReadOnly}
+                        value={item.remarks || ""}
+                        placeholder="e.g. Packed for dispatch"
+                        onChange={(e) =>
+                          handleUpdateFinishedItem(item.itemKey, "remarks", e.target.value)
+                        }
+                        className="w-full text-xs px-2.5 py-1 rounded border border-slate-200 focus:border-slate-600 bg-slate-50 focus:bg-white text-slate-800 focus:outline-none disabled:bg-slate-100 disabled:text-slate-500"
+                      />
+                    </td>
+
+                    {/* Action (Remove manual item only) */}
+                    {!isReadOnly && (
+                      <td className="py-2 px-3 text-center">
+                        {!item.hasMachineRows ? (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveManualItem(item.itemKey)}
+                            title="Remove manual item from finished list"
+                            className="text-slate-400 hover:text-rose-600 p-1 rounded hover:bg-rose-50 transition-colors"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        ) : (
+                          <span
+                            className="text-[10px] text-slate-400 font-mono"
+                            title="Derived from shift machine row above"
+                          >
+                            —
+                          </span>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))
+              )}
+            </tbody>
+            <tfoot className="bg-slate-50 border-t-2 border-slate-300 font-bold text-xs">
+              <tr>
+                <td colSpan={2} className="py-2.5 px-3 text-slate-700">
+                  Total Finished Pcs This Shift:
+                </td>
+                <td className="py-2.5 px-3 text-right font-mono text-sm text-emerald-700 font-black">
+                  {totalFinishedPcsThisShift.toLocaleString()} pcs
+                </td>
+                <td colSpan={isReadOnly ? 1 : 2} className="py-2.5 px-3 text-slate-500 text-[11px] font-normal">
+                  Authoritative finished goods count for {selectedLine} • {selectedShift}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
         </div>
       </div>
 
