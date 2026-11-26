@@ -107,6 +107,41 @@ export function resolveProductQcMetrics(
   };
 }
 
+export interface ProductOperationMachineRow {
+  machineId: string;
+  machineName: string;
+  line: string;
+  isTempMachine: boolean;
+  splitRunsCount: number;
+  runsCount: number;
+  minSrNo: number;
+  stdOutput: number;
+  actualOutput: number;
+  goodOutput: number;
+  rework: number;
+  downtimeMinutes: number;
+  planAchievementPct: number;
+  availabilityPct: number;
+  qualityPct: number;
+  oeePct: number;
+  breakdownTotals?: BreakdownTotals;
+  metrics?: OeeMetrics;
+}
+
+export interface ProductOperationGroup {
+  operationKey: string;          // normalized lowercase trimmed op, or "__unspecified__"
+  operation: string;             // display label, or "Unspecified Operation"
+  minSrNo: number;               // earliest machine sr_no in this operation to preserve line process order
+  machinesCount: number;
+  combinedActualOutput: number;  // sum of actualOutput across all machines doing this op on this item
+  combinedStdOutput: number;     // sum of stdOutput across all machines doing this op
+  combinedGoodOutput: number;
+  combinedRework: number;
+  combinedPlanAchievementPct: number;
+  combinedOeePct: number;        // computed via calculateOeeMetrics(opRows)
+  machines: ProductOperationMachineRow[];
+}
+
 export interface ProductMatrixItem {
   productKey: string;
   productName: string;
@@ -114,6 +149,7 @@ export interface ProductMatrixItem {
   metrics: OeeMetrics;
   lines: string[];
   matrix: ProductMatrixRow[];
+  operationGroups: ProductOperationGroup[];
   preQcProduction: number;
   finishedProduction: number; // Kept for backwards-compatibility aliased to preQcProduction
   dailyPreQcProduction: Record<string, number>;
@@ -365,6 +401,119 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
 }
 
 /**
+ * Operation-Grouped Matrix Builder:
+ * Groups an item's machine runs by operation so machines performing the same operation
+ * on an item are clustered together with combined production totals.
+ */
+export function buildProductOperationGroups(
+  productRows: EnrichedAnalyticsRow[]
+): ProductOperationGroup[] {
+  // 1. Group rows by normalized operationKey
+  const opMap = new Map<string, { opDisplay: string; rows: EnrichedAnalyticsRow[] }>();
+
+  for (const r of productRows) {
+    const rawOp = (r.operation || "").trim();
+    const opKey = rawOp.length > 0 ? rawOp.toLowerCase() : "__unspecified__";
+    const opDisplay = rawOp.length > 0 ? rawOp : "Unspecified Operation";
+
+    const entry = opMap.get(opKey) || { opDisplay, rows: [] };
+    entry.rows.push(r);
+    opMap.set(opKey, entry);
+  }
+
+  const operationGroups: ProductOperationGroup[] = [];
+
+  for (const [opKey, { opDisplay, rows: opGroupRows }] of opMap.entries()) {
+    // 2. Sub-group by (line, machineId || machineName, isTempMachine)
+    const machineMap = new Map<string, EnrichedAnalyticsRow[]>();
+    for (const r of opGroupRows) {
+      const line = r.line || "Line 1";
+      const mId = r.machineId || r.machineName || "Unknown";
+      const isTemp = Boolean(r.isTempMachine);
+      const subKey = `${line}__${mId}__${isTemp}`;
+      const list = machineMap.get(subKey) || [];
+      list.push(r);
+      machineMap.set(subKey, list);
+    }
+
+    const machines: ProductOperationMachineRow[] = [];
+    for (const machineOpRows of machineMap.values()) {
+      const mMetrics = calculateOeeMetrics(machineOpRows);
+      // Only include machines that actually produced or reworked on this item
+      if (mMetrics.totalActual <= 0 && mMetrics.totalRework <= 0) continue;
+
+      const s = machineOpRows[0];
+      const minSrNo = Math.min(...machineOpRows.map((r) => Number(r.srNo) || 9999));
+
+      machines.push({
+        machineId: s.machineId || "",
+        machineName: s.machineName || s.machineId || "Unknown",
+        line: s.line || "Line 1",
+        isTempMachine: machineOpRows.some((r) => r.isTempMachine),
+        splitRunsCount: machineOpRows.filter((r) => r.isSplitRun).length,
+        runsCount: machineOpRows.length,
+        minSrNo,
+        stdOutput: mMetrics.totalStd,
+        actualOutput: mMetrics.totalActual,
+        goodOutput: mMetrics.goodOutput,
+        rework: mMetrics.totalRework,
+        downtimeMinutes: mMetrics.downtimeMinutes,
+        planAchievementPct: mMetrics.planAchievementPct,
+        availabilityPct: mMetrics.availabilityPct,
+        qualityPct: mMetrics.qualityPct,
+        oeePct: mMetrics.oeePct,
+        breakdownTotals: mMetrics.breakdownTotals,
+        metrics: mMetrics,
+      });
+    }
+
+    if (machines.length === 0) continue;
+
+    // 3. Sort machines inside this operation group by minSrNo ASC, then actualOutput DESC, then machineName ASC
+    machines.sort((a, b) => {
+      if (a.minSrNo !== b.minSrNo) return a.minSrNo - b.minSrNo;
+      if (b.actualOutput !== a.actualOutput) return b.actualOutput - a.actualOutput;
+      return a.machineName.localeCompare(b.machineName);
+    });
+
+    const combinedActualOutput = machines.reduce((acc, m) => acc + m.actualOutput, 0);
+    const combinedStdOutput = machines.reduce((acc, m) => acc + m.stdOutput, 0);
+    const combinedGoodOutput = machines.reduce((acc, m) => acc + m.goodOutput, 0);
+    const combinedRework = machines.reduce((acc, m) => acc + m.rework, 0);
+    const combinedPlanAchievementPct =
+      combinedStdOutput > 0
+        ? Number(((combinedActualOutput / combinedStdOutput) * 100).toFixed(2))
+        : 0;
+
+    const opMetrics = calculateOeeMetrics(opGroupRows);
+    const combinedOeePct = opMetrics.oeePct;
+    const groupMinSrNo = Math.min(...machines.map((m) => m.minSrNo));
+
+    operationGroups.push({
+      operationKey: opKey,
+      operation: opDisplay,
+      minSrNo: groupMinSrNo,
+      machinesCount: machines.length,
+      combinedActualOutput,
+      combinedStdOutput,
+      combinedGoodOutput,
+      combinedRework,
+      combinedPlanAchievementPct,
+      combinedOeePct,
+      machines,
+    });
+  }
+
+  // 4. Sort operationGroups by minSrNo ASC, then operation ASC
+  operationGroups.sort((a, b) => {
+    if (a.minSrNo !== b.minSrNo) return a.minSrNo - b.minSrNo;
+    return a.operation.localeCompare(b.operation);
+  });
+
+  return operationGroups;
+}
+
+/**
  * Step 3A: Product-to-Line/Machine Traceability Matrix
  * Groups by Product (canonical itemName / itemId), returning overall OEE + Line & Machine Matrix Table.
  */
@@ -488,6 +637,7 @@ export function buildProductLineMachineMatrix(
     }
 
     const qcMetrics = resolveProductQcMetrics(preQcProduction, hasLoggedProduction);
+    const operationGroups = buildProductOperationGroups(rows);
 
     result.push({
       productKey: key,
@@ -496,6 +646,7 @@ export function buildProductLineMachineMatrix(
       metrics: overallMetrics,
       lines,
       matrix,
+      operationGroups,
       preQcProduction,
       finishedProduction: preQcProduction,
       dailyPreQcProduction: dailyPreQc,
@@ -533,6 +684,7 @@ export function buildProductLineMachineMatrix(
         metrics: calculateOeeMetrics([]),
         lines,
         matrix: [],
+        operationGroups: [],
         preQcProduction,
         finishedProduction: preQcProduction,
         dailyPreQcProduction: dailyPreQc,

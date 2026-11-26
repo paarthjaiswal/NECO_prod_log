@@ -435,6 +435,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [activeTab, setActiveTab] = useState<TabType>("product");
   const [periodGranularity, setPeriodGranularity] = useState<"day" | "week">("day");
   const [productSearch, setProductSearch] = useState<string>("");
+  const [productMatrixView, setProductMatrixView] = useState<"line_machine" | "operation">("line_machine");
   const [expandedProducts, setExpandedProducts] = useState<Set<string>>(new Set());
 
   const [machineSortKey, setMachineSortKey] = useState<"oee" | "actual" | "downtime" | "name">("oee");
@@ -578,6 +579,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           itemRows,
           activeFilters: activeFiltersMeta,
           shiftItemTotals: filteredShiftItemTotals,
+          groupByOperation: productMatrixView === "operation",
         });
 
         notifySuccess(
@@ -589,7 +591,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
         notifyError("Export Failed", `Failed to generate Excel for ${prod.productName}.`);
       }
     },
-    [filteredRows, activeFiltersMeta, filteredShiftItemTotals, notifySuccess, notifyError]
+    [filteredRows, activeFiltersMeta, filteredShiftItemTotals, productMatrixView, notifySuccess, notifyError]
   );
 
   const handleExportActiveTab = useCallback(
@@ -1240,6 +1242,32 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </p>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
+                {/* Segmented View Toggle */}
+                <div className="inline-flex p-0.5 bg-slate-100 border border-slate-200 rounded-md">
+                  <button
+                    type="button"
+                    onClick={() => setProductMatrixView("line_machine")}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                      productMatrixView === "line_machine"
+                        ? "bg-white text-slate-900 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    By Line & Machine
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProductMatrixView("operation")}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                      productMatrixView === "operation"
+                        ? "bg-white text-slate-900 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    By Operation (Combined)
+                  </button>
+                </div>
+
                 <div className="relative w-64 sm:w-72">
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
                   <input
@@ -1368,7 +1396,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                           <div className="bg-slate-100/80 px-3 py-1.5 border-b border-slate-200 flex items-center justify-between text-xs font-semibold text-slate-700">
                             <span className="flex items-center gap-1.5">
                               <Cpu className="w-3.5 h-3.5 text-blue-600" />
-                              <span>Machine Allocations ({prod.matrix.length})</span>
+                              <span>
+                                {productMatrixView === "operation"
+                                  ? `Operation Groups (${prod.operationGroups.length}) · ${prod.matrix.length} Machine Allocations`
+                                  : `Machine Allocations (${prod.matrix.length})`}
+                              </span>
                             </span>
                             <button
                               type="button"
@@ -1381,95 +1413,278 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                             </button>
                           </div>
                           <div className="overflow-x-auto">
-                            <table className="w-full text-xs text-left">
-                            <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
-                              <tr>
-                                <th className="px-3 py-2">Line</th>
-                                <th className="px-3 py-2">Machine</th>
-                                <th className="px-3 py-2">Operation</th>
-                                <th className="px-3 py-2 text-center">Runs</th>
-                                <th className="px-3 py-2 text-right">Target</th>
-                                <th className="px-3 py-2 text-right">Actual</th>
-                                <th className="px-3 py-2 text-right">Rework</th>
-                                <th className="px-3 py-2 text-right">Good</th>
-                                <th className="px-3 py-2 text-right">Downtime</th>
-                                <th className="px-3 py-2 text-right">Avail %</th>
-                                <th className="px-3 py-2 text-right">Qual %</th>
-                                <th className="px-3 py-2 text-right font-black">OEE %</th>
-                                <th className="px-3 py-2 text-center">Jump</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100 font-mono">
-                              {prod.matrix.map((m, mIdx) => (
-                                <tr key={mIdx} className="hover:bg-slate-50 transition-colors">
-                                  <td className="px-3 py-2 font-sans font-medium text-slate-700 whitespace-nowrap">
-                                    {m.line}
-                                  </td>
-                                  <td className="px-3 py-2 font-sans">
-                                    <div className="flex items-center gap-1.5 flex-wrap">
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          handleSelectAnalyticsMachine(m.machineId)
-                                        }
-                                        className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
-                                        title="View Machine Analytics Drilldown"
-                                      >
-                                        <span>{m.machineName}</span>
-                                        <ExternalLink className="w-3 h-3 opacity-60" />
-                                      </button>
-                                      {m.isTempMachine && (
-                                        <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
-                                          TEMP
+                            {productMatrixView === "operation" ? (
+                              <table className="w-full text-xs text-left">
+                                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                                  <tr>
+                                    <th className="px-3 py-2">Operation</th>
+                                    <th className="px-3 py-2">Machine</th>
+                                    <th className="px-3 py-2">Line</th>
+                                    <th className="px-3 py-2 text-center">Runs</th>
+                                    <th className="px-3 py-2 text-right">Actual / Target</th>
+                                    <th className="px-3 py-2 text-right">Rework</th>
+                                    <th className="px-3 py-2 text-right">BD (m)</th>
+                                    <th className="px-3 py-2 text-right">Avail %</th>
+                                    <th className="px-3 py-2 text-right">Qual %</th>
+                                    <th className="px-3 py-2 text-right font-black">OEE %</th>
+                                    <th className="px-3 py-2 text-right font-bold text-sky-300">Op Combined Prod</th>
+                                    <th className="px-3 py-2 text-center">Jump</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {prod.operationGroups.length === 0 ? (
+                                    <tr>
+                                      <td colSpan={12} className="px-3 py-4 text-center text-slate-400 italic font-sans">
+                                        No machine operations recorded for this item.
+                                      </td>
+                                    </tr>
+                                  ) : (
+                                    prod.operationGroups.map((group, gIdx) =>
+                                      group.machines.map((m, mIdx) => (
+                                        <tr
+                                          key={`${group.operationKey}_${m.machineId}_${m.line}_${mIdx}`}
+                                          className={`hover:bg-slate-50 transition-colors ${
+                                            gIdx > 0 && mIdx === 0
+                                              ? "border-t-2 border-slate-300"
+                                              : "border-t border-slate-200"
+                                          }`}
+                                        >
+                                          {/* Operation Name with Rowspan */}
+                                          {mIdx === 0 && (
+                                            <td
+                                              rowSpan={group.machines.length}
+                                              className="px-3 py-2 font-sans font-semibold text-slate-800 align-top bg-slate-50/60 border-r border-slate-200"
+                                            >
+                                              <div className="flex items-start justify-between gap-1.5">
+                                                <span className="font-bold text-slate-900">{group.operation}</span>
+                                                <span
+                                                  className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                                                    group.machinesCount > 1
+                                                      ? "bg-indigo-100 text-indigo-800 border border-indigo-200"
+                                                      : "bg-slate-200 text-slate-700"
+                                                  }`}
+                                                >
+                                                  {group.machinesCount} {group.machinesCount === 1 ? "M/c" : "M/cs"}
+                                                </span>
+                                              </div>
+                                            </td>
+                                          )}
+
+                                          {/* Machine Name & TEMP Badge */}
+                                          <td className="px-3 py-2 font-sans">
+                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                              <button
+                                                type="button"
+                                                onClick={() => handleSelectAnalyticsMachine(m.machineId)}
+                                                className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
+                                                title="View Machine Analytics Drilldown"
+                                              >
+                                                <span>{m.machineName}</span>
+                                                <ExternalLink className="w-3 h-3 opacity-60" />
+                                              </button>
+                                              {m.isTempMachine && (
+                                                <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                                                  TEMP
+                                                </span>
+                                              )}
+                                            </div>
+                                          </td>
+
+                                          {/* Line */}
+                                          <td className="px-3 py-2 font-sans font-medium text-slate-700 whitespace-nowrap">
+                                            {m.line}
+                                          </td>
+
+                                          {/* Runs */}
+                                          <td className="px-3 py-2 text-center font-mono">
+                                            {m.splitRunsCount > 0 ? (
+                                              <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold font-sans">
+                                                Split ({m.splitRunsCount})
+                                              </span>
+                                            ) : (
+                                              <span className="text-slate-400">{m.runsCount || 1}</span>
+                                            )}
+                                          </td>
+
+                                          {/* Actual / Target with Plan % */}
+                                          <td className="px-3 py-2 text-right font-mono">
+                                            <div className="font-bold text-slate-900">
+                                              {m.actualOutput.toLocaleString()}{" "}
+                                              <span className="text-slate-400 font-normal">
+                                                / {m.stdOutput.toLocaleString()}
+                                              </span>
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 font-sans">
+                                              {m.planAchievementPct}% Plan
+                                            </div>
+                                          </td>
+
+                                          {/* Rework */}
+                                          <td className="px-3 py-2 text-right font-mono text-amber-600">
+                                            {m.rework.toLocaleString()}
+                                          </td>
+
+                                          {/* Downtime (m) */}
+                                          <td className="px-3 py-2 text-right font-mono text-rose-600">
+                                            {m.downtimeMinutes}m
+                                          </td>
+
+                                          {/* Avail % */}
+                                          <td className="px-3 py-2 text-right font-mono text-slate-700">
+                                            {m.availabilityPct}%
+                                          </td>
+
+                                          {/* Qual % */}
+                                          <td className="px-3 py-2 text-right font-mono text-slate-700">
+                                            {m.qualityPct}%
+                                          </td>
+
+                                          {/* OEE % */}
+                                          <td className="px-3 py-2 text-right font-mono font-black">
+                                            <span
+                                              className={`px-1.5 py-0.5 rounded text-[11px] font-extrabold border ${getOeeBadgeClass(
+                                                m.oeePct
+                                              )}`}
+                                            >
+                                              {m.oeePct}%
+                                            </span>
+                                          </td>
+
+                                          {/* Op Combined Prod with Rowspan */}
+                                          {mIdx === 0 && (
+                                            <td
+                                              rowSpan={group.machines.length}
+                                              className="px-3 py-2 text-right bg-sky-50/50 align-middle border-l border-slate-200"
+                                            >
+                                              <div className="font-mono font-black text-slate-900 text-xs">
+                                                {group.combinedActualOutput.toLocaleString()} pcs
+                                              </div>
+                                              <div className="text-[10px] text-slate-500 font-sans">
+                                                Std: {group.combinedStdOutput.toLocaleString()} ·{" "}
+                                                <span className="font-semibold text-slate-700">
+                                                  {group.combinedPlanAchievementPct}%
+                                                </span>
+                                              </div>
+                                              <div className="mt-0.5">
+                                                <span
+                                                  className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-extrabold border ${getOeeBadgeClass(
+                                                    group.combinedOeePct
+                                                  )}`}
+                                                >
+                                                  Op OEE: {group.combinedOeePct}%
+                                                </span>
+                                              </div>
+                                            </td>
+                                          )}
+
+                                          {/* Jump Button */}
+                                          <td className="px-3 py-2 text-center font-sans">
+                                            <button
+                                              type="button"
+                                              onClick={() => handleSelectAnalyticsMachine(m.machineId)}
+                                              className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                                              title="View Machine Analytics Drilldown"
+                                            >
+                                              <ExternalLink className="w-3.5 h-3.5" />
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      ))
+                                    )
+                                  )}
+                                </tbody>
+                              </table>
+                            ) : (
+                              <table className="w-full text-xs text-left">
+                                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                                  <tr>
+                                    <th className="px-3 py-2">Line</th>
+                                    <th className="px-3 py-2">Machine</th>
+                                    <th className="px-3 py-2">Operation</th>
+                                    <th className="px-3 py-2 text-center">Runs</th>
+                                    <th className="px-3 py-2 text-right">Target</th>
+                                    <th className="px-3 py-2 text-right">Actual</th>
+                                    <th className="px-3 py-2 text-right">Rework</th>
+                                    <th className="px-3 py-2 text-right">Good</th>
+                                    <th className="px-3 py-2 text-right">Downtime</th>
+                                    <th className="px-3 py-2 text-right">Avail %</th>
+                                    <th className="px-3 py-2 text-right">Qual %</th>
+                                    <th className="px-3 py-2 text-right font-black">OEE %</th>
+                                    <th className="px-3 py-2 text-center">Jump</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 font-mono">
+                                  {prod.matrix.map((m, mIdx) => (
+                                    <tr key={mIdx} className="hover:bg-slate-50 transition-colors">
+                                      <td className="px-3 py-2 font-sans font-medium text-slate-700 whitespace-nowrap">
+                                        {m.line}
+                                      </td>
+                                      <td className="px-3 py-2 font-sans">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              handleSelectAnalyticsMachine(m.machineId)
+                                            }
+                                            className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
+                                            title="View Machine Analytics Drilldown"
+                                          >
+                                            <span>{m.machineName}</span>
+                                            <ExternalLink className="w-3 h-3 opacity-60" />
+                                          </button>
+                                          {m.isTempMachine && (
+                                            <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                                              TEMP
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="px-3 py-2 font-sans text-slate-600">{m.operation}</td>
+                                      <td className="px-3 py-2 text-center">
+                                        {m.splitRunsCount > 0 ? (
+                                          <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">
+                                            Split ({m.runNos.join(",")})
+                                          </span>
+                                        ) : (
+                                          <span className="text-slate-400">1</span>
+                                        )}
+                                      </td>
+                                      <td className="px-3 py-2 text-right text-slate-600">{m.stdOutput}</td>
+                                      <td className="px-3 py-2 text-right font-bold text-slate-900">{m.actualOutput}</td>
+                                      <td className="px-3 py-2 text-right text-amber-600">{m.rework}</td>
+                                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">{m.goodOutput}</td>
+                                      <td className="px-3 py-2 text-right text-rose-600">{m.breakdownMinutes}m</td>
+                                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
+                                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
+                                      <td className="px-3 py-2 text-right font-black">
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded text-[11px] font-extrabold border ${getOeeBadgeClass(
+                                            m.metrics.oeePct
+                                          )}`}
+                                        >
+                                          {m.metrics.oeePct}%
                                         </span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-3 py-2 font-sans text-slate-600">{m.operation}</td>
-                                  <td className="px-3 py-2 text-center">
-                                    {m.splitRunsCount > 0 ? (
-                                      <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">
-                                        Split ({m.runNos.join(",")})
-                                      </span>
-                                    ) : (
-                                      <span className="text-slate-400">1</span>
-                                    )}
-                                  </td>
-                                  <td className="px-3 py-2 text-right text-slate-600">{m.stdOutput}</td>
-                                  <td className="px-3 py-2 text-right font-bold text-slate-900">{m.actualOutput}</td>
-                                  <td className="px-3 py-2 text-right text-amber-600">{m.rework}</td>
-                                  <td className="px-3 py-2 text-right text-emerald-700 font-bold">{m.goodOutput}</td>
-                                  <td className="px-3 py-2 text-right text-rose-600">{m.breakdownMinutes}m</td>
-                                  <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
-                                  <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
-                                  <td className="px-3 py-2 text-right font-black">
-                                    <span
-                                      className={`px-1.5 py-0.5 rounded text-[11px] font-extrabold border ${getOeeBadgeClass(
-                                        m.metrics.oeePct
-                                      )}`}
-                                    >
-                                      {m.metrics.oeePct}%
-                                    </span>
-                                  </td>
-                                  <td className="px-3 py-2 text-center font-sans">
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        handleSelectAnalyticsMachine(m.machineId)
-                                      }
-                                      className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
-                                      title="View Machine Analytics Drilldown"
-                                    >
-                                      <ExternalLink className="w-3.5 h-3.5" />
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                                      </td>
+                                      <td className="px-3 py-2 text-center font-sans">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleSelectAnalyticsMachine(m.machineId)
+                                          }
+                                          className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                                          title="View Machine Analytics Drilldown"
+                                        >
+                                          <ExternalLink className="w-3.5 h-3.5" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
                     </div>
                   );
                 })}

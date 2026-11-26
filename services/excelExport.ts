@@ -155,7 +155,9 @@ export function getHeaderFill(header: string): string {
     norm.includes("efficiency") ||
     norm.includes("variance") ||
     norm.includes("spread") ||
-    norm.includes("qty")
+    norm.includes("qty") ||
+    norm.includes("combined") ||
+    norm.includes("op combined")
   ) {
     return EXCEL_PALETTE.royalBlue;
   }
@@ -488,6 +490,7 @@ export interface StyledWorksheetOptions {
   rows?: (string | number)[][];
   totalsRow?: (string | number)[];
   extraSections?: StyledWorksheetSection[];
+  dataMerges?: Array<{ startRowIndex: number; endRowIndex: number; colIndex: number }>;
 }
 
 /**
@@ -801,6 +804,15 @@ export function buildStyledWorksheet(options: StyledWorksheetOptions): XLSX.Work
     }
 
     // 4. Data Rows (Zebra + Semantic Tints)
+    if (section.isMainTable && options.dataMerges && options.dataMerges.length > 0) {
+      options.dataMerges.forEach((dm) => {
+        merges.push({
+          s: { r: currRow + dm.startRowIndex, c: dm.colIndex },
+          e: { r: currRow + dm.endRowIndex, c: dm.colIndex },
+        });
+      });
+    }
+
     section.rows.forEach((row, rIdx) => {
       rowHeights.push({ hpt: 19 });
 
@@ -1865,10 +1877,11 @@ export interface ExportItemTraceabilityParams {
     splitOnly?: boolean;
   };
   shiftItemTotals?: ShiftItemProductionRow[];
+  groupByOperation?: boolean;
 }
 
 export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams): void {
-  const { product, itemRows, activeFilters } = params;
+  const { product, itemRows, activeFilters, groupByOperation = false } = params;
   const wb = XLSX.utils.book_new();
   const usedNames = new Set<string>();
 
@@ -1887,83 +1900,186 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     splitOnly: activeFilters.splitOnly,
   });
 
+  if (groupByOperation) {
+    metadataList.push({ label: "View Mode", value: "Grouped by Operation" });
+  }
+
   // --------------------------------------------------------------------------
   // Sheet 1: Full Range Summary
   // --------------------------------------------------------------------------
-  const sheet1Headers = [
-    "Line",
-    "Machine",
-    "Temp?",
-    "Split Runs",
-    "Operation",
-    "Runs",
-    "Std Output",
-    "Actual Output",
-    "Good Output",
-    "Rework",
-    "Plan %",
-    "NO/DISC",
-    "CHANGE",
-    "POWER",
-    "OPERATOR",
-    "BREAK DOWN",
-    "FIX/PROG",
-    "MISC.",
-    "Total BD (m)",
-    "Avail %",
-    "Qual %",
-    "OEE %",
-  ];
+  let sheet1Headers: string[];
+  let sheet1Rows: (string | number)[][];
+  let sheet1Totals: (string | number)[];
+  const dataMerges: Array<{ startRowIndex: number; endRowIndex: number; colIndex: number }> = [];
 
-  const sheet1Rows: (string | number)[][] = product.matrix.map((m) => [
-    m.line,
-    m.machineName,
-    m.isTempMachine ? "TEMP" : "Perm",
-    m.splitRunsCount > 0 ? `Split (${m.runNos.join(",")})` : "1",
-    m.operation,
-    m.metrics.rowCount,
-    m.stdOutput,
-    m.actualOutput,
-    m.goodOutput,
-    m.rework,
-    `${m.metrics.planAchievementPct}%`,
-    m.metrics.breakdownTotals.noDisc,
-    m.metrics.breakdownTotals.change,
-    m.metrics.breakdownTotals.power,
-    m.metrics.breakdownTotals.operator,
-    m.metrics.breakdownTotals.machineBreakdown,
-    m.metrics.breakdownTotals.fixProgSettings,
-    m.metrics.breakdownTotals.miscellaneous,
-    m.breakdownMinutes,
-    `${m.metrics.availabilityPct}%`,
-    `${m.metrics.qualityPct}%`,
-    `${m.metrics.oeePct}%`,
-  ]);
+  if (groupByOperation && product.operationGroups && product.operationGroups.length > 0) {
+    sheet1Headers = [
+      "Operation",
+      "Line",
+      "Machine",
+      "Temp?",
+      "Split Runs",
+      "Runs",
+      "Std Output",
+      "Actual Output",
+      "Good Output",
+      "Rework",
+      "Plan %",
+      "Op Combined Prod",
+      "NO/DISC",
+      "CHANGE",
+      "POWER",
+      "OPERATOR",
+      "BREAK DOWN",
+      "FIX/PROG",
+      "MISC.",
+      "Total BD (m)",
+      "Avail %",
+      "Qual %",
+      "OEE %",
+    ];
 
-  const sheet1Totals: (string | number)[] = [
-    "TOTALS / OVERALL",
-    `${product.matrix.length} allocations`,
-    "-",
-    "-",
-    "-",
-    product.matrix.reduce((acc, m) => acc + m.metrics.rowCount, 0),
-    overallMetrics.totalStd,
-    overallMetrics.totalActual,
-    overallMetrics.goodOutput,
-    overallMetrics.totalRework,
-    `${overallMetrics.planAchievementPct}%`,
-    overallMetrics.breakdownTotals.noDisc,
-    overallMetrics.breakdownTotals.change,
-    overallMetrics.breakdownTotals.power,
-    overallMetrics.breakdownTotals.operator,
-    overallMetrics.breakdownTotals.machineBreakdown,
-    overallMetrics.breakdownTotals.fixProgSettings,
-    overallMetrics.breakdownTotals.miscellaneous,
-    overallMetrics.downtimeMinutes,
-    `${overallMetrics.availabilityPct}%`,
-    `${overallMetrics.qualityPct}%`,
-    `${overallMetrics.oeePct}%`,
-  ];
+    sheet1Rows = [];
+    let rIdx = 0;
+
+    for (const group of product.operationGroups) {
+      const gLen = group.machines.length;
+      if (gLen > 1) {
+        dataMerges.push({ startRowIndex: rIdx, endRowIndex: rIdx + gLen - 1, colIndex: 0 });
+        dataMerges.push({ startRowIndex: rIdx, endRowIndex: rIdx + gLen - 1, colIndex: 11 });
+      }
+
+      for (const m of group.machines) {
+        sheet1Rows.push([
+          group.operation,
+          m.line,
+          m.machineName,
+          m.isTempMachine ? "TEMP" : "Perm",
+          m.splitRunsCount > 0 ? "Split" : "1",
+          m.runsCount,
+          m.stdOutput,
+          m.actualOutput,
+          m.goodOutput,
+          m.rework,
+          `${m.planAchievementPct}%`,
+          group.combinedActualOutput,
+          m.breakdownTotals?.noDisc ?? 0,
+          m.breakdownTotals?.change ?? 0,
+          m.breakdownTotals?.power ?? 0,
+          m.breakdownTotals?.operator ?? 0,
+          m.breakdownTotals?.machineBreakdown ?? 0,
+          m.breakdownTotals?.fixProgSettings ?? 0,
+          m.breakdownTotals?.miscellaneous ?? 0,
+          m.downtimeMinutes,
+          `${m.availabilityPct}%`,
+          `${m.qualityPct}%`,
+          `${m.oeePct}%`,
+        ]);
+        rIdx++;
+      }
+    }
+
+    sheet1Totals = [
+      "TOTALS / OVERALL",
+      "-",
+      `${product.matrix.length} allocations`,
+      "-",
+      "-",
+      overallMetrics.rowCount,
+      overallMetrics.totalStd,
+      overallMetrics.totalActual,
+      overallMetrics.goodOutput,
+      overallMetrics.totalRework,
+      `${overallMetrics.planAchievementPct}%`,
+      overallMetrics.totalActual,
+      overallMetrics.breakdownTotals.noDisc,
+      overallMetrics.breakdownTotals.change,
+      overallMetrics.breakdownTotals.power,
+      overallMetrics.breakdownTotals.operator,
+      overallMetrics.breakdownTotals.machineBreakdown,
+      overallMetrics.breakdownTotals.fixProgSettings,
+      overallMetrics.breakdownTotals.miscellaneous,
+      overallMetrics.downtimeMinutes,
+      `${overallMetrics.availabilityPct}%`,
+      `${overallMetrics.qualityPct}%`,
+      `${overallMetrics.oeePct}%`,
+    ];
+  } else {
+    sheet1Headers = [
+      "Line",
+      "Machine",
+      "Temp?",
+      "Split Runs",
+      "Operation",
+      "Runs",
+      "Std Output",
+      "Actual Output",
+      "Good Output",
+      "Rework",
+      "Plan %",
+      "NO/DISC",
+      "CHANGE",
+      "POWER",
+      "OPERATOR",
+      "BREAK DOWN",
+      "FIX/PROG",
+      "MISC.",
+      "Total BD (m)",
+      "Avail %",
+      "Qual %",
+      "OEE %",
+    ];
+
+    sheet1Rows = product.matrix.map((m) => [
+      m.line,
+      m.machineName,
+      m.isTempMachine ? "TEMP" : "Perm",
+      m.splitRunsCount > 0 ? `Split (${m.runNos.join(",")})` : "1",
+      m.operation,
+      m.metrics.rowCount,
+      m.stdOutput,
+      m.actualOutput,
+      m.goodOutput,
+      m.rework,
+      `${m.metrics.planAchievementPct}%`,
+      m.metrics.breakdownTotals.noDisc,
+      m.metrics.breakdownTotals.change,
+      m.metrics.breakdownTotals.power,
+      m.metrics.breakdownTotals.operator,
+      m.metrics.breakdownTotals.machineBreakdown,
+      m.metrics.breakdownTotals.fixProgSettings,
+      m.metrics.breakdownTotals.miscellaneous,
+      m.breakdownMinutes,
+      `${m.metrics.availabilityPct}%`,
+      `${m.metrics.qualityPct}%`,
+      `${m.metrics.oeePct}%`,
+    ]);
+
+    sheet1Totals = [
+      "TOTALS / OVERALL",
+      `${product.matrix.length} allocations`,
+      "-",
+      "-",
+      "-",
+      product.matrix.reduce((acc, m) => acc + m.metrics.rowCount, 0),
+      overallMetrics.totalStd,
+      overallMetrics.totalActual,
+      overallMetrics.goodOutput,
+      overallMetrics.totalRework,
+      `${overallMetrics.planAchievementPct}%`,
+      overallMetrics.breakdownTotals.noDisc,
+      overallMetrics.breakdownTotals.change,
+      overallMetrics.breakdownTotals.power,
+      overallMetrics.breakdownTotals.operator,
+      overallMetrics.breakdownTotals.machineBreakdown,
+      overallMetrics.breakdownTotals.fixProgSettings,
+      overallMetrics.breakdownTotals.miscellaneous,
+      overallMetrics.downtimeMinutes,
+      `${overallMetrics.availabilityPct}%`,
+      `${overallMetrics.qualityPct}%`,
+      `${overallMetrics.oeePct}%`,
+    ];
+  }
 
   const sheet1Kpis = [
     { label: "OEE %", value: `${overallMetrics.oeePct}%` },
@@ -1982,10 +2098,11 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     title: `Product Traceability & Machine Matrix — ${product.productName}`,
     metadata: metadataList,
     kpiStrip: sheet1Kpis,
-    sectionTitle: "FULL-PERIOD LINE & MACHINE MATRIX",
+    sectionTitle: groupByOperation ? "OPERATION-GROUPED MACHINE PROCESS MATRIX" : "FULL-PERIOD LINE & MACHINE MATRIX",
     headers: sheet1Headers,
     rows: sheet1Rows,
     totalsRow: sheet1Totals,
+    dataMerges: dataMerges.length > 0 ? dataMerges : undefined,
   });
   XLSX.utils.book_append_sheet(wb, ws1, sanitizeSheetName("Full Range Summary", usedNames));
 
