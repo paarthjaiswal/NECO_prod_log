@@ -11,6 +11,7 @@ import {
   groupByPeriod,
   groupByMachine,
   EnrichedAnalyticsRow,
+  OeeMetrics,
   ProductMatrixItem,
   MachineDetailAnalytics,
 } from "@/services/analyticsEngine";
@@ -97,6 +98,7 @@ export function getHeaderFill(header: string): string {
     norm.includes("pre-qc") ||
     norm.includes("preqc") ||
     norm.includes("total prod") ||
+    norm.includes("qc passed") ||
     norm === "availability %" ||
     norm === "quality %" ||
     norm === "oee %" ||
@@ -157,7 +159,8 @@ export function getHeaderFill(header: string): string {
     norm.includes("spread") ||
     norm.includes("qty") ||
     norm.includes("combined") ||
-    norm.includes("op combined")
+    norm.includes("op combined") ||
+    norm.includes("machine ops")
   ) {
     return EXCEL_PALETTE.royalBlue;
   }
@@ -238,6 +241,21 @@ export function getColumnAlignment(header: string): "left" | "center" | "right" 
  */
 export function getNumberFormat(header: string, sampleValue: unknown): string | undefined {
   const norm = (header || "").trim().toLowerCase();
+
+  // Integer counts whose header contains "pre-qc" / "100%" / "machine ops"
+  if (
+    norm.includes("qc passed") ||
+    norm.includes("total prod") ||
+    norm.includes("pre-qc") ||
+    norm.includes("preqc") ||
+    norm.includes("machine ops actual") ||
+    norm.includes("machine ops std")
+  ) {
+    if (typeof sampleValue === "number") {
+      return "#,##0";
+    }
+    return undefined;
+  }
 
   // Percentages: use '0.00"%"' so values like 87.5 display as 87.50% directly
   if (
@@ -324,10 +342,15 @@ export function getDataCellStyle(
   let fontColor = EXCEL_PALETTE.darkSlate;
   let bold = false;
 
-  // 1. Actual Output / Good Output
-  if (norm.includes("actual output") || norm === "good output" || norm === "good output (pcs)") {
+  // 1. Actual Output / Good Output / Machine Ops Actual
+  if (
+    norm.includes("actual output") ||
+    norm.includes("machine ops actual") ||
+    norm === "good output" ||
+    norm === "good output (pcs)"
+  ) {
     bg = EXCEL_PALETTE.blueTint;
-    if (norm.includes("actual output")) {
+    if (norm.includes("actual output") || norm.includes("machine ops actual")) {
       bold = true;
     }
   }
@@ -2353,8 +2376,112 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
   XLSX.writeFile(wb, filename);
 }
 
+function appendDailyShiftItemSheet(params: {
+  wb: XLSX.WorkBook;
+  usedNames: Set<string>;
+  filteredRows: EnrichedAnalyticsRow[];
+  shiftItemTotals?: ShiftItemProductionRow[];
+  masterData?: MasterDataState;
+  metadataList: { label: string; value: string | number }[];
+  overallMetrics: OeeMetrics;
+}): void {
+  const { wb, usedNames, filteredRows, shiftItemTotals, masterData, metadataList, overallMetrics } = params;
+  const dailyPeriods = groupByPeriod(filteredRows, "day", shiftItemTotals, masterData?.items);
+
+  const dsiHeaders = [
+    "Date",
+    "Item",
+    "Shift",
+    "Total Prod (Pre-QC)",
+    "QC Passed (100%)",
+    "Machine Ops Actual",
+    "Machine Ops Std",
+    "Plan %",
+    "Rework",
+    "Total BD (m)",
+    "Avail %",
+    "Qual %",
+    "OEE %",
+  ];
+
+  const dsiRows: (string | number)[][] = [];
+  let totalPreQc = 0;
+  let totalQcPassed = 0;
+  let totalOpsActual = 0;
+  let totalOpsStd = 0;
+  let totalRework = 0;
+  let totalBd = 0;
+
+  // Date DESC -> Item ASC -> Shift A -> B -> C
+  for (const day of dailyPeriods) {
+    const sortedItems = [...day.itemShiftBreakdown].sort((a, b) =>
+      a.itemName.localeCompare(b.itemName)
+    );
+    for (const item of sortedItems) {
+      const itemDisplay =
+        item.itemCode && item.itemCode.trim().toLowerCase() !== item.itemName.trim().toLowerCase()
+          ? `${item.itemName} (${item.itemCode})`
+          : item.itemName;
+
+      for (const s of item.shifts) {
+        totalPreQc += s.qc.preQcProduction;
+        totalQcPassed += s.qc.qcPassed;
+        totalOpsActual += s.machineOpsActual;
+        totalOpsStd += s.machineOpsStd;
+        totalRework += s.rework;
+        totalBd += s.downtimeMinutes;
+
+        dsiRows.push([
+          day.periodLabel,
+          itemDisplay,
+          s.shiftShortLabel,
+          s.qc.preQcProduction,
+          s.qc.qcPassed,
+          s.machineOpsActual,
+          s.machineOpsStd,
+          s.machineRunsCount > 0 ? `${s.planAchievementPct}%` : "—",
+          s.rework,
+          round2(s.downtimeMinutes),
+          s.machineRunsCount > 0 ? `${s.availabilityPct}%` : "—",
+          s.machineRunsCount > 0 ? `${s.qualityPct}%` : "—",
+          s.machineRunsCount > 0 ? `${s.oeePct}%` : "—",
+        ]);
+      }
+    }
+  }
+
+  const overallPlanPct =
+    totalOpsStd > 0 ? round2((totalOpsActual / totalOpsStd) * 100) : overallMetrics.planAchievementPct;
+
+  const dsiTotals: (string | number)[] = [
+    "TOTALS / OVERALL",
+    `${dsiRows.length} shift-item rows`,
+    "—",
+    totalPreQc,
+    totalQcPassed,
+    totalOpsActual,
+    totalOpsStd,
+    `${overallPlanPct}%`,
+    totalRework,
+    round2(totalBd),
+    `${overallMetrics.availabilityPct}%`,
+    `${overallMetrics.qualityPct}%`,
+    `${overallMetrics.oeePct}%`,
+  ];
+
+  const wsDsi = buildStyledWorksheet({
+    title: "Daily Shift-Wise × Item Breakdown",
+    metadata: metadataList,
+    sectionTitle: "DAILY SHIFT-WISE ITEM PRODUCTION (PRE-QC) & MACHINE OEE",
+    headers: dsiHeaders,
+    rows: dsiRows,
+    totalsRow: dsiTotals,
+  });
+  XLSX.utils.book_append_sheet(wb, wsDsi, sanitizeSheetName("Daily Shift-Item", usedNames));
+}
+
 // ============================================================================
-// EXPORT ACTION 3: Filtered Analytics Comprehensive Workbook (7 Sheets)
+// EXPORT ACTION 3: Filtered Analytics Comprehensive Workbook
 // ============================================================================
 
 export interface ExportFilteredAnalyticsParams {
@@ -2366,7 +2493,7 @@ export interface ExportFilteredAnalyticsParams {
 }
 
 export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsParams): void {
-  const { filteredRows, activeFilters, periodGranularity = "day", shiftItemTotals } = params;
+  const { filteredRows, activeFilters, periodGranularity = "day", masterData, shiftItemTotals } = params;
   const wb = XLSX.utils.book_new();
   const usedNames = new Set<string>();
 
@@ -2696,7 +2823,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
   // --------------------------------------------------------------------------
   // Sheet 5: By Day / By Week
   // --------------------------------------------------------------------------
-  const periods = groupByPeriod(filteredRows, periodGranularity, shiftItemTotals);
+  const periods = groupByPeriod(filteredRows, periodGranularity, shiftItemTotals, masterData?.items);
   const periodLabel = periodGranularity === "week" ? "ISO Week Range" : "Date";
   const perHeaders = [
     periodLabel,
@@ -2750,6 +2877,19 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     totalsRow: perTotals,
   });
   XLSX.utils.book_append_sheet(wb, ws5, sanitizeSheetName(periodGranularity === "week" ? "By Week" : "By Day", usedNames));
+
+  // --------------------------------------------------------------------------
+  // Sheet 5B: Daily Shift-Item Breakdown
+  // --------------------------------------------------------------------------
+  appendDailyShiftItemSheet({
+    wb,
+    usedNames,
+    filteredRows,
+    shiftItemTotals,
+    masterData,
+    metadataList,
+    overallMetrics,
+  });
 
   // --------------------------------------------------------------------------
   // Sheet 6: By Machine
@@ -2922,7 +3062,7 @@ export interface ExportActiveAnalyticsTabParams {
 }
 
 export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabParams): void {
-  const { tab, filteredRows, activeFilters, periodGranularity = "day", shiftItemTotals } = params;
+  const { tab, filteredRows, activeFilters, periodGranularity = "day", masterData, shiftItemTotals } = params;
   const wb = XLSX.utils.book_new();
   const usedNames = new Set<string>();
 
@@ -3144,7 +3284,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
       "Period OEE %",
     ];
 
-    const periods = groupByPeriod(filteredRows, periodGranularity, shiftItemTotals);
+    const periods = groupByPeriod(filteredRows, periodGranularity, shiftItemTotals, masterData?.items);
     tabRows = periods.map((p) => [
       p.periodLabel,
       p.itemsProduced.length,
@@ -3240,6 +3380,19 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
     totalsRow: tabTotals,
   });
   XLSX.utils.book_append_sheet(wb, ws1, sanitizeSheetName(tabSheetTitle, usedNames));
+
+  // Supporting Daily Shift-Item sheet when exporting Chronological Trends (By Day)
+  if (tab === "period" && periodGranularity === "day") {
+    appendDailyShiftItemSheet({
+      wb,
+      usedNames,
+      filteredRows,
+      shiftItemTotals,
+      masterData,
+      metadataList,
+      overallMetrics,
+    });
+  }
 
   // Sheet 2: Supporting Shift Logs
   const shiftLogsHeaders = [

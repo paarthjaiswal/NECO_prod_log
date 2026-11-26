@@ -464,10 +464,33 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     return groupByShift(filteredRows, filteredShiftItemTotals);
   }, [filteredRows, filteredShiftItemTotals]);
 
+  const [expandedTrendDates, setExpandedTrendDates] = useState<Set<string>>(new Set());
+
+  const isMachineOrOperatorScoped = filterMachine !== "all" || filterOperator !== "all";
+
   // Tab 4: Period Rollups
   const periodRollups = useMemo(() => {
-    return groupByPeriod(filteredRows, periodGranularity, filteredShiftItemTotals);
-  }, [filteredRows, periodGranularity, filteredShiftItemTotals]);
+    return groupByPeriod(
+      filteredRows,
+      periodGranularity,
+      filteredShiftItemTotals,
+      masterData?.items
+    );
+  }, [filteredRows, periodGranularity, filteredShiftItemTotals, masterData?.items]);
+
+  const toggleExpandTrendDate = (dateKey: string) => {
+    setExpandedTrendDates((prev) => {
+      const next = new Set(prev);
+      if (next.has(dateKey)) next.delete(dateKey);
+      else next.add(dateKey);
+      return next;
+    });
+  };
+
+  const handleChangePeriodGranularity = (mode: "day" | "week") => {
+    setPeriodGranularity(mode);
+    setExpandedTrendDates(new Set());
+  };
 
   // Tab 5: Machine Rollups
   const machineRollups = useMemo(() => {
@@ -1852,14 +1875,37 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Chronological Manufacturing Trends</h3>
                 <p className="text-xs text-slate-500">
-                  Track day-by-day or weekly manufacturing output and OEE progression.
+                  {periodGranularity === "day"
+                    ? "Track day-by-day output and OEE. Click any date row to expand its Shift A / B / C × Item breakdown."
+                    : "Track weekly manufacturing output and OEE progression."}
                 </p>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
+                {periodGranularity === "day" && periodRollups.length > 0 && (
+                  <div className="inline-flex items-center gap-1 bg-slate-100 border border-slate-200 p-0.5 rounded">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedTrendDates(new Set(periodRollups.map((p) => p.periodKey)))
+                      }
+                      className="px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-white hover:text-slate-900 rounded transition-colors cursor-pointer"
+                    >
+                      Expand All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedTrendDates(new Set())}
+                      disabled={expandedTrendDates.size === 0}
+                      className="px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-white hover:text-slate-900 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors cursor-pointer"
+                    >
+                      Collapse All
+                    </button>
+                  </div>
+                )}
                 <div className="flex items-center gap-1 bg-slate-100 p-1 rounded">
                   <button
                     type="button"
-                    onClick={() => setPeriodGranularity("day")}
+                    onClick={() => handleChangePeriodGranularity("day")}
                     className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
                       periodGranularity === "day"
                         ? "bg-white text-slate-900 shadow-2xs"
@@ -1870,7 +1916,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPeriodGranularity("week")}
+                    onClick={() => handleChangePeriodGranularity("week")}
                     className={`px-3 py-1 text-xs font-bold rounded cursor-pointer transition-colors ${
                       periodGranularity === "week"
                         ? "bg-white text-slate-900 shadow-2xs"
@@ -1913,54 +1959,308 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
-                  {periodRollups.map((p) => (
-                    <tr key={p.periodKey} className="hover:bg-slate-50">
-                      <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
-                        {p.periodLabel}
-                      </td>
-                      <td className="px-3 py-2 font-sans">
-                        <div className="flex flex-wrap gap-1 max-w-xs">
-                          {p.itemsProduced.slice(0, 3).map((it) => (
-                            <span
-                              key={it.itemId}
-                              className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-medium text-slate-700"
-                              title={`${it.itemName}: ${it.actualOutput} pcs`}
-                            >
-                              {it.itemName}: {it.actualOutput}
-                            </span>
-                          ))}
-                          {p.itemsProduced.length > 3 && (
-                            <span className="text-[10px] text-slate-400">
-                              +{p.itemsProduced.length - 3} more
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 text-right text-slate-600">{p.metrics.totalStd.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right font-bold text-slate-900">
-                        {p.metrics.totalActual.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">
-                        {p.metrics.goodOutput.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-emerald-700 font-black bg-emerald-50/50">
-                        {(p.preQcProduction ?? p.finishedProduction ?? 0).toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-amber-600">{p.metrics.totalRework.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right text-rose-600">{p.metrics.downtimeMinutes}m</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{p.metrics.availabilityPct}%</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{p.metrics.qualityPct}%</td>
-                      <td className="px-3 py-2 text-right">
-                        <span
-                          className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
-                            p.metrics.oeePct
-                          )}`}
+                  {periodRollups.map((p) => {
+                    const isDayMode = periodGranularity === "day";
+                    const isExpanded = isDayMode && expandedTrendDates.has(p.periodKey);
+
+                    return (
+                      <React.Fragment key={p.periodKey}>
+                        <tr
+                          onClick={isDayMode ? () => toggleExpandTrendDate(p.periodKey) : undefined}
+                          className={`transition-colors ${
+                            isDayMode
+                              ? isExpanded
+                                ? "bg-sky-50/50 cursor-pointer"
+                                : "hover:bg-slate-50 cursor-pointer"
+                              : "hover:bg-slate-50"
+                          }`}
                         >
-                          {p.metrics.oeePct}%
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                          <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              {isDayMode && (
+                                <span className="text-slate-500">
+                                  {isExpanded ? (
+                                    <ChevronDown className="w-3.5 h-3.5 text-blue-600" />
+                                  ) : (
+                                    <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                                  )}
+                                </span>
+                              )}
+                              <span>{p.periodLabel}</span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 font-sans">
+                            <div className="flex flex-wrap gap-1 max-w-xs">
+                              {p.itemsProduced.slice(0, 3).map((it) => (
+                                <span
+                                  key={it.itemId}
+                                  className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-medium text-slate-700"
+                                  title={`${it.itemName}: ${it.actualOutput} pcs`}
+                                >
+                                  {it.itemName}: {it.actualOutput}
+                                </span>
+                              ))}
+                              {p.itemsProduced.length > 3 && (
+                                <span className="text-[10px] text-slate-400">
+                                  +{p.itemsProduced.length - 3} more
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-right text-slate-600">{p.metrics.totalStd.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right font-bold text-slate-900">
+                            {p.metrics.totalActual.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-emerald-700 font-bold">
+                            {p.metrics.goodOutput.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-emerald-700 font-black bg-emerald-50/50">
+                            {(p.preQcProduction ?? p.finishedProduction ?? 0).toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-amber-600">{p.metrics.totalRework.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right text-rose-600">{p.metrics.downtimeMinutes}m</td>
+                          <td className="px-3 py-2 text-right text-slate-700">{p.metrics.availabilityPct}%</td>
+                          <td className="px-3 py-2 text-right text-slate-700">{p.metrics.qualityPct}%</td>
+                          <td className="px-3 py-2 text-right">
+                            <span
+                              className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                                p.metrics.oeePct
+                              )}`}
+                            >
+                              {p.metrics.oeePct}%
+                            </span>
+                          </td>
+                        </tr>
+
+                        {isExpanded && (
+                          <tr className="bg-slate-50/80">
+                            <td colSpan={11} className="p-0 border-b border-slate-200 font-sans">
+                              <div className="p-3 space-y-2.5">
+                                {/* Mini Header Strip */}
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-xs font-extrabold text-slate-800">
+                                      {p.periodLabel} — Shift-Wise Item Production
+                                    </span>
+                                    {isMachineOrOperatorScoped && (
+                                      <span className="text-[10px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                                        Pre-QC totals reflect full shift counts
+                                      </span>
+                                    )}
+                                  </div>
+                                  {p.shiftTotals.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      {p.shiftTotals.map((st) => (
+                                        <span
+                                          key={st.shift}
+                                          title={`${st.shift} · OEE ${st.oeePct}%`}
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-slate-200 text-[11px] text-slate-700 shadow-2xs"
+                                        >
+                                          <span className="font-bold text-slate-900">
+                                            {st.shiftShortLabel}:
+                                          </span>
+                                          <span className="font-mono font-bold text-emerald-700">
+                                            {st.preQcProduction.toLocaleString()} pcs
+                                          </span>
+                                          <span className="text-slate-400">
+                                            (Ops:{" "}
+                                            <span className="font-mono font-semibold text-slate-700">
+                                              {st.machineOpsActual.toLocaleString()}
+                                            </span>
+                                            )
+                                          </span>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Nested Item x Shift Table */}
+                                <div className="overflow-x-auto bg-white border border-slate-200 rounded-md shadow-2xs">
+                                  <table className="w-full text-xs text-left">
+                                    <thead className="bg-slate-800 text-slate-100 uppercase text-[10px] font-semibold">
+                                      <tr>
+                                        <th className="px-3 py-2">Item</th>
+                                        <th className="px-3 py-2">Shift</th>
+                                        <th className="px-3 py-2 text-right text-emerald-300">
+                                          Total Prod (Pre-QC)
+                                        </th>
+                                        <th
+                                          className="px-3 py-2 text-right text-emerald-300"
+                                          title="100% QC Pass Assumed pending QC module"
+                                        >
+                                          QC Passed (100%*)
+                                        </th>
+                                        <th className="px-3 py-2 text-right">Machine Ops (Act / Std)</th>
+                                        <th className="px-3 py-2 text-right">Rework</th>
+                                        <th className="px-3 py-2 text-right">BD (m)</th>
+                                        <th className="px-3 py-2 text-right">Avail %</th>
+                                        <th className="px-3 py-2 text-right">Qual %</th>
+                                        <th className="px-3 py-2 text-right font-black">OEE %</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {p.itemShiftBreakdown.length === 0 ? (
+                                        <tr>
+                                          <td
+                                            colSpan={10}
+                                            className="px-3 py-4 text-center text-slate-400 italic"
+                                          >
+                                            No item-level production or machine logs recorded for this date.
+                                          </td>
+                                        </tr>
+                                      ) : (
+                                        p.itemShiftBreakdown.map((item, itemIdx) =>
+                                          item.shifts.map((shiftRow, idx) => (
+                                            <tr
+                                              key={`${item.itemKey}_${shiftRow.shift}`}
+                                              className={`hover:bg-slate-50/80 transition-colors ${
+                                                idx === 0 && itemIdx > 0
+                                                  ? "border-t-2 border-slate-300"
+                                                  : idx > 0
+                                                  ? "border-t border-slate-200"
+                                                  : ""
+                                              }`}
+                                            >
+                                              {idx === 0 && (
+                                                <td
+                                                  rowSpan={item.shifts.length}
+                                                  className="px-3 py-2 align-top bg-slate-50/60 border-r border-slate-200"
+                                                >
+                                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <span className="font-bold text-slate-900">
+                                                      {item.itemName}
+                                                    </span>
+                                                    {item.itemCode &&
+                                                      item.itemCode.trim().toLowerCase() !==
+                                                        item.itemName.trim().toLowerCase() && (
+                                                        <span className="text-[10px] font-mono font-bold text-slate-600 bg-slate-200 px-1.5 py-0.5 rounded">
+                                                          {item.itemCode}
+                                                        </span>
+                                                      )}
+                                                  </div>
+                                                  <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[10px] text-emerald-800 font-semibold">
+                                                    <span>Day Pre-QC:</span>
+                                                    <span className="font-mono font-bold tabular-nums">
+                                                      {item.dayQc.preQcProduction.toLocaleString()} pcs
+                                                    </span>
+                                                    <span className="text-emerald-500">·</span>
+                                                    <span>Ops:</span>
+                                                    <span className="font-mono font-bold tabular-nums">
+                                                      {item.dayMachineOpsActual.toLocaleString()}
+                                                    </span>
+                                                  </div>
+                                                </td>
+                                              )}
+
+                                              <td className="px-3 py-2 whitespace-nowrap">
+                                                <span
+                                                  className="inline-flex items-center px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-[11px] font-bold text-slate-800"
+                                                  title={shiftRow.shift}
+                                                >
+                                                  {shiftRow.shiftShortLabel}
+                                                </span>
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums bg-emerald-50/40">
+                                                {shiftRow.qc.hasLoggedProduction ? (
+                                                  <span className="font-extrabold text-emerald-800">
+                                                    {shiftRow.qc.preQcProduction.toLocaleString()}
+                                                  </span>
+                                                ) : (
+                                                  <span className="text-slate-400 text-[11px] font-sans">
+                                                    0 (Not Logged)
+                                                  </span>
+                                                )}
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums">
+                                                <span
+                                                  className={
+                                                    shiftRow.qc.hasLoggedProduction
+                                                      ? "font-bold text-emerald-700"
+                                                      : "text-slate-400"
+                                                  }
+                                                >
+                                                  {shiftRow.qc.qcPassed.toLocaleString()}
+                                                </span>
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums">
+                                                {shiftRow.machineRunsCount > 0 ? (
+                                                  <>
+                                                    <div className="font-bold text-slate-900">
+                                                      {shiftRow.machineOpsActual.toLocaleString()}{" "}
+                                                      <span className="text-slate-400 font-normal">
+                                                        / {shiftRow.machineOpsStd.toLocaleString()}
+                                                      </span>
+                                                    </div>
+                                                    <div className="text-[10px] text-slate-500 font-sans">
+                                                      {shiftRow.planAchievementPct}% Plan
+                                                    </div>
+                                                  </>
+                                                ) : (
+                                                  <span className="text-[11px] text-slate-400 font-sans">
+                                                    No machine logs
+                                                  </span>
+                                                )}
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums">
+                                                {shiftRow.rework > 0 ? (
+                                                  <span className="px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 font-bold">
+                                                    {shiftRow.rework.toLocaleString()}
+                                                  </span>
+                                                ) : (
+                                                  <span className="text-slate-400">0</span>
+                                                )}
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums text-rose-600">
+                                                {shiftRow.machineRunsCount > 0
+                                                  ? `${shiftRow.downtimeMinutes}m`
+                                                  : "—"}
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums text-slate-700">
+                                                {shiftRow.machineRunsCount > 0
+                                                  ? `${shiftRow.availabilityPct}%`
+                                                  : "—"}
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums text-slate-700">
+                                                {shiftRow.machineRunsCount > 0
+                                                  ? `${shiftRow.qualityPct}%`
+                                                  : "—"}
+                                              </td>
+
+                                              <td className="px-3 py-2 text-right font-mono tabular-nums">
+                                                {shiftRow.machineRunsCount > 0 ? (
+                                                  <span
+                                                    className={`px-1.5 py-0.5 rounded text-[11px] font-extrabold border ${getOeeBadgeClass(
+                                                      shiftRow.oeePct
+                                                    )}`}
+                                                  >
+                                                    {shiftRow.oeePct}%
+                                                  </span>
+                                                ) : (
+                                                  <span className="text-slate-400">—</span>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          ))
+                                        )
+                                      )}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

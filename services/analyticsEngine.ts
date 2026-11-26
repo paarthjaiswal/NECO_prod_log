@@ -188,6 +188,42 @@ export interface ShiftRollupItem {
   qcMetrics: ProductQcMetrics;
 }
 
+export interface DailyItemShiftRow {
+  shift: string;                 // e.g. 'Shift A (7AM-3:30PM)'
+  shiftShortLabel: string;       // e.g. 'Shift A', 'Shift B', 'Shift C'
+  qc: ProductQcMetrics;          // from resolveProductQcMetrics on shift_item_production for (date, shift, itemKey)
+  machineOpsActual: number;      // sum of shift_logs.actualOutput for (date, shift, itemKey)
+  machineOpsStd: number;         // sum of shift_logs.stdOutput
+  machineRunsCount: number;      // count of shift_logs rows
+  rework: number;
+  downtimeMinutes: number;
+  planAchievementPct: number;
+  availabilityPct: number;
+  qualityPct: number;
+  oeePct: number;
+}
+
+export interface DailyItemBreakdown {
+  itemKey: string;               // buildCanonicalItemKey(itemCode, itemName)
+  itemCode: string;
+  itemName: string;
+  dayQc: ProductQcMetrics;       // full-day Pre-QC / QC Passed total for this item on this date
+  dayMachineOpsActual: number;
+  dayMachineOpsStd: number;
+  dayRework: number;
+  dayDowntimeMinutes: number;
+  dayOeePct: number;
+  shifts: DailyItemShiftRow[];   // ordered Shift A -> Shift B -> Shift C (plus any other shifts alphabetically)
+}
+
+export interface DailyShiftSummaryTotal {
+  shift: string;
+  shiftShortLabel: string;
+  preQcProduction: number;
+  machineOpsActual: number;
+  oeePct: number;
+}
+
 export interface PeriodRollupItem {
   periodKey: string;
   periodLabel: string;
@@ -199,6 +235,8 @@ export interface PeriodRollupItem {
   preQcProduction: number;
   finishedProduction: number;
   qcMetrics: ProductQcMetrics;
+  itemShiftBreakdown: DailyItemBreakdown[];
+  shiftTotals: DailyShiftSummaryTotal[];
 }
 
 export interface MachineRollupItem {
@@ -896,13 +934,39 @@ export function getIsoWeekInfo(dateStr: string): {
   return { weekKey, label, weekNumber, year: targetYear };
 }
 
+function getShiftShortLabel(shift: string): string {
+  const s = (shift || "").trim();
+  if (/^shift\s*a\b/i.test(s)) return "Shift A";
+  if (/^shift\s*b\b/i.test(s)) return "Shift B";
+  if (/^shift\s*c\b/i.test(s)) return "Shift C";
+  const parenIdx = s.indexOf("(");
+  if (parenIdx > 0) return s.slice(0, parenIdx).trim();
+  return s || "Unknown";
+}
+
+function getShiftSortRank(shift: string): number {
+  const s = (shift || "").trim();
+  if (/^shift\s*a\b/i.test(s)) return 1;
+  if (/^shift\s*b\b/i.test(s)) return 2;
+  if (/^shift\s*c\b/i.test(s)) return 3;
+  return 4;
+}
+
+function compareShiftsCanonically(a: string, b: string): number {
+  const rA = getShiftSortRank(a);
+  const rB = getShiftSortRank(b);
+  if (rA !== rB) return rA - rB;
+  return a.localeCompare(b);
+}
+
 /**
  * Step 3D: Group By Period ('day' | 'week')
  */
 export function groupByPeriod(
   enrichedRows: EnrichedAnalyticsRow[],
   granularity: "day" | "week",
-  shiftItemTotals?: ShiftItemProductionRow[]
+  shiftItemTotals?: ShiftItemProductionRow[],
+  masterItems?: ItemMaster[]
 ): PeriodRollupItem[] {
   const periodMap = new Map<string, { label: string; rows: EnrichedAnalyticsRow[] }>();
 
@@ -971,6 +1035,69 @@ export function groupByPeriod(
     }
   }
 
+  // Pre-index canonical item keys when granularity === 'day' so shift_logs & shift_item_production unify cleanly
+  const idToCanonical = new Map<string, { key: string; code: string; name: string }>();
+  const nameToCanonical = new Map<string, { key: string; code: string; name: string }>();
+  const codeToCanonical = new Map<string, { key: string; code: string; name: string }>();
+
+  if (granularity === "day") {
+    if (masterItems && masterItems.length > 0) {
+      for (const it of masterItems) {
+        const code = (it.itemCode || "").trim();
+        const name = (it.itemName || "").trim();
+        const key = buildCanonicalItemKey(code, name);
+        if (!key) continue;
+        const meta = { key, code, name: name || code };
+        if (it.id) idToCanonical.set(it.id.trim().toLowerCase(), meta);
+        if (name) nameToCanonical.set(name.toLowerCase(), meta);
+        if (code) codeToCanonical.set(code.toLowerCase(), meta);
+      }
+    }
+    if (shiftItemTotals && shiftItemTotals.length > 0) {
+      for (const p of shiftItemTotals) {
+        const code = (p.itemCode || "").trim();
+        const name = (p.itemName || "").trim();
+        const key = (p.itemKey || buildCanonicalItemKey(code, name)).trim().toLowerCase();
+        if (!key) continue;
+        const meta = { key, code, name: name || code || key };
+        if (p.itemId && !idToCanonical.has(p.itemId.trim().toLowerCase())) {
+          idToCanonical.set(p.itemId.trim().toLowerCase(), meta);
+        }
+        if (name && !nameToCanonical.has(name.toLowerCase())) {
+          nameToCanonical.set(name.toLowerCase(), meta);
+        }
+        if (code && !codeToCanonical.has(code.toLowerCase())) {
+          codeToCanonical.set(code.toLowerCase(), meta);
+        }
+      }
+    }
+  }
+
+  const resolveLogItemMeta = (r: EnrichedAnalyticsRow): { key: string; code: string; name: string } | null => {
+    const rawName = (r.itemName || "").trim();
+    const rawId = (r.itemId || "").trim();
+    if (!rawName && !rawId) return null;
+
+    const byId = rawId ? idToCanonical.get(rawId.toLowerCase()) : undefined;
+    const byName = rawName ? nameToCanonical.get(rawName.toLowerCase()) : undefined;
+    const byCode = rawId ? codeToCanonical.get(rawId.toLowerCase()) : undefined;
+    const matched = byId || byName || byCode;
+    if (matched) {
+      return {
+        key: matched.key,
+        code: matched.code,
+        name: rawName || matched.name,
+      };
+    }
+    const fallbackKey = buildCanonicalItemKey(undefined, rawName) || buildCanonicalItemKey(rawId, undefined);
+    if (!fallbackKey) return null;
+    return {
+      key: fallbackKey,
+      code: "",
+      name: rawName || rawId,
+    };
+  };
+
   const result: PeriodRollupItem[] = [];
 
   for (const [periodKey, { label, rows }] of periodMap.entries()) {
@@ -1007,19 +1134,163 @@ export function groupByPeriod(
     const activeShifts = Array.from(new Set(rows.map((r) => r.shift).filter(Boolean) as string[])).sort();
     const activeLines = Array.from(new Set(rows.map((r) => r.line).filter(Boolean) as string[])).sort();
 
-    const periodPreQc = (shiftItemTotals || [])
-      .filter((r) => {
-        if (!r.date) return false;
-        if (granularity === "day") return r.date === periodKey;
-        return getIsoWeekInfo(r.date).weekKey === periodKey;
-      })
-      .reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
-    const periodHasLogged = (shiftItemTotals || []).some((r) => {
+    const matchingProdRows = (shiftItemTotals || []).filter((r) => {
       if (!r.date) return false;
       if (granularity === "day") return r.date === periodKey;
       return getIsoWeekInfo(r.date).weekKey === periodKey;
     });
+
+    const periodPreQc = matchingProdRows.reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
+    const periodHasLogged = matchingProdRows.length > 0;
     const qcMetrics = resolveProductQcMetrics(periodPreQc, periodHasLogged);
+
+    // Compute Daily Shift-Wise x Item Breakdown only when granularity === 'day'
+    let itemShiftBreakdown: DailyItemBreakdown[] = [];
+    let shiftTotals: DailyShiftSummaryTotal[] = [];
+
+    if (granularity === "day") {
+      const dayItemBuckets = new Map<
+        string,
+        {
+          itemKey: string;
+          itemCode: string;
+          itemName: string;
+          logRows: EnrichedAnalyticsRow[];
+          prodRows: ShiftItemProductionRow[];
+        }
+      >();
+
+      for (const p of matchingProdRows) {
+        const pCode = (p.itemCode || "").trim();
+        const pName = (p.itemName || "").trim();
+        const pKey = (p.itemKey || buildCanonicalItemKey(pCode, pName)).trim().toLowerCase();
+        if (!pKey) continue;
+
+        let bucket = dayItemBuckets.get(pKey);
+        if (!bucket) {
+          bucket = {
+            itemKey: pKey,
+            itemCode: pCode,
+            itemName: pName || pCode || pKey,
+            logRows: [],
+            prodRows: [],
+          };
+          dayItemBuckets.set(pKey, bucket);
+        } else {
+          if (!bucket.itemCode && pCode) bucket.itemCode = pCode;
+          if ((!bucket.itemName || bucket.itemName === bucket.itemCode) && pName) bucket.itemName = pName;
+        }
+        bucket.prodRows.push(p);
+      }
+
+      for (const r of rows) {
+        const meta = resolveLogItemMeta(r);
+        if (!meta) continue;
+        let bucket = dayItemBuckets.get(meta.key);
+        if (!bucket) {
+          bucket = {
+            itemKey: meta.key,
+            itemCode: meta.code,
+            itemName: meta.name,
+            logRows: [],
+            prodRows: [],
+          };
+          dayItemBuckets.set(meta.key, bucket);
+        } else {
+          if (!bucket.itemCode && meta.code) bucket.itemCode = meta.code;
+          if (!bucket.itemName && meta.name) bucket.itemName = meta.name;
+        }
+        bucket.logRows.push(r);
+      }
+
+      itemShiftBreakdown = Array.from(dayItemBuckets.values()).map((bucket) => {
+        const shiftsSet = new Set<string>();
+        for (const r of bucket.logRows) {
+          if (r.shift) shiftsSet.add(r.shift);
+        }
+        for (const p of bucket.prodRows) {
+          if (p.shift) shiftsSet.add(p.shift);
+        }
+
+        const orderedShifts = Array.from(shiftsSet).sort(compareShiftsCanonically);
+
+        const shiftRows: DailyItemShiftRow[] = orderedShifts.map((shift) => {
+          const sProd = bucket.prodRows.filter((p) => p.shift === shift);
+          const sPreQc = sProd.reduce((sum, p) => sum + (Number(p.totalProduction) || 0), 0);
+          const qc = resolveProductQcMetrics(sPreQc, sProd.length > 0);
+
+          const sLogs = bucket.logRows.filter((r) => r.shift === shift);
+          const sMetrics = calculateOeeMetrics(sLogs);
+
+          return {
+            shift,
+            shiftShortLabel: getShiftShortLabel(shift),
+            qc,
+            machineOpsActual: sMetrics.totalActual,
+            machineOpsStd: sMetrics.totalStd,
+            machineRunsCount: sMetrics.rowCount,
+            rework: sMetrics.totalRework,
+            downtimeMinutes: sMetrics.downtimeMinutes,
+            planAchievementPct: sMetrics.planAchievementPct,
+            availabilityPct: sMetrics.availabilityPct,
+            qualityPct: sMetrics.qualityPct,
+            oeePct: sMetrics.oeePct,
+          };
+        });
+
+        const dayPreQc = bucket.prodRows.reduce((sum, p) => sum + (Number(p.totalProduction) || 0), 0);
+        const dayQc = resolveProductQcMetrics(dayPreQc, bucket.prodRows.length > 0);
+        const dayMetrics = calculateOeeMetrics(bucket.logRows);
+
+        return {
+          itemKey: bucket.itemKey,
+          itemCode: bucket.itemCode,
+          itemName: bucket.itemName,
+          dayQc,
+          dayMachineOpsActual: dayMetrics.totalActual,
+          dayMachineOpsStd: dayMetrics.totalStd,
+          dayRework: dayMetrics.totalRework,
+          dayDowntimeMinutes: dayMetrics.downtimeMinutes,
+          dayOeePct: dayMetrics.oeePct,
+          shifts: shiftRows,
+        };
+      });
+
+      // Sort: dayQc.preQcProduction DESC, then dayMachineOpsActual DESC, then itemName ASC
+      itemShiftBreakdown.sort((a, b) => {
+        if (b.dayQc.preQcProduction !== a.dayQc.preQcProduction) {
+          return b.dayQc.preQcProduction - a.dayQc.preQcProduction;
+        }
+        if (b.dayMachineOpsActual !== a.dayMachineOpsActual) {
+          return b.dayMachineOpsActual - a.dayMachineOpsActual;
+        }
+        return a.itemName.localeCompare(b.itemName);
+      });
+
+      // Compact shift summary totals across the whole date
+      const dayShiftsSet = new Set<string>();
+      for (const r of rows) {
+        if (r.shift) dayShiftsSet.add(r.shift);
+      }
+      for (const p of matchingProdRows) {
+        if (p.shift) dayShiftsSet.add(p.shift);
+      }
+      const orderedDayShifts = Array.from(dayShiftsSet).sort(compareShiftsCanonically);
+
+      shiftTotals = orderedDayShifts.map((shift) => {
+        const preQcProduction = matchingProdRows
+          .filter((p) => p.shift === shift)
+          .reduce((sum, p) => sum + (Number(p.totalProduction) || 0), 0);
+        const sMetrics = calculateOeeMetrics(rows.filter((r) => r.shift === shift));
+        return {
+          shift,
+          shiftShortLabel: getShiftShortLabel(shift),
+          preQcProduction,
+          machineOpsActual: sMetrics.totalActual,
+          oeePct: sMetrics.oeePct,
+        };
+      });
+    }
 
     result.push({
       periodKey,
@@ -1032,6 +1303,8 @@ export function groupByPeriod(
       preQcProduction: periodPreQc,
       finishedProduction: periodPreQc,
       qcMetrics,
+      itemShiftBreakdown,
+      shiftTotals,
     });
   }
 
