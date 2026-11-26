@@ -560,6 +560,26 @@ export default function DashboardClient({
     return active && active.length > 0 ? active : (SHIFTS as ShiftType[]);
   }, [masterData.shifts]);
 
+  // Unified callback to jump directly from Analytics to the editable Daily Shift Sheet tab
+  const handleOpenShiftSheet = useCallback(
+    (date: string, shift: string, line?: string) => {
+      if (date) setSelectedDate(date);
+      if (shift) setSelectedShift(shift as ShiftType);
+      if (line) {
+        const matchedLine = availableLines.find(
+          (l) => l.trim().toLowerCase() === line.trim().toLowerCase()
+        );
+        if (matchedLine) {
+          setSelectedLine(matchedLine);
+        }
+      }
+      setSelectedMachineId(null);
+      setReturnTab(null);
+      setActiveTab("sheet");
+    },
+    [availableLines]
+  );
+
   // Derive active machines for the currently selected line
   const currentLineMachines = useMemo(() => {
     const targetLine = (selectedLine || "Line 1").trim().toLowerCase();
@@ -1365,6 +1385,7 @@ export default function DashboardClient({
             selectedLine={selectedLine}
             masterData={masterData}
             onOpenMachine={handleOpenMachinePage}
+            onOpenShiftSheet={handleOpenShiftSheet}
           />
         )}
 

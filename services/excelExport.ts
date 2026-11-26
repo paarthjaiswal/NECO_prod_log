@@ -10,10 +10,13 @@ import {
   groupByShift,
   groupByPeriod,
   groupByMachine,
+  buildGroupedMachineMatrix,
   EnrichedAnalyticsRow,
   OeeMetrics,
   ProductMatrixItem,
   MachineDetailAnalytics,
+  MachineGroupByMode,
+  MachineMatrixGroup,
 } from "@/services/analyticsEngine";
 
 // ============================================================================
@@ -514,6 +517,7 @@ export interface StyledWorksheetOptions {
   totalsRow?: (string | number)[];
   extraSections?: StyledWorksheetSection[];
   dataMerges?: Array<{ startRowIndex: number; endRowIndex: number; colIndex: number }>;
+  rowStyleHints?: Record<number, "group_header" | "group_subtotal">;
 }
 
 /**
@@ -837,13 +841,42 @@ export function buildStyledWorksheet(options: StyledWorksheetOptions): XLSX.Work
     }
 
     section.rows.forEach((row, rIdx) => {
-      rowHeights.push({ hpt: 19 });
+      const hint = section.isMainTable ? options.rowStyleHints?.[rIdx] : undefined;
+      rowHeights.push({ hpt: hint === "group_header" ? 21 : hint === "group_subtotal" ? 20 : 19 });
 
       row.forEach((val, c) => {
         const headerName = secHeaders[c] || "";
         const align = getColumnAlignment(headerName);
         const numFmt = getNumberFormat(headerName, val);
-        const style = getDataCellStyle(headerName, val, rIdx, align, numFmt);
+        let style = getDataCellStyle(headerName, val, rIdx, align, numFmt);
+
+        if (hint === "group_header") {
+          style = {
+            fill: { fgColor: { rgb: EXCEL_PALETTE.dividerBorder } },
+            font: { name: "Calibri", sz: 10, bold: true, color: { rgb: EXCEL_PALETTE.darkSlate } },
+            alignment: { vertical: "center", horizontal: c === 0 ? "left" : align },
+            border: {
+              top: mediumBorder(EXCEL_PALETTE.borderSlate),
+              bottom: thinBorder(EXCEL_PALETTE.kpiBorder),
+              left: thinBorder(EXCEL_PALETTE.gridBorder),
+              right: thinBorder(EXCEL_PALETTE.gridBorder),
+            },
+            numFmt: numFmt || undefined,
+          };
+        } else if (hint === "group_subtotal") {
+          style = {
+            fill: { fgColor: { rgb: EXCEL_PALETTE.softBg } },
+            font: { name: "Calibri", sz: 9.5, bold: true, color: { rgb: EXCEL_PALETTE.darkSlate } },
+            alignment: { vertical: "center", horizontal: align },
+            border: {
+              top: thinBorder(EXCEL_PALETTE.borderSlate),
+              bottom: mediumBorder(EXCEL_PALETTE.borderSlate),
+              left: thinBorder(EXCEL_PALETTE.gridBorder),
+              right: thinBorder(EXCEL_PALETTE.gridBorder),
+            },
+            numFmt: numFmt || undefined,
+          };
+        }
 
         const addr = XLSX.utils.encode_cell({ r: currRow, c });
         ws[addr] = {
@@ -3059,10 +3092,21 @@ export interface ExportActiveAnalyticsTabParams {
   periodGranularity?: "day" | "week";
   masterData?: MasterDataState;
   shiftItemTotals?: ShiftItemProductionRow[];
+  machineGroupBy?: MachineGroupByMode;
+  groupedMachines?: MachineMatrixGroup[];
 }
 
 export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabParams): void {
-  const { tab, filteredRows, activeFilters, periodGranularity = "day", masterData, shiftItemTotals } = params;
+  const {
+    tab,
+    filteredRows,
+    activeFilters,
+    periodGranularity = "day",
+    masterData,
+    shiftItemTotals,
+    machineGroupBy = "none",
+    groupedMachines,
+  } = params;
   const wb = XLSX.utils.book_new();
   const usedNames = new Set<string>();
 
@@ -3074,6 +3118,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
   let tabHeaders: string[] = [];
   let tabRows: (string | number)[][] = [];
   let tabTotals: (string | number)[] = [];
+  let tabRowStyleHints: Record<number, "group_header" | "group_subtotal"> | undefined;
 
   if (tab === "product") {
     tabSheetTitle = "Product Matrix";
@@ -3317,58 +3362,195 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
   } else {
     // Machine
     tabSheetTitle = "Machine Matrix";
-    tabSectionTitle = "MACHINE MATRIX & RANKING";
-    tabHeaders = [
-      "Machine Name",
-      "Machine ID",
-      "Line",
-      "Type",
-      "Split Runs",
-      "Target (Std)",
-      "Actual Output",
-      "Good Output",
-      "Rework",
-      "Plan %",
-      "Downtime (m)",
-      "Avail %",
-      "Qual %",
-      "Machine OEE %",
-    ];
 
-    const machines = groupByMachine(filteredRows);
-    tabRows = machines.map((m) => [
-      m.machineName,
-      m.machineId,
-      m.line,
-      m.isTempMachine ? "TEMP" : "Perm",
-      m.splitRunsCount,
-      m.metrics.totalStd,
-      m.metrics.totalActual,
-      m.metrics.goodOutput,
-      m.metrics.totalRework,
-      `${m.metrics.planAchievementPct}%`,
-      m.metrics.downtimeMinutes,
-      `${m.metrics.availabilityPct}%`,
-      `${m.metrics.qualityPct}%`,
-      `${m.metrics.oeePct}%`,
-    ]);
+    if (machineGroupBy !== "none") {
+      const groups =
+        groupedMachines && groupedMachines.length > 0
+          ? groupedMachines
+          : buildGroupedMachineMatrix(
+              filteredRows,
+              machineGroupBy,
+              (a, b) => b.metrics.oeePct - a.metrics.oeePct,
+              shiftItemTotals,
+              masterData?.items
+            );
 
-    tabTotals = [
-      "TOTALS / OVERALL",
-      `${machines.length} machines`,
-      "-",
-      "-",
-      machines.reduce((acc, m) => acc + m.splitRunsCount, 0),
-      overallMetrics.totalStd,
-      overallMetrics.totalActual,
-      overallMetrics.goodOutput,
-      overallMetrics.totalRework,
-      `${overallMetrics.planAchievementPct}%`,
-      overallMetrics.downtimeMinutes,
-      `${overallMetrics.availabilityPct}%`,
-      `${overallMetrics.qualityPct}%`,
-      `${overallMetrics.oeePct}%`,
-    ];
+      const groupLabelTitle = machineGroupBy === "line" ? "Line Group" : "Item Group";
+      metadataList.push({
+        label: "Group Mode",
+        value: machineGroupBy === "line" ? "Grouped by Line" : "Grouped by Item",
+      });
+      tabSectionTitle =
+        machineGroupBy === "line"
+          ? "MACHINE MATRIX & RANKING (GROUPED BY LINE)"
+          : "MACHINE MATRIX & RANKING (GROUPED BY ITEM)";
+
+      tabHeaders = [
+        groupLabelTitle,
+        "Machine Name",
+        "Machine ID",
+        "Line",
+        "Type",
+        "Split Runs",
+        "Target (Std)",
+        "Actual Output",
+        "Good Output",
+        "Rework",
+        "Plan %",
+        "Downtime (m)",
+        "Avail %",
+        "Qual %",
+        "Machine OEE %",
+      ];
+
+      tabRowStyleHints = {};
+      let totalMachinesAllocated = 0;
+      let totalSplitRuns = 0;
+
+      for (const group of groups) {
+        const displayGroupName = group.groupSubLabel
+          ? `${group.groupLabel} (${group.groupSubLabel})`
+          : group.groupLabel;
+
+        const headerRowIdx = tabRows.length;
+        tabRowStyleHints[headerRowIdx] = "group_header";
+        tabRows.push([
+          displayGroupName,
+          `${group.machinesCount} Machines`,
+          group.groupType === "item" && group.groupKey !== "__unspecified__"
+            ? `Pre-QC: ${(group.preQcProduction ?? 0).toLocaleString()} pcs`
+            : "—",
+          group.groupType === "line" ? group.groupLabel : "—",
+          "—",
+          group.machines.reduce((acc, m) => acc + m.splitRunsCount, 0),
+          group.metrics.totalStd,
+          group.metrics.totalActual,
+          group.metrics.goodOutput,
+          group.metrics.totalRework,
+          `${group.metrics.planAchievementPct}%`,
+          group.metrics.downtimeMinutes,
+          `${group.metrics.availabilityPct}%`,
+          `${group.metrics.qualityPct}%`,
+          `${group.metrics.oeePct}%`,
+        ]);
+
+        for (const m of group.machines) {
+          totalMachinesAllocated++;
+          totalSplitRuns += m.splitRunsCount;
+          tabRows.push([
+            displayGroupName,
+            m.machineName,
+            m.machineId,
+            m.line,
+            m.isTempMachine ? "TEMP" : "Perm",
+            m.splitRunsCount,
+            m.metrics.totalStd,
+            m.metrics.totalActual,
+            m.metrics.goodOutput,
+            m.metrics.totalRework,
+            `${m.metrics.planAchievementPct}%`,
+            m.metrics.downtimeMinutes,
+            `${m.metrics.availabilityPct}%`,
+            `${m.metrics.qualityPct}%`,
+            `${m.metrics.oeePct}%`,
+          ]);
+        }
+
+        const subIdx = tabRows.length;
+        tabRowStyleHints[subIdx] = "group_subtotal";
+        tabRows.push([
+          `${displayGroupName} — Subtotal`,
+          `${group.machinesCount} machines`,
+          "—",
+          "—",
+          "—",
+          group.machines.reduce((acc, m) => acc + m.splitRunsCount, 0),
+          group.metrics.totalStd,
+          group.metrics.totalActual,
+          group.metrics.goodOutput,
+          group.metrics.totalRework,
+          `${group.metrics.planAchievementPct}%`,
+          group.metrics.downtimeMinutes,
+          `${group.metrics.availabilityPct}%`,
+          `${group.metrics.qualityPct}%`,
+          `${group.metrics.oeePct}%`,
+        ]);
+      }
+
+      tabTotals = [
+        "TOTALS / OVERALL",
+        `${totalMachinesAllocated} machine entries (${groups.length} groups)`,
+        "—",
+        "—",
+        "—",
+        totalSplitRuns,
+        overallMetrics.totalStd,
+        overallMetrics.totalActual,
+        overallMetrics.goodOutput,
+        overallMetrics.totalRework,
+        `${overallMetrics.planAchievementPct}%`,
+        overallMetrics.downtimeMinutes,
+        `${overallMetrics.availabilityPct}%`,
+        `${overallMetrics.qualityPct}%`,
+        `${overallMetrics.oeePct}%`,
+      ];
+    } else {
+      tabSectionTitle = "MACHINE MATRIX & RANKING";
+      tabHeaders = [
+        "Machine Name",
+        "Machine ID",
+        "Line",
+        "Type",
+        "Split Runs",
+        "Target (Std)",
+        "Actual Output",
+        "Good Output",
+        "Rework",
+        "Plan %",
+        "Downtime (m)",
+        "Avail %",
+        "Qual %",
+        "Machine OEE %",
+      ];
+
+      const machines =
+        groupedMachines && groupedMachines[0]
+          ? groupedMachines[0].machines
+          : groupByMachine(filteredRows);
+      tabRows = machines.map((m) => [
+        m.machineName,
+        m.machineId,
+        m.line,
+        m.isTempMachine ? "TEMP" : "Perm",
+        m.splitRunsCount,
+        m.metrics.totalStd,
+        m.metrics.totalActual,
+        m.metrics.goodOutput,
+        m.metrics.totalRework,
+        `${m.metrics.planAchievementPct}%`,
+        m.metrics.downtimeMinutes,
+        `${m.metrics.availabilityPct}%`,
+        `${m.metrics.qualityPct}%`,
+        `${m.metrics.oeePct}%`,
+      ]);
+
+      tabTotals = [
+        "TOTALS / OVERALL",
+        `${machines.length} machines`,
+        "-",
+        "-",
+        machines.reduce((acc, m) => acc + m.splitRunsCount, 0),
+        overallMetrics.totalStd,
+        overallMetrics.totalActual,
+        overallMetrics.goodOutput,
+        overallMetrics.totalRework,
+        `${overallMetrics.planAchievementPct}%`,
+        overallMetrics.downtimeMinutes,
+        `${overallMetrics.availabilityPct}%`,
+        `${overallMetrics.qualityPct}%`,
+        `${overallMetrics.oeePct}%`,
+      ];
+    }
   }
 
   const ws1 = buildStyledWorksheet({
@@ -3378,6 +3560,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
     headers: tabHeaders,
     rows: tabRows,
     totalsRow: tabTotals,
+    rowStyleHints: tabRowStyleHints,
   });
   XLSX.utils.book_append_sheet(wb, ws1, sanitizeSheetName(tabSheetTitle, usedNames));
 

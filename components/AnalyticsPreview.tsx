@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   Target,
+  FileText,
 } from "lucide-react";
 import {
   MachineShiftRow,
@@ -42,11 +43,15 @@ import {
   groupByShift,
   groupByPeriod,
   groupByMachine,
+  buildGroupedMachineMatrix,
   EnrichedAnalyticsRow,
   OeeMetrics,
   ProductMatrixItem,
+  MachineGroupByMode,
+  MachineRollupItem,
 } from "@/services/analyticsEngine";
 import { MachineAnalyticsView } from "./MachineAnalyticsView";
+import { ShiftSheetPreviewModal } from "./ShiftSheetPreviewModal";
 
 interface AnalyticsPreviewProps {
   rows: MachineShiftRow[];
@@ -55,6 +60,7 @@ interface AnalyticsPreviewProps {
   selectedLine: string;
   masterData?: MasterDataState;
   onOpenMachine?: (params: OpenMachineParams) => void;
+  onOpenShiftSheet?: (date: string, shift: string, line?: string) => void;
 }
 
 type TabType = "product" | "line" | "shift" | "period" | "machine";
@@ -108,6 +114,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   selectedDate,
   masterData,
   onOpenMachine,
+  onOpenShiftSheet,
 }) => {
   const { runWithFeedback, notifySuccess, notifyError } = useFeedback();
 
@@ -465,8 +472,22 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   }, [filteredRows, filteredShiftItemTotals]);
 
   const [expandedTrendDates, setExpandedTrendDates] = useState<Set<string>>(new Set());
+  const [expandedShiftKeys, setExpandedShiftKeys] = useState<Set<string>>(new Set());
+  const [machineGroupBy, setMachineGroupBy] = useState<MachineGroupByMode>("none");
+  const [shiftSheetModal, setShiftSheetModal] = useState<{
+    date: string;
+    shift: string;
+    line?: string;
+  } | null>(null);
 
   const isMachineOrOperatorScoped = filterMachine !== "all" || filterOperator !== "all";
+  const hasActiveScopeFilter =
+    filterProduct !== "all" ||
+    filterMachine !== "all" ||
+    filterOperator !== "all" ||
+    !includeTempMachines ||
+    tempOnly ||
+    splitRunsOnly;
 
   // Tab 4: Period Rollups
   const periodRollups = useMemo(() => {
@@ -487,24 +508,46 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     });
   };
 
+  const toggleExpandShift = (shiftKey: string) => {
+    setExpandedShiftKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(shiftKey)) next.delete(shiftKey);
+      else next.add(shiftKey);
+      return next;
+    });
+  };
+
   const handleChangePeriodGranularity = (mode: "day" | "week") => {
     setPeriodGranularity(mode);
     setExpandedTrendDates(new Set());
   };
 
-  // Tab 5: Machine Rollups
-  const machineRollups = useMemo(() => {
-    const list = groupByMachine(filteredRows);
-    list.sort((a, b) => {
+  const machineComparator = useCallback(
+    (a: MachineRollupItem, b: MachineRollupItem) => {
       let diff = 0;
       if (machineSortKey === "oee") diff = a.metrics.oeePct - b.metrics.oeePct;
       else if (machineSortKey === "actual") diff = a.metrics.totalActual - b.metrics.totalActual;
       else if (machineSortKey === "downtime") diff = a.metrics.downtimeMinutes - b.metrics.downtimeMinutes;
       else diff = a.machineName.localeCompare(b.machineName);
       return machineSortOrder === "desc" ? -diff : diff;
-    });
-    return list;
-  }, [filteredRows, machineSortKey, machineSortOrder]);
+    },
+    [machineSortKey, machineSortOrder]
+  );
+
+  // Tab 5: Machine Rollups (Flat + Grouped)
+  const groupedMachineMatrix = useMemo(() => {
+    return buildGroupedMachineMatrix(
+      filteredRows,
+      machineGroupBy,
+      machineComparator,
+      filteredShiftItemTotals,
+      masterData?.items
+    );
+  }, [filteredRows, machineGroupBy, machineComparator, filteredShiftItemTotals, masterData?.items]);
+
+  const machineRollups = useMemo(() => {
+    return groupByMachine(filteredRows).sort(machineComparator);
+  }, [filteredRows, machineComparator]);
 
   const toggleExpandProduct = (key: string) => {
     setExpandedProducts((prev) => {
@@ -632,6 +675,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           periodGranularity,
           masterData,
           shiftItemTotals: filteredShiftItemTotals,
+          machineGroupBy,
+          groupedMachines: groupedMachineMatrix,
         });
 
         const tabNames: Record<TabType, string> = {
@@ -660,6 +705,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       periodGranularity,
       masterData,
       filteredShiftItemTotals,
+      machineGroupBy,
+      groupedMachineMatrix,
       fromDate,
       toDate,
       notifySuccess,
@@ -1800,19 +1847,42 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Shift-Wise Efficiency & OEE Comparison</h3>
                 <p className="text-xs text-slate-500">
-                  Analysis across Shift A, Shift B, and Shift C to identify variance between operational shifts.
+                  Analysis across Shift A, Shift B, and Shift C. Click any shift row to inspect day-by-day shift sheets.
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={shiftRollups.length === 0}
-                onClick={() => handleExportActiveTab("shift")}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
-                title="Export Shift Efficiency Matrix to Excel"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-                <span>Export Shift Matrix</span>
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                {shiftRollups.length > 0 && (
+                  <div className="inline-flex items-center gap-1 bg-slate-100 border border-slate-200 p-0.5 rounded">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedShiftKeys(new Set(shiftRollups.map((s) => s.shift)))
+                      }
+                      className="px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-white hover:text-slate-900 rounded transition-colors cursor-pointer"
+                    >
+                      Expand All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedShiftKeys(new Set())}
+                      disabled={expandedShiftKeys.size === 0}
+                      className="px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-white hover:text-slate-900 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors cursor-pointer"
+                    >
+                      Collapse All
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  disabled={shiftRollups.length === 0}
+                  onClick={() => handleExportActiveTab("shift")}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                  title="Export Shift Efficiency Matrix to Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Export Shift Matrix</span>
+                </button>
+              </div>
             </div>
 
             <div className="overflow-x-auto border border-slate-200 rounded-lg">
@@ -1833,35 +1903,206 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
-                  {shiftRollups.map((s) => (
-                    <tr key={s.shift} className="hover:bg-slate-50">
-                      <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">{s.shift}</td>
-                      <td className="px-3 py-2 text-center font-sans text-slate-600">{s.machineCount}</td>
-                      <td className="px-3 py-2 text-right text-slate-600">{s.metrics.totalStd.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right font-bold text-slate-900">
-                        {s.metrics.totalActual.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">
-                        {s.metrics.goodOutput.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-emerald-700 font-black bg-emerald-50/50">
-                        {(s.preQcProduction ?? s.finishedProduction ?? 0).toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-amber-600">{s.metrics.totalRework.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right text-rose-600">{s.metrics.downtimeMinutes}m</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{s.metrics.availabilityPct}%</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{s.metrics.qualityPct}%</td>
-                      <td className="px-3 py-2 text-right">
-                        <span
-                          className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
-                            s.metrics.oeePct
-                          )}`}
+                  {shiftRollups.map((s) => {
+                    const isExpanded = expandedShiftKeys.has(s.shift);
+                    return (
+                      <React.Fragment key={s.shift}>
+                        <tr
+                          onClick={() => toggleExpandShift(s.shift)}
+                          className={`cursor-pointer transition-colors ${
+                            isExpanded ? "bg-sky-50/50" : "hover:bg-slate-50"
+                          }`}
                         >
-                          {s.metrics.oeePct}%
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                          <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              {isExpanded ? (
+                                <ChevronDown className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                              ) : (
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              )}
+                              <span>{s.shift}</span>
+                              <span className="text-[10px] font-normal text-slate-400">
+                                ({s.dailyEntries.length} {s.dailyEntries.length === 1 ? "day" : "days"})
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-center font-sans text-slate-600">{s.machineCount}</td>
+                          <td className="px-3 py-2 text-right text-slate-600">{s.metrics.totalStd.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right font-bold text-slate-900">
+                            {s.metrics.totalActual.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-emerald-700 font-bold">
+                            {s.metrics.goodOutput.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-emerald-700 font-black bg-emerald-50/50">
+                            {(s.preQcProduction ?? s.finishedProduction ?? 0).toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right text-amber-600">{s.metrics.totalRework.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right text-rose-600">{s.metrics.downtimeMinutes}m</td>
+                          <td className="px-3 py-2 text-right text-slate-700">{s.metrics.availabilityPct}%</td>
+                          <td className="px-3 py-2 text-right text-slate-700">{s.metrics.qualityPct}%</td>
+                          <td className="px-3 py-2 text-right">
+                            <span
+                              className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                                s.metrics.oeePct
+                              )}`}
+                            >
+                              {s.metrics.oeePct}%
+                            </span>
+                          </td>
+                        </tr>
+
+                        {isExpanded && (
+                          <tr className="bg-slate-50/80">
+                            <td colSpan={11} className="p-0 border-b border-slate-200 font-sans">
+                              <div className="p-3 space-y-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs font-extrabold text-slate-800">
+                                    {s.shift} — Day-by-Day Shift Breakdown ({s.dailyEntries.length} entries)
+                                  </span>
+                                  {isMachineOrOperatorScoped && (
+                                    <span className="text-[10px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                                      Pre-QC totals reflect full shift counts
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="overflow-x-auto bg-white border border-slate-200 rounded-md shadow-2xs">
+                                  <table className="w-full text-xs text-left">
+                                    <thead className="bg-slate-800 text-slate-100 uppercase text-[10px] font-semibold">
+                                      <tr>
+                                        <th className="px-3 py-2">Date</th>
+                                        <th className="px-3 py-2">Line</th>
+                                        <th className="px-3 py-2 text-center">Machines</th>
+                                        <th className="px-3 py-2 text-right text-emerald-300">Total Prod (Pre-QC)</th>
+                                        <th className="px-3 py-2 text-right">Machine Ops (Act / Std)</th>
+                                        <th className="px-3 py-2 text-right">Plan %</th>
+                                        <th className="px-3 py-2 text-right">Rework</th>
+                                        <th className="px-3 py-2 text-right">BD (m)</th>
+                                        <th className="px-3 py-2 text-right">Avail %</th>
+                                        <th className="px-3 py-2 text-right">Qual %</th>
+                                        <th className="px-3 py-2 text-right font-black">OEE %</th>
+                                        <th className="px-3 py-2 text-center">Actions</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-200">
+                                      {s.dailyEntries.length === 0 ? (
+                                        <tr>
+                                          <td colSpan={12} className="px-3 py-4 text-center text-slate-400 italic">
+                                            No daily shift records found for this shift.
+                                          </td>
+                                        </tr>
+                                      ) : (
+                                        s.dailyEntries.map((entry) => (
+                                          <tr
+                                            key={`${entry.date}_${entry.line}`}
+                                            className="hover:bg-slate-50/80 transition-colors"
+                                          >
+                                            <td className="px-3 py-2 font-mono font-bold text-slate-900 whitespace-nowrap">
+                                              {entry.date}
+                                            </td>
+                                            <td className="px-3 py-2 font-sans font-semibold text-slate-700 whitespace-nowrap">
+                                              {entry.line}
+                                            </td>
+                                            <td className="px-3 py-2 text-center font-mono text-slate-600">
+                                              {entry.machinesCount}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums bg-emerald-50/40">
+                                              {entry.qc.hasLoggedProduction ? (
+                                                <span className="font-extrabold text-emerald-800">
+                                                  {entry.qc.preQcProduction.toLocaleString()} pcs
+                                                </span>
+                                              ) : (
+                                                <span className="text-slate-400 text-[11px] font-sans">
+                                                  0 (Not Logged)
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums">
+                                              <span className="font-bold text-slate-900">
+                                                {entry.machineOpsActual.toLocaleString()}
+                                              </span>{" "}
+                                              <span className="text-slate-400">
+                                                / {entry.machineOpsStd.toLocaleString()}
+                                              </span>
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums text-slate-700">
+                                              {entry.planAchievementPct}%
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums">
+                                              {entry.rework > 0 ? (
+                                                <span className="px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 font-bold">
+                                                  {entry.rework.toLocaleString()}
+                                                </span>
+                                              ) : (
+                                                <span className="text-slate-400">0</span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums text-rose-600">
+                                              {entry.downtimeMinutes}m
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums text-slate-700">
+                                              {entry.availabilityPct}%
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums text-slate-700">
+                                              {entry.qualityPct}%
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono tabular-nums">
+                                              <span
+                                                className={`px-1.5 py-0.5 rounded text-[11px] font-extrabold border ${getOeeBadgeClass(
+                                                  entry.oeePct
+                                                )}`}
+                                              >
+                                                {entry.oeePct}%
+                                              </span>
+                                            </td>
+                                            <td className="px-3 py-2 text-center whitespace-nowrap">
+                                              <div className="inline-flex items-center gap-1">
+                                                <button
+                                                  type="button"
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setShiftSheetModal({
+                                                      date: entry.date,
+                                                      shift: entry.shift,
+                                                      line: entry.line,
+                                                    });
+                                                  }}
+                                                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-colors cursor-pointer"
+                                                  title="Inspect full Daily Shift Sheet layout"
+                                                >
+                                                  <FileText className="w-3 h-3" />
+                                                  <span>View Shift Sheet</span>
+                                                </button>
+                                                {onOpenShiftSheet && (
+                                                  <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      onOpenShiftSheet(entry.date, entry.shift, entry.line);
+                                                    }}
+                                                    className="inline-flex items-center gap-0.5 px-1.5 py-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-colors cursor-pointer"
+                                                    title="Jump to editable Daily Shift Sheet tab"
+                                                  >
+                                                    <span>Open</span>
+                                                    <ExternalLink className="w-2.5 h-2.5" />
+                                                  </button>
+                                                )}
+                                              </div>
+                                            </td>
+                                          </tr>
+                                        ))
+                                      )}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -2097,13 +2338,14 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                         <th className="px-3 py-2 text-right">Avail %</th>
                                         <th className="px-3 py-2 text-right">Qual %</th>
                                         <th className="px-3 py-2 text-right font-black">OEE %</th>
+                                        <th className="px-3 py-2 text-center">Action</th>
                                       </tr>
                                     </thead>
                                     <tbody>
                                       {p.itemShiftBreakdown.length === 0 ? (
                                         <tr>
                                           <td
-                                            colSpan={10}
+                                            colSpan={11}
                                             className="px-3 py-4 text-center text-slate-400 italic"
                                           >
                                             No item-level production or machine logs recorded for this date.
@@ -2247,6 +2489,25 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                                   <span className="text-slate-400">—</span>
                                                 )}
                                               </td>
+
+                                              <td className="px-3 py-2 text-center whitespace-nowrap">
+                                                <button
+                                                  type="button"
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setShiftSheetModal({
+                                                      date: p.periodKey,
+                                                      shift: shiftRow.shift,
+                                                      line: filterLine !== "all" ? filterLine : undefined,
+                                                    });
+                                                  }}
+                                                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-colors cursor-pointer"
+                                                  title={`View Daily Shift Sheet for ${p.periodKey} · ${shiftRow.shiftShortLabel}`}
+                                                >
+                                                  <FileText className="w-3 h-3" />
+                                                  <span>View Shift Sheet</span>
+                                                </button>
+                                              </td>
                                             </tr>
                                           ))
                                         )
@@ -2278,8 +2539,44 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </p>
               </div>
 
-              {/* Sort Controls & Export */}
+              {/* Group Toggle, Sort Controls & Export */}
               <div className="flex items-center gap-2 flex-wrap">
+                <div className="inline-flex p-0.5 bg-slate-100 border border-slate-200 rounded-md">
+                  <button
+                    type="button"
+                    onClick={() => setMachineGroupBy("none")}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                      machineGroupBy === "none"
+                        ? "bg-white text-slate-900 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    Flat (All)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMachineGroupBy("line")}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                      machineGroupBy === "line"
+                        ? "bg-white text-slate-900 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    Group by Line
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMachineGroupBy("item")}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                      machineGroupBy === "item"
+                        ? "bg-white text-slate-900 shadow-2xs"
+                        : "text-slate-600 hover:text-slate-900"
+                    }`}
+                  >
+                    Group by Item
+                  </button>
+                </div>
+
                 <div className="flex items-center gap-1.5 text-xs text-slate-600">
                   <span className="font-semibold text-slate-500">Sort By:</span>
                   <select
@@ -2337,78 +2634,178 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
-                  {machineRollups.map((m) => (
-                    <tr key={m.machineId} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-3 py-2 font-sans whitespace-nowrap">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleSelectAnalyticsMachine(m.machineId)
-                            }
-                            className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
-                            title="View Machine Analytics Drilldown"
-                          >
-                            <span>{m.machineName}</span>
-                            <ExternalLink className="w-3 h-3 opacity-60" />
-                          </button>
-                          {m.isTempMachine && (
-                            <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
-                              TEMP
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 font-sans font-medium text-slate-700 whitespace-nowrap">{m.line}</td>
-                      <td className="px-3 py-2 text-center">
-                        {m.splitRunsCount > 0 ? (
-                          <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">
-                            {m.splitRunsCount} Split
-                          </span>
-                        ) : (
-                          <span className="text-slate-400">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right text-slate-600">{m.metrics.totalStd.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right font-bold text-slate-900">
-                        {m.metrics.totalActual.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-emerald-700 font-bold">
-                        {m.metrics.goodOutput.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-right text-amber-600">{m.metrics.totalRework.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right text-rose-600">{m.metrics.downtimeMinutes}m</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
-                      <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
-                      <td className="px-3 py-2 text-right">
-                        <span
-                          className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
-                            m.metrics.oeePct
-                          )}`}
-                        >
-                          {m.metrics.oeePct}%
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-center font-sans">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleSelectAnalyticsMachine(m.machineId)
-                          }
-                          className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
-                          title="View Machine Analytics Drilldown"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                        </button>
+                  {groupedMachineMatrix.length === 0 ? (
+                    <tr>
+                      <td colSpan={12} className="px-3 py-8 text-center text-slate-500 font-sans italic">
+                        No machine logs found for current filters.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    groupedMachineMatrix.map((group) => (
+                      <React.Fragment key={group.groupKey}>
+                        {machineGroupBy !== "none" && (
+                          <tr className="bg-slate-100 border-t-2 border-slate-300 font-semibold text-slate-900">
+                            <td colSpan={3} className="px-3 py-2 font-sans">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-extrabold text-slate-900 text-xs">
+                                  {group.groupLabel}
+                                </span>
+                                {group.groupSubLabel && (
+                                  <span className="text-[10px] font-mono font-bold text-slate-600 bg-slate-200 px-1.5 py-0.5 rounded">
+                                    {group.groupSubLabel}
+                                  </span>
+                                )}
+                                <span className="px-1.5 py-0.5 rounded bg-slate-200/80 text-slate-700 text-[10px] font-bold">
+                                  {group.machinesCount}{" "}
+                                  {group.machinesCount === 1 ? "Machine" : "Machines"}
+                                </span>
+                                {group.groupType === "item" &&
+                                  group.groupKey !== "__unspecified__" && (
+                                    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold">
+                                      Pre-QC: {(group.preQcProduction ?? 0).toLocaleString()} pcs
+                                    </span>
+                                  )}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-700">
+                              {group.metrics.totalStd.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right font-bold text-slate-900">
+                              {group.metrics.totalActual.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right font-bold text-emerald-700">
+                              {group.metrics.goodOutput.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right text-amber-700">
+                              {group.metrics.totalRework.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right text-rose-700">
+                              {group.metrics.downtimeMinutes}m
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-700">
+                              {group.metrics.availabilityPct}%
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-700">
+                              {group.metrics.qualityPct}%
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <span
+                                className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                                  group.metrics.oeePct
+                                )}`}
+                              >
+                                {group.metrics.oeePct}%
+                              </span>
+                            </td>
+                            <td className="px-3 py-2" />
+                          </tr>
+                        )}
+
+                        {group.machines.map((m) => (
+                          <tr
+                            key={`${group.groupKey}_${m.machineId}_${m.line}`}
+                            className="hover:bg-slate-50 transition-colors"
+                          >
+                            <td className="px-3 py-2 font-sans whitespace-nowrap">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSelectAnalyticsMachine(m.machineId)
+                                  }
+                                  className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 cursor-pointer"
+                                  title="View Machine Analytics Drilldown"
+                                >
+                                  <span>{m.machineName}</span>
+                                  <ExternalLink className="w-3 h-3 opacity-60" />
+                                </button>
+                                {m.isTempMachine && (
+                                  <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                                    TEMP
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 font-sans font-medium text-slate-700 whitespace-nowrap">
+                              {m.line}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {m.splitRunsCount > 0 ? (
+                                <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">
+                                  {m.splitRunsCount} Split
+                                </span>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-600">
+                              {m.metrics.totalStd.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right font-bold text-slate-900">
+                              {m.metrics.totalActual.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right text-emerald-700 font-bold">
+                              {m.metrics.goodOutput.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right text-amber-600">
+                              {m.metrics.totalRework.toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 text-right text-rose-600">
+                              {m.metrics.downtimeMinutes}m
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-700">
+                              {m.metrics.availabilityPct}%
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-700">
+                              {m.metrics.qualityPct}%
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <span
+                                className={`px-2 py-0.5 rounded text-xs font-black border ${getOeeBadgeClass(
+                                  m.metrics.oeePct
+                                )}`}
+                              >
+                                {m.metrics.oeePct}%
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-center font-sans">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSelectAnalyticsMachine(m.machineId)
+                                }
+                                className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                                title="View Machine Analytics Drilldown"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
           </div>
         )}
       </div>
+
+      <ShiftSheetPreviewModal
+        isOpen={Boolean(shiftSheetModal)}
+        date={shiftSheetModal?.date || ""}
+        shift={shiftSheetModal?.shift || ""}
+        initialLine={shiftSheetModal?.line}
+        allRows={enrichedAllRows}
+        filteredRows={filteredRows}
+        allItemProduction={historicalItemProduction}
+        filteredItemProduction={filteredShiftItemTotals}
+        hasActiveScopeFilter={hasActiveScopeFilter}
+        onClose={() => setShiftSheetModal(null)}
+        onSelectMachine={(machineId) => handleSelectAnalyticsMachine(machineId)}
+        onOpenShiftSheet={onOpenShiftSheet}
+      />
     </div>
   );
 };

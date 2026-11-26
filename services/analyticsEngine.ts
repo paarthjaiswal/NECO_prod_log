@@ -178,6 +178,22 @@ export interface LineRollupItem {
   qcMetrics: ProductQcMetrics;
 }
 
+export interface ShiftDayLineEntry {
+  date: string;                 // YYYY-MM-DD
+  shift: string;                // full shift string
+  line: string;                 // e.g. 'Line 4'
+  machinesCount: number;
+  qc: ProductQcMetrics;         // from resolveProductQcMetrics for (date, shift, line)
+  machineOpsActual: number;
+  machineOpsStd: number;
+  rework: number;
+  downtimeMinutes: number;
+  planAchievementPct: number;
+  availabilityPct: number;
+  qualityPct: number;
+  oeePct: number;
+}
+
 export interface ShiftRollupItem {
   shift: string;
   metrics: OeeMetrics;
@@ -186,6 +202,7 @@ export interface ShiftRollupItem {
   preQcProduction: number;
   finishedProduction: number;
   qcMetrics: ProductQcMetrics;
+  dailyEntries: ShiftDayLineEntry[];
 }
 
 export interface DailyItemShiftRow {
@@ -250,6 +267,20 @@ export interface MachineRollupItem {
   latestDate: string;
   latestShift: string;
   latestLine: string;
+}
+
+export type MachineGroupByMode = "none" | "line" | "item";
+
+export interface MachineMatrixGroup {
+  groupKey: string;
+  groupLabel: string;
+  groupSubLabel?: string;
+  groupType: MachineGroupByMode;
+  machinesCount: number;
+  preQcProduction?: number;
+  qcMetrics?: ProductQcMetrics;
+  metrics: OeeMetrics;
+  machines: MachineRollupItem[];
 }
 
 /**
@@ -841,6 +872,16 @@ export function groupByShift(
     shiftMap.set(shift, list);
   }
 
+  // Union shifts that only have shiftItemTotals logged
+  if (shiftItemTotals && shiftItemTotals.length > 0) {
+    for (const p of shiftItemTotals) {
+      const shift = p.shift || "Shift A";
+      if (!shiftMap.has(shift)) {
+        shiftMap.set(shift, []);
+      }
+    }
+  }
+
   const result: ShiftRollupItem[] = [];
 
   for (const [shift, rows] of shiftMap.entries()) {
@@ -875,13 +916,80 @@ export function groupByShift(
     const topItems = Array.from(itemMap.values()).sort((a, b) => b.actualOutput - a.actualOutput);
     const machines = new Set(rows.map((r) => r.machineId || r.machineName));
 
-    const shiftPreQc = (shiftItemTotals || [])
-      .filter((r) => (r.shift || "Shift A").toLowerCase() === shift.toLowerCase())
-      .reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
-    const shiftHasLogged = (shiftItemTotals || []).some(
+    const shiftProdRows = (shiftItemTotals || []).filter(
       (r) => (r.shift || "Shift A").toLowerCase() === shift.toLowerCase()
     );
+    const shiftPreQc = shiftProdRows.reduce((sum, r) => sum + (Number(r.totalProduction) || 0), 0);
+    const shiftHasLogged = shiftProdRows.length > 0;
     const qcMetrics = resolveProductQcMetrics(shiftPreQc, shiftHasLogged);
+
+    // Union (date, line) pairs from both enrichedRows and shiftProdRows
+    const dateLineMap = new Map<
+      string,
+      {
+        date: string;
+        line: string;
+        logRows: EnrichedAnalyticsRow[];
+        prodRows: ShiftItemProductionRow[];
+      }
+    >();
+
+    for (const r of rows) {
+      const dateStr = r.date || "";
+      if (!dateStr) continue;
+      const lineStr = r.line || "Line 1";
+      const dlKey = `${dateStr}__${lineStr.toLowerCase()}`;
+      let entry = dateLineMap.get(dlKey);
+      if (!entry) {
+        entry = { date: dateStr, line: lineStr, logRows: [], prodRows: [] };
+        dateLineMap.set(dlKey, entry);
+      }
+      entry.logRows.push(r);
+    }
+
+    for (const p of shiftProdRows) {
+      const dateStr = p.date || "";
+      if (!dateStr) continue;
+      const lineStr = p.line || "Line 1";
+      const dlKey = `${dateStr}__${lineStr.toLowerCase()}`;
+      let entry = dateLineMap.get(dlKey);
+      if (!entry) {
+        entry = { date: dateStr, line: lineStr, logRows: [], prodRows: [] };
+        dateLineMap.set(dlKey, entry);
+      }
+      entry.prodRows.push(p);
+    }
+
+    const dailyEntries: ShiftDayLineEntry[] = Array.from(dateLineMap.values()).map((entry) => {
+      const dlPreQc = entry.prodRows.reduce((sum, p) => sum + (Number(p.totalProduction) || 0), 0);
+      const dlQc = resolveProductQcMetrics(dlPreQc, entry.prodRows.length > 0);
+      const dlMetrics = calculateOeeMetrics(entry.logRows);
+      const dlMachines = new Set(
+        entry.logRows.map((r) => r.machineId || r.machineName).filter(Boolean)
+      );
+
+      return {
+        date: entry.date,
+        shift,
+        line: entry.line,
+        machinesCount: dlMachines.size,
+        qc: dlQc,
+        machineOpsActual: dlMetrics.totalActual,
+        machineOpsStd: dlMetrics.totalStd,
+        rework: dlMetrics.totalRework,
+        downtimeMinutes: dlMetrics.downtimeMinutes,
+        planAchievementPct: dlMetrics.planAchievementPct,
+        availabilityPct: dlMetrics.availabilityPct,
+        qualityPct: dlMetrics.qualityPct,
+        oeePct: dlMetrics.oeePct,
+      };
+    });
+
+    dailyEntries.sort((a, b) => {
+      const dCmp = b.date.localeCompare(a.date);
+      if (dCmp !== 0) return dCmp;
+      return a.line.localeCompare(b.line);
+    });
 
     result.push({
       shift,
@@ -891,10 +999,11 @@ export function groupByShift(
       preQcProduction: shiftPreQc,
       finishedProduction: shiftPreQc,
       qcMetrics,
+      dailyEntries,
     });
   }
 
-  result.sort((a, b) => a.shift.localeCompare(b.shift));
+  result.sort((a, b) => compareShiftsCanonically(a.shift, b.shift));
   return result;
 }
 
@@ -959,9 +1068,72 @@ function compareShiftsCanonically(a: string, b: string): number {
   return a.localeCompare(b);
 }
 
-/**
- * Step 3D: Group By Period ('day' | 'week')
- */
+function buildCanonicalItemResolver(
+  masterItems?: ItemMaster[],
+  shiftItemTotals?: ShiftItemProductionRow[]
+): (r: EnrichedAnalyticsRow) => { key: string; code: string; name: string } | null {
+  const idToCanonical = new Map<string, { key: string; code: string; name: string }>();
+  const nameToCanonical = new Map<string, { key: string; code: string; name: string }>();
+  const codeToCanonical = new Map<string, { key: string; code: string; name: string }>();
+
+  if (masterItems && masterItems.length > 0) {
+    for (const it of masterItems) {
+      const code = (it.itemCode || "").trim();
+      const name = (it.itemName || "").trim();
+      const key = buildCanonicalItemKey(code, name);
+      if (!key) continue;
+      const meta = { key, code, name: name || code };
+      if (it.id) idToCanonical.set(it.id.trim().toLowerCase(), meta);
+      if (name) nameToCanonical.set(name.toLowerCase(), meta);
+      if (code) codeToCanonical.set(code.toLowerCase(), meta);
+    }
+  }
+
+  if (shiftItemTotals && shiftItemTotals.length > 0) {
+    for (const p of shiftItemTotals) {
+      const code = (p.itemCode || "").trim();
+      const name = (p.itemName || "").trim();
+      const key = (p.itemKey || buildCanonicalItemKey(code, name)).trim().toLowerCase();
+      if (!key) continue;
+      const meta = { key, code, name: name || code || key };
+      if (p.itemId && !idToCanonical.has(p.itemId.trim().toLowerCase())) {
+        idToCanonical.set(p.itemId.trim().toLowerCase(), meta);
+      }
+      if (name && !nameToCanonical.has(name.toLowerCase())) {
+        nameToCanonical.set(name.toLowerCase(), meta);
+      }
+      if (code && !codeToCanonical.has(code.toLowerCase())) {
+        codeToCanonical.set(code.toLowerCase(), meta);
+      }
+    }
+  }
+
+  return (r: EnrichedAnalyticsRow) => {
+    const rawName = (r.itemName || "").trim();
+    const rawId = (r.itemId || "").trim();
+    if (!rawName && !rawId) return null;
+
+    const byId = rawId ? idToCanonical.get(rawId.toLowerCase()) : undefined;
+    const byName = rawName ? nameToCanonical.get(rawName.toLowerCase()) : undefined;
+    const byCode = rawId ? codeToCanonical.get(rawId.toLowerCase()) : undefined;
+    const matched = byId || byName || byCode;
+    if (matched) {
+      return {
+        key: matched.key,
+        code: matched.code,
+        name: rawName || matched.name,
+      };
+    }
+    const fallbackKey =
+      buildCanonicalItemKey(undefined, rawName) || buildCanonicalItemKey(rawId, undefined);
+    if (!fallbackKey) return null;
+    return {
+      key: fallbackKey,
+      code: "",
+      name: rawName || rawId,
+    };
+  };
+}
 export function groupByPeriod(
   enrichedRows: EnrichedAnalyticsRow[],
   granularity: "day" | "week",
@@ -1036,67 +1208,10 @@ export function groupByPeriod(
   }
 
   // Pre-index canonical item keys when granularity === 'day' so shift_logs & shift_item_production unify cleanly
-  const idToCanonical = new Map<string, { key: string; code: string; name: string }>();
-  const nameToCanonical = new Map<string, { key: string; code: string; name: string }>();
-  const codeToCanonical = new Map<string, { key: string; code: string; name: string }>();
-
-  if (granularity === "day") {
-    if (masterItems && masterItems.length > 0) {
-      for (const it of masterItems) {
-        const code = (it.itemCode || "").trim();
-        const name = (it.itemName || "").trim();
-        const key = buildCanonicalItemKey(code, name);
-        if (!key) continue;
-        const meta = { key, code, name: name || code };
-        if (it.id) idToCanonical.set(it.id.trim().toLowerCase(), meta);
-        if (name) nameToCanonical.set(name.toLowerCase(), meta);
-        if (code) codeToCanonical.set(code.toLowerCase(), meta);
-      }
-    }
-    if (shiftItemTotals && shiftItemTotals.length > 0) {
-      for (const p of shiftItemTotals) {
-        const code = (p.itemCode || "").trim();
-        const name = (p.itemName || "").trim();
-        const key = (p.itemKey || buildCanonicalItemKey(code, name)).trim().toLowerCase();
-        if (!key) continue;
-        const meta = { key, code, name: name || code || key };
-        if (p.itemId && !idToCanonical.has(p.itemId.trim().toLowerCase())) {
-          idToCanonical.set(p.itemId.trim().toLowerCase(), meta);
-        }
-        if (name && !nameToCanonical.has(name.toLowerCase())) {
-          nameToCanonical.set(name.toLowerCase(), meta);
-        }
-        if (code && !codeToCanonical.has(code.toLowerCase())) {
-          codeToCanonical.set(code.toLowerCase(), meta);
-        }
-      }
-    }
-  }
-
-  const resolveLogItemMeta = (r: EnrichedAnalyticsRow): { key: string; code: string; name: string } | null => {
-    const rawName = (r.itemName || "").trim();
-    const rawId = (r.itemId || "").trim();
-    if (!rawName && !rawId) return null;
-
-    const byId = rawId ? idToCanonical.get(rawId.toLowerCase()) : undefined;
-    const byName = rawName ? nameToCanonical.get(rawName.toLowerCase()) : undefined;
-    const byCode = rawId ? codeToCanonical.get(rawId.toLowerCase()) : undefined;
-    const matched = byId || byName || byCode;
-    if (matched) {
-      return {
-        key: matched.key,
-        code: matched.code,
-        name: rawName || matched.name,
-      };
-    }
-    const fallbackKey = buildCanonicalItemKey(undefined, rawName) || buildCanonicalItemKey(rawId, undefined);
-    if (!fallbackKey) return null;
-    return {
-      key: fallbackKey,
-      code: "",
-      name: rawName || rawId,
-    };
-  };
+  const resolveLogItemMeta =
+    granularity === "day"
+      ? buildCanonicalItemResolver(masterItems, shiftItemTotals)
+      : () => null;
 
   const result: PeriodRollupItem[] = [];
 
@@ -1313,6 +1428,58 @@ export function groupByPeriod(
   return result;
 }
 
+function buildMachineRollupItem(mId: string, rows: EnrichedAnalyticsRow[]): MachineRollupItem {
+  const s = rows[0];
+  const machineName = s.machineName || s.machineId || mId;
+  const line = s.line || "Line 1";
+  const isTemp = rows.some((r) => r.isTempMachine);
+  const splitCount = rows.filter((r) => r.isSplitRun).length;
+  const metrics = calculateOeeMetrics(rows);
+
+  const itemMap = new Map<string, ItemSummary>();
+  for (const r of rows) {
+    const act = Number(r.actualOutput) || 0;
+    const rew = Number(r.rework) || 0;
+    if (act <= 0 && rew <= 0) continue;
+    const rawName = (r.itemName ?? "").trim();
+    const rawId = (r.itemId ?? "").trim();
+    if (rawName.length === 0 && rawId.length === 0) continue;
+    const name = rawName.length > 0 ? rawName : rawId;
+    const id = rawId.length > 0 ? rawId : name;
+    const key = `${id.toLowerCase()}__${name.toLowerCase()}`;
+    const existing = itemMap.get(key) || {
+      itemId: id,
+      itemName: name,
+      actualOutput: 0,
+      stdOutput: 0,
+      rework: 0,
+      goodOutput: 0,
+    };
+    existing.actualOutput += act;
+    existing.stdOutput += Number(r.stdOutput) || 0;
+    existing.rework += rew;
+    existing.goodOutput += Number(r.goodOutput) || 0;
+    itemMap.set(key, existing);
+  }
+
+  const itemsProduced = Array.from(itemMap.values()).sort((a, b) => b.actualOutput - a.actualOutput);
+  const sortedByDate = [...rows].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const latest = sortedByDate[0];
+
+  return {
+    machineId: mId,
+    machineName,
+    line,
+    isTempMachine: isTemp,
+    splitRunsCount: splitCount,
+    itemsProduced,
+    metrics,
+    latestDate: latest?.date || "",
+    latestShift: latest?.shift || "",
+    latestLine: latest?.line || line,
+  };
+}
+
 /**
  * Step 3E: Group By Machine
  */
@@ -1327,61 +1494,164 @@ export function groupByMachine(enrichedRows: EnrichedAnalyticsRow[]): MachineRol
   }
 
   const result: MachineRollupItem[] = [];
-
   for (const [mId, rows] of machineMap.entries()) {
-    const s = rows[0];
-    const machineName = s.machineName || s.machineId || mId;
-    const line = s.line || "Line 1";
-    const isTemp = rows.some((r) => r.isTempMachine);
-    const splitCount = rows.filter((r) => r.isSplitRun).length;
-    const metrics = calculateOeeMetrics(rows);
+    result.push(buildMachineRollupItem(mId, rows));
+  }
+  return result;
+}
 
-    const itemMap = new Map<string, ItemSummary>();
-    for (const r of rows) {
-      const act = Number(r.actualOutput) || 0;
-      const rew = Number(r.rework) || 0;
-      if (act <= 0 && rew <= 0) continue;
-      const rawName = (r.itemName ?? "").trim();
-      const rawId = (r.itemId ?? "").trim();
-      if (rawName.length === 0 && rawId.length === 0) continue;
-      const name = rawName.length > 0 ? rawName : rawId;
-      const id = rawId.length > 0 ? rawId : name;
-      const key = `${id.toLowerCase()}__${name.toLowerCase()}`;
-      const existing = itemMap.get(key) || {
-        itemId: id,
-        itemName: name,
-        actualOutput: 0,
-        stdOutput: 0,
-        rework: 0,
-        goodOutput: 0,
-      };
-      existing.actualOutput += act;
-      existing.stdOutput += Number(r.stdOutput) || 0;
-      existing.rework += rew;
-      existing.goodOutput += Number(r.goodOutput) || 0;
-      itemMap.set(key, existing);
+/**
+ * Step 3F: Grouped Machine Matrix Builder ('none' | 'line' | 'item')
+ * Preserves active sort comparator within every group.
+ */
+export function buildGroupedMachineMatrix(
+  enrichedRows: EnrichedAnalyticsRow[],
+  groupBy: MachineGroupByMode,
+  sortFn: (a: MachineRollupItem, b: MachineRollupItem) => number,
+  filteredItemProdRows?: ShiftItemProductionRow[],
+  masterItems?: ItemMaster[]
+): MachineMatrixGroup[] {
+  if (enrichedRows.length === 0) return [];
+
+  if (groupBy === "none") {
+    const machines = groupByMachine(enrichedRows).sort(sortFn);
+    if (machines.length === 0) return [];
+    return [
+      {
+        groupKey: "__all__",
+        groupLabel: "All Machines",
+        groupType: "none",
+        machinesCount: machines.length,
+        metrics: calculateOeeMetrics(enrichedRows),
+        machines,
+      },
+    ];
+  }
+
+  if (groupBy === "line") {
+    const lineRowsMap = new Map<string, EnrichedAnalyticsRow[]>();
+    for (const r of enrichedRows) {
+      const line = (r.line || "Line 1").trim() || "Line 1";
+      const list = lineRowsMap.get(line) || [];
+      list.push(r);
+      lineRowsMap.set(line, list);
     }
 
-    const itemsProduced = Array.from(itemMap.values()).sort((a, b) => b.actualOutput - a.actualOutput);
+    const groups: MachineMatrixGroup[] = [];
+    for (const [line, lineRows] of lineRowsMap.entries()) {
+      const machines = groupByMachine(lineRows).sort(sortFn);
+      groups.push({
+        groupKey: line.toLowerCase(),
+        groupLabel: line,
+        groupType: "line",
+        machinesCount: machines.length,
+        metrics: calculateOeeMetrics(lineRows),
+        machines,
+      });
+    }
 
-    const sortedByDate = [...rows].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-    const latest = sortedByDate[0];
+    groups.sort((a, b) => a.groupLabel.localeCompare(b.groupLabel));
+    return groups;
+  }
 
-    result.push({
-      machineId: mId,
-      machineName,
-      line,
-      isTempMachine: isTemp,
-      splitRunsCount: splitCount,
-      itemsProduced,
-      metrics,
-      latestDate: latest?.date || "",
-      latestShift: latest?.shift || "",
-      latestLine: latest?.line || line,
+  // groupBy === 'item'
+  const resolveItemMeta = buildCanonicalItemResolver(masterItems, filteredItemProdRows);
+
+  const itemBuckets = new Map<
+    string,
+    {
+      itemKey: string;
+      itemCode: string;
+      itemName: string;
+      rows: EnrichedAnalyticsRow[];
+      machineSubMap: Map<string, EnrichedAnalyticsRow[]>;
+    }
+  >();
+
+  for (const r of enrichedRows) {
+    const meta = resolveItemMeta(r);
+    const itemKey = meta ? meta.key : "__unspecified__";
+    const itemName = meta ? meta.name : "Unspecified Item";
+    const itemCode = meta ? meta.code : "";
+
+    let bucket = itemBuckets.get(itemKey);
+    if (!bucket) {
+      bucket = {
+        itemKey,
+        itemCode,
+        itemName,
+        rows: [],
+        machineSubMap: new Map<string, EnrichedAnalyticsRow[]>(),
+      };
+      itemBuckets.set(itemKey, bucket);
+    } else {
+      if (!bucket.itemCode && itemCode) bucket.itemCode = itemCode;
+      if (!bucket.itemName && itemName) bucket.itemName = itemName;
+    }
+
+    bucket.rows.push(r);
+    const subKey = `${(r.line || "Line 1").toLowerCase()}__${(r.machineId || r.machineName || "Unknown").toLowerCase()}__${r.isTempMachine ? "1" : "0"}`;
+    const subList = bucket.machineSubMap.get(subKey) || [];
+    subList.push(r);
+    bucket.machineSubMap.set(subKey, subList);
+  }
+
+  const groups: MachineMatrixGroup[] = [];
+  for (const bucket of itemBuckets.values()) {
+    const machines: MachineRollupItem[] = [];
+    for (const subRows of bucket.machineSubMap.values()) {
+      const s = subRows[0];
+      const mId = s.machineId || s.machineName || "Unknown";
+      machines.push(buildMachineRollupItem(mId, subRows));
+    }
+    machines.sort(sortFn);
+
+    let preQcProduction = 0;
+    let hasLogged = false;
+    if (bucket.itemKey !== "__unspecified__" && filteredItemProdRows && filteredItemProdRows.length > 0) {
+      for (const p of filteredItemProdRows) {
+        const pCode = (p.itemCode || "").trim();
+        const pName = (p.itemName || "").trim();
+        const pKey = (p.itemKey || buildCanonicalItemKey(pCode, pName)).trim().toLowerCase();
+        const matches =
+          pKey === bucket.itemKey ||
+          (bucket.itemCode && pCode && pCode.toLowerCase() === bucket.itemCode.toLowerCase()) ||
+          (bucket.itemName && pName && pName.toLowerCase() === bucket.itemName.toLowerCase());
+        if (matches) {
+          hasLogged = true;
+          preQcProduction += Number(p.totalProduction) || 0;
+        }
+      }
+    }
+
+    const qcMetrics = resolveProductQcMetrics(preQcProduction, hasLogged);
+
+    groups.push({
+      groupKey: bucket.itemKey,
+      groupLabel: bucket.itemName,
+      groupSubLabel:
+        bucket.itemCode &&
+        bucket.itemCode.trim().toLowerCase() !== bucket.itemName.trim().toLowerCase()
+          ? bucket.itemCode
+          : undefined,
+      groupType: "item",
+      machinesCount: machines.length,
+      preQcProduction,
+      qcMetrics,
+      metrics: calculateOeeMetrics(bucket.rows),
+      machines,
     });
   }
 
-  return result;
+  // Sort item groups by itemName ASC, putting "Unspecified Item" last
+  groups.sort((a, b) => {
+    const aUnspec = a.groupKey === "__unspecified__";
+    const bUnspec = b.groupKey === "__unspecified__";
+    if (aUnspec !== bUnspec) return aUnspec ? 1 : -1;
+    return a.groupLabel.localeCompare(b.groupLabel);
+  });
+
+  return groups;
 }
 
 // ============================================================================
