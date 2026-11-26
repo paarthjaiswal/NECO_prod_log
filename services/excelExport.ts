@@ -11,6 +11,7 @@ import {
   groupByPeriod,
   groupByMachine,
   buildGroupedMachineMatrix,
+  resolveProductQcMetrics,
   EnrichedAnalyticsRow,
   OeeMetrics,
   ProductMatrixItem,
@@ -18,6 +19,10 @@ import {
   MachineGroupByMode,
   MachineMatrixGroup,
 } from "@/services/analyticsEngine";
+import {
+  getDowntimeCategoryByHeader,
+  TOTAL_DOWNTIME_THEME,
+} from "@/services/downtimePalette";
 
 // ============================================================================
 // STYLING PALETTE & CONSTANTS (Lightweight Executive Design)
@@ -115,31 +120,25 @@ export function getHeaderFill(header: string): string {
     return EXCEL_PALETTE.deepRose;
   }
 
-  // 3. Breakdown / Downtime
-  // Total BD / Total Downtime gets dark amber #92400E
+  // 3. Breakdown / Downtime (Unified Canonical Palette)
+  // Total BD / Total Downtime gets Crimson (#B91C1C)
   if (
     norm.includes("total bd") ||
     norm.includes("total downtime") ||
+    norm === "bd %" ||
     norm === "downtime (m)" ||
     norm === "downtime (mins)" ||
     norm === "downtime" ||
     norm === "bd mins"
   ) {
-    return EXCEL_PALETTE.darkAmber;
+    return TOTAL_DOWNTIME_THEME.excelHeaderHex;
   }
-  // Individual BD categories get warm amber #B45309
-  if (
-    norm.includes("no/disc") ||
-    norm.includes("change") ||
-    norm.includes("power") ||
-    norm.includes("fix/prog") ||
-    norm.includes("misc") ||
-    norm.includes("break down") ||
-    norm.startsWith("bd_") ||
-    header === "OPERATOR" ||
-    header.includes("OPERATOR (mins)") ||
-    header.includes("OPERATOR %")
-  ) {
+  // Individual BD categories get their exact canonical category hex color
+  const dtCategory = getDowntimeCategoryByHeader(header);
+  if (dtCategory) {
+    return dtCategory.excelHeaderHex;
+  }
+  if (norm.startsWith("bd_")) {
     return EXCEL_PALETTE.warmAmber;
   }
 
@@ -368,28 +367,32 @@ export function getDataCellStyle(
     }
   }
 
-  // 3. Breakdown columns
-  const isBreakdownCol =
-    norm.includes("no/disc") ||
-    norm.includes("change") ||
-    norm.includes("power") ||
-    norm.includes("break down") ||
-    norm.includes("fix/prog") ||
-    norm.includes("misc") ||
-    (header === "OPERATOR" && !norm.includes("name"));
-
-  if (isBreakdownCol) {
-    const num = typeof rawVal === "number" ? rawVal : parseFloat(String(rawVal));
-    if (!isNaN(num) && num > 0) {
-      bg = EXCEL_PALETTE.amberTint;
-      fontColor = EXCEL_PALETTE.amberDarkText;
+  // 3. Breakdown category summary badge column (Overview Sheet 1)
+  if (norm === "category code") {
+    const dtCategory = getDowntimeCategoryByHeader(String(rawVal ?? ""));
+    if (dtCategory) {
+      bg = dtCategory.excelCellBgHex;
+      fontColor = dtCategory.excelCellTextHex;
+      bold = true;
     }
   }
 
-  // 4. Total BD / Downtime column
+  // 4. Breakdown category columns (exact canonical tint & text when > 0)
+  const dtCategoryCol = getDowntimeCategoryByHeader(header);
+  if (dtCategoryCol) {
+    const num = typeof rawVal === "number" ? rawVal : parseFloat(String(rawVal));
+    if (!isNaN(num) && num > 0) {
+      bg = dtCategoryCol.excelCellBgHex;
+      fontColor = dtCategoryCol.excelCellTextHex;
+      bold = true;
+    }
+  }
+
+  // 5. Total BD / Downtime column
   const isTotalBdCol =
     norm.includes("total bd") ||
     norm.includes("total downtime") ||
+    norm === "bd %" ||
     norm === "downtime (m)" ||
     norm === "downtime (mins)" ||
     norm === "downtime" ||
@@ -398,8 +401,8 @@ export function getDataCellStyle(
   if (isTotalBdCol) {
     const num = typeof rawVal === "number" ? rawVal : parseFloat(String(rawVal));
     if (!isNaN(num) && num > 0) {
-      bg = EXCEL_PALETTE.totalBdTint;
-      fontColor = EXCEL_PALETTE.amberDarkText;
+      bg = TOTAL_DOWNTIME_THEME.excelCellBgHex;
+      fontColor = TOTAL_DOWNTIME_THEME.excelCellTextHex;
       bold = true;
     }
   }
@@ -4139,5 +4142,264 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
 
   const cleanName = sanitizeFileName(machineMeta.name);
   const filename = `Machine_${cleanName}_${fromDate}_to_${toDate}.xlsx`;
+  XLSX.writeFile(wb, filename);
+}
+
+// ============================================================================
+// EXPORT ACTION 6: Daily Sheet Tab View Workbook (2 Sheets)
+// ============================================================================
+
+export interface ExportDailySheetViewParams {
+  date: string;
+  line: string;
+  shift: string;
+  itemLabel: string;
+  machineLabel: string;
+  operatorLabel: string;
+  rows: EnrichedAnalyticsRow[];
+  itemProdRows: ShiftItemProductionRow[];
+}
+
+function getShiftSortRankExport(shift: string): number {
+  const s = (shift || "").trim().toLowerCase();
+  if (/^shift\s*a\b/.test(s)) return 1;
+  if (/^shift\s*b\b/.test(s)) return 2;
+  if (/^shift\s*c\b/.test(s)) return 3;
+  return 4;
+}
+
+function compareShiftsExport(a: string, b: string): number {
+  const rA = getShiftSortRankExport(a);
+  const rB = getShiftSortRankExport(b);
+  if (rA !== rB) return rA - rB;
+  return a.localeCompare(b);
+}
+
+export function exportDailySheetViewExcel(params: ExportDailySheetViewParams): void {
+  const {
+    date,
+    line,
+    shift,
+    itemLabel,
+    machineLabel,
+    operatorLabel,
+    rows,
+    itemProdRows,
+  } = params;
+
+  const wb = XLSX.utils.book_new();
+  const usedNames = new Set<string>();
+  const isAllShifts = shift === "all";
+
+  const metadataList: Array<{ label: string; value: string | number }> = [
+    { label: "Report", value: "Daily Shift Sheet View" },
+    { label: "Date", value: date || "—" },
+    { label: "Line", value: line === "all" ? "All Lines" : line },
+    { label: "Shift", value: isAllShifts ? "All Shifts" : shift },
+    { label: "Item", value: itemLabel || "All Items" },
+    { label: "Machine", value: machineLabel || "All Machines" },
+    { label: "Operator", value: operatorLabel || "All Operators" },
+    { label: "Quality Basis", value: "Pre-QC (100% Assumed)" },
+    { label: "Exported At", value: new Date().toLocaleString() },
+  ];
+
+  // --------------------------------------------------------------------------
+  // Sheet 1: Daily Shift Sheet
+  // --------------------------------------------------------------------------
+  const sortedRows = [...rows].sort((a, b) => {
+    const sCmp = compareShiftsExport(a.shift || "", b.shift || "");
+    if (sCmp !== 0) return sCmp;
+    const srDiff = (Number(a.srNo) || 0) - (Number(b.srNo) || 0);
+    if (srDiff !== 0) return srDiff;
+    const mCmp = (a.machineName || "").localeCompare(b.machineName || "");
+    if (mCmp !== 0) return mCmp;
+    return (Number(a.runNo) || 1) - (Number(b.runNo) || 1);
+  });
+
+  const overallMetrics = calculateOeeMetrics(sortedRows);
+  const overallBdPct =
+    overallMetrics.plannedMinutes > 0
+      ? round2((overallMetrics.downtimeMinutes / overallMetrics.plannedMinutes) * 100)
+      : 0;
+
+  const sheetHeaders = [
+    ...(isAllShifts ? ["Shift"] : []),
+    "Sr #",
+    "Machine Name",
+    "Line",
+    "Operator",
+    "Item",
+    "Operation",
+    "Cycle Time",
+    "Std Output",
+    "Actual Output",
+    "Rework",
+    "NO/DISC",
+    "CHANGE",
+    "POWER",
+    "OPERATOR",
+    "BREAK DOWN",
+    "FIX/PROG",
+    "MISC.",
+    "Total BD (m)",
+    "BD %",
+    "OEE %",
+    "Remarks",
+  ];
+
+  const sheetRows: (string | number)[][] = sortedRows.map((r, idx) => {
+    const bd = r.breakdown || {
+      noDisc: 0,
+      change: 0,
+      power: 0,
+      operator: 0,
+      machineBreakdown: 0,
+      fixProgSettings: 0,
+      miscellaneous: 0,
+    };
+    const totalBd = round2(Number(r.totalBreakdownMinutes) || calculateTotalBreakdown(bd));
+    const bdPct =
+      r.allocatedPlannedMinutes > 0
+        ? round2((totalBd / r.allocatedPlannedMinutes) * 100)
+        : 0;
+    const rowMetrics = calculateOeeMetrics([r]);
+
+    return [
+      ...(isAllShifts ? [r.shift || "—"] : []),
+      Number(r.srNo) || idx + 1,
+      r.isTempMachine ? `${r.machineName} [TEMP]` : r.machineName || "—",
+      r.line || "—",
+      (r.operatorName || "").trim() || "—",
+      r.itemName || r.itemId || "—",
+      r.operation || "—",
+      Number(r.cycleTime) || 0,
+      Number(r.stdOutput) || 0,
+      Number(r.actualOutput) || 0,
+      Number(r.rework) || 0,
+      round2(bd.noDisc || 0),
+      round2(bd.change || 0),
+      round2(bd.power || 0),
+      round2(bd.operator || 0),
+      round2(bd.machineBreakdown || 0),
+      round2(bd.fixProgSettings || 0),
+      round2(bd.miscellaneous || 0),
+      totalBd,
+      `${bdPct}%`,
+      `${rowMetrics.oeePct}%`,
+      (r.remarks || "").trim() || "—",
+    ];
+  });
+
+  const sheetTotals: (string | number)[] =
+    sortedRows.length === 0
+      ? []
+      : [
+          ...(isAllShifts ? ["TOTALS / OVERALL"] : []),
+          isAllShifts ? `${sortedRows.length} runs` : "TOTALS / OVERALL",
+          isAllShifts ? "—" : `${sortedRows.length} runs`,
+          "—",
+          "—",
+          "—",
+          "—",
+          "—",
+          overallMetrics.totalStd,
+          overallMetrics.totalActual,
+          overallMetrics.totalRework,
+          overallMetrics.breakdownTotals.noDisc,
+          overallMetrics.breakdownTotals.change,
+          overallMetrics.breakdownTotals.power,
+          overallMetrics.breakdownTotals.operator,
+          overallMetrics.breakdownTotals.machineBreakdown,
+          overallMetrics.breakdownTotals.fixProgSettings,
+          overallMetrics.breakdownTotals.miscellaneous,
+          overallMetrics.downtimeMinutes,
+          `${overallBdPct}%`,
+          `${overallMetrics.oeePct}%`,
+          "—",
+        ];
+
+  const ws1 = buildStyledWorksheet({
+    title: `Daily Shift Sheet — ${date || "All Dates"}`,
+    metadata: metadataList,
+    sectionTitle: isAllShifts
+      ? "DAILY SHIFT SHEET (ALL SHIFTS · SHIFT A → B → C)"
+      : `DAILY SHIFT SHEET — ${shift.toUpperCase()}`,
+    headers: sheetHeaders,
+    rows: sheetRows,
+    totalsRow: sheetTotals.length > 0 ? sheetTotals : undefined,
+  });
+  XLSX.utils.book_append_sheet(wb, ws1, sanitizeSheetName("Daily Shift Sheet", usedNames));
+
+  // --------------------------------------------------------------------------
+  // Sheet 2: Pre-QC Item Production
+  // --------------------------------------------------------------------------
+  const sortedProd = [...itemProdRows].sort((a, b) => {
+    const sCmp = compareShiftsExport(a.shift || "", b.shift || "");
+    if (sCmp !== 0) return sCmp;
+    const lCmp = (a.line || "").localeCompare(b.line || "");
+    if (lCmp !== 0) return lCmp;
+    return (a.itemName || a.itemCode || "").localeCompare(b.itemName || b.itemCode || "");
+  });
+
+  const prodHeaders = [
+    "Date",
+    "Line",
+    "Shift",
+    "Item",
+    "Total Prod (Pre-QC)",
+    "QC Passed (100%)",
+    "Remarks",
+  ];
+
+  let sumPreQc = 0;
+  let sumQcPassed = 0;
+
+  const prodRows: (string | number)[][] = sortedProd.map((p) => {
+    const qc = resolveProductQcMetrics(Number(p.totalProduction) || 0, true);
+    sumPreQc += qc.preQcProduction;
+    sumQcPassed += qc.qcPassed;
+    const itemDisplay =
+      p.itemCode &&
+      p.itemCode.trim().toLowerCase() !== (p.itemName || "").trim().toLowerCase()
+        ? `${p.itemName || p.itemCode} (${p.itemCode})`
+        : p.itemName || p.itemCode || p.itemKey;
+
+    return [
+      p.date || date || "—",
+      p.line || "—",
+      p.shift || "—",
+      itemDisplay,
+      qc.preQcProduction,
+      qc.qcPassed,
+      (p.remarks || "").trim() || "—",
+    ];
+  });
+
+  const prodTotals: (string | number)[] =
+    sortedProd.length === 0
+      ? []
+      : [
+          "TOTALS",
+          "—",
+          "—",
+          `${sortedProd.length} entries`,
+          sumPreQc,
+          sumQcPassed,
+          "—",
+        ];
+
+  const ws2 = buildStyledWorksheet({
+    title: `Pre-QC Item Production — ${date || "All Dates"}`,
+    metadata: metadataList,
+    sectionTitle: "SHIFT FINISHED PRODUCTION (PRE-QC · 100% QC ASSUMED)",
+    headers: prodHeaders,
+    rows: prodRows,
+    totalsRow: prodTotals.length > 0 ? prodTotals : undefined,
+  });
+  XLSX.utils.book_append_sheet(wb, ws2, sanitizeSheetName("Pre-QC Item Production", usedNames));
+
+  const lineTag = sanitizeFileName(line === "all" ? "AllLines" : line);
+  const shiftTag = sanitizeFileName(shift === "all" ? "AllShifts" : shift);
+  const filename = `DailySheet_${date || "Report"}_${lineTag}_${shiftTag}.xlsx`;
   XLSX.writeFile(wb, filename);
 }

@@ -44,78 +44,14 @@ import {
   upsertMachineMaster,
 } from '@/actions/shiftActions';
 import { useFeedback } from '@/context/FeedbackContext';
-
-type BreakdownKey =
-  | 'noDisc'
-  | 'change'
-  | 'power'
-  | 'operator'
-  | 'machineBreakdown'
-  | 'fixProgSettings'
-  | 'miscellaneous';
-
-const BD_KEYS: BreakdownKey[] = [
-  'noDisc',
-  'change',
-  'power',
-  'operator',
-  'machineBreakdown',
-  'fixProgSettings',
-  'miscellaneous',
-];
-
-const BD_META: Record<
+import {
   BreakdownKey,
-  {
-    shortLabel: string;
-    fullLabel: string;
-    pillClass: string;
-    activeCellClass: string;
-  }
-> = {
-  noDisc: {
-    shortLabel: 'NO/DISC',
-    fullLabel: 'NO/DISC (Material)',
-    pillClass: 'bg-amber-100 text-amber-900 border-amber-300',
-    activeCellClass: 'bg-amber-50 text-amber-900 font-semibold border-amber-300',
-  },
-  change: {
-    shortLabel: 'CHANGE',
-    fullLabel: 'CHANGE (Tool/Setup)',
-    pillClass: 'bg-sky-100 text-sky-900 border-sky-300',
-    activeCellClass: 'bg-sky-50 text-sky-900 font-semibold border-sky-300',
-  },
-  power: {
-    shortLabel: 'POWER',
-    fullLabel: 'POWER (Electrical)',
-    pillClass: 'bg-rose-100 text-rose-900 border-rose-300',
-    activeCellClass: 'bg-rose-50 text-rose-900 font-semibold border-rose-300',
-  },
-  operator: {
-    shortLabel: 'OPERATOR',
-    fullLabel: 'OPERATOR (Delay)',
-    pillClass: 'bg-purple-100 text-purple-900 border-purple-300',
-    activeCellClass: 'bg-purple-50 text-purple-900 font-semibold border-purple-300',
-  },
-  machineBreakdown: {
-    shortLabel: 'BREAK DOWN',
-    fullLabel: 'BREAK DOWN (Machine)',
-    pillClass: 'bg-orange-100 text-orange-900 border-orange-300',
-    activeCellClass: 'bg-orange-50 text-orange-900 font-semibold border-orange-300',
-  },
-  fixProgSettings: {
-    shortLabel: 'FIX/PROG',
-    fullLabel: 'FIX/PROG Settings',
-    pillClass: 'bg-indigo-100 text-indigo-900 border-indigo-300',
-    activeCellClass: 'bg-indigo-50 text-indigo-900 font-semibold border-indigo-300',
-  },
-  miscellaneous: {
-    shortLabel: 'MISC.',
-    fullLabel: 'MISCELLANEOUS',
-    pillClass: 'bg-teal-100 text-teal-900 border-teal-300',
-    activeCellClass: 'bg-teal-50 text-teal-900 font-semibold border-teal-300',
-  },
-};
+  BD_KEYS,
+  DOWNTIME_PALETTE,
+  TOTAL_DOWNTIME_THEME,
+} from '@/services/downtimePalette';
+
+const BD_META = DOWNTIME_PALETTE;
 
 const NAV_COLS = [
   'cycleTime',
@@ -2128,11 +2064,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 </th>
                 <th
                   colSpan={7}
-                  className="px-2 py-1.5 border-r border-slate-800 text-center bg-slate-800 text-amber-300 font-bold tracking-normal"
+                  className={`px-2 py-1.5 border-r border-slate-800 text-center bg-slate-800 font-bold tracking-normal ${TOTAL_DOWNTIME_THEME.textDarkClass}`}
                 >
                   BREAKDOWN (MINUTES)
                 </th>
-                <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-24 bg-slate-800 text-amber-200">
+                <th rowSpan={2} className={`px-2 py-2.5 border-r border-slate-800 text-center w-24 bg-slate-800 ${TOTAL_DOWNTIME_THEME.textDarkClass}`}>
                   TOTAL BD
                 </th>
                 <th rowSpan={2} className="px-2.5 py-2.5 border-r border-slate-800 min-w-42.5">
@@ -2146,26 +2082,26 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 </th>
               </tr>
               <tr className="bg-slate-800 text-slate-300 border-b border-slate-700 text-[10px] font-bold text-center">
-                <th className="px-1.5 py-1 border-r border-slate-700 w-16" title="Disc or raw material shortage">
-                  NO/DISC
+                <th className={`px-1.5 py-1 border-r border-slate-700 w-16 ${BD_META.noDisc.darkHeaderTextClass}`} title="Disc or raw material shortage">
+                  <span className="inline-flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${BD_META.noDisc.dotBgClass}`} />NO/DISC</span>
                 </th>
-                <th className="px-1.5 py-1 border-r border-slate-700 w-16" title="Tool change / setup time">
-                  CHANGE
+                <th className={`px-1.5 py-1 border-r border-slate-700 w-16 ${BD_META.change.darkHeaderTextClass}`} title="Tool change / setup time">
+                  <span className="inline-flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${BD_META.change.dotBgClass}`} />CHANGE</span>
                 </th>
-                <th className="px-1.5 py-1 border-r border-slate-700 w-16" title="Power interruption">
-                  POWER
+                <th className={`px-1.5 py-1 border-r border-slate-700 w-16 ${BD_META.power.darkHeaderTextClass}`} title="Power interruption">
+                  <span className="inline-flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${BD_META.power.dotBgClass}`} />POWER</span>
                 </th>
-                <th className="px-1.5 py-1 border-r border-slate-700 w-16" title="Operator delay / absentee">
-                  OPERATOR
+                <th className={`px-1.5 py-1 border-r border-slate-700 w-16 ${BD_META.operator.darkHeaderTextClass}`} title="Operator delay / absentee">
+                  <span className="inline-flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${BD_META.operator.dotBgClass}`} />OPERATOR</span>
                 </th>
-                <th className="px-1.5 py-1 border-r border-slate-700 w-18" title="Machine / mechanical breakdown">
-                  BREAK DOWN
+                <th className={`px-1.5 py-1 border-r border-slate-700 w-18 ${BD_META.machineBreakdown.darkHeaderTextClass}`} title="Machine / mechanical breakdown">
+                  <span className="inline-flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${BD_META.machineBreakdown.dotBgClass}`} />BREAK DOWN</span>
                 </th>
-                <th className="px-1.5 py-1 border-r border-slate-700 w-20" title="Fixture or program setting time">
-                  FIX/PROG
+                <th className={`px-1.5 py-1 border-r border-slate-700 w-20 ${BD_META.fixProgSettings.darkHeaderTextClass}`} title="Fixture or program setting time">
+                  <span className="inline-flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${BD_META.fixProgSettings.dotBgClass}`} />FIX/PROG</span>
                 </th>
-                <th className="px-1.5 py-1 border-r border-slate-800 w-18" title="Miscellaneous downtime">
-                  MISC.
+                <th className={`px-1.5 py-1 border-r border-slate-800 w-18 ${BD_META.miscellaneous.darkHeaderTextClass}`} title="Miscellaneous downtime">
+                  <span className="inline-flex items-center gap-1"><span className={`w-1.5 h-1.5 rounded-full ${BD_META.miscellaneous.dotBgClass}`} />MISC.</span>
                 </th>
               </tr>
             </thead>
@@ -2802,7 +2738,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         <td
                           key={bdKey}
                           className={`px-1 py-1 border-r border-slate-200 text-center transition-colors ${
-                            isFocused ? 'bg-blue-50/40' : ''
+                            isFocused
+                              ? 'bg-blue-50/60'
+                              : val > 0
+                              ? BD_META[bdKey].cellBackdropClass
+                              : ''
                           }`}
                         >
                           <input
@@ -2853,7 +2793,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                             }}
                             className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border transition-colors focus:outline-none ${
                               isShiftLocked
-                                ? 'cursor-not-allowed opacity-75 border-transparent bg-transparent text-slate-500'
+                                ? val > 0
+                                  ? `${BD_META[bdKey].activeCellClass} cursor-not-allowed`
+                                  : 'cursor-not-allowed opacity-75 border-transparent bg-transparent text-slate-400'
                                 : isFocused
                                 ? 'border-blue-600 ring-2 ring-blue-200 bg-white font-bold text-slate-900'
                                 : val > 0
@@ -2862,7 +2804,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                             }`}
                           />
                           {val > 0 && (
-                            <div className="text-[10px] leading-none text-slate-500 font-normal mt-0.5">
+                            <div className="text-[10px] leading-none text-slate-700 font-semibold mt-0.5">
                               ({pct(val)}%)
                             </div>
                           )}
@@ -2896,7 +2838,15 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           ) : (
                             <>
                               <div className="font-bold text-slate-900 flex items-center justify-center gap-1">
-                                <span>{runBdMins}m BD</span>
+                                <span
+                                  className={
+                                    runBdMins > 0
+                                      ? `px-1.5 py-0.2 rounded border ${TOTAL_DOWNTIME_THEME.badgeClass}`
+                                      : ''
+                                  }
+                                >
+                                  {runBdMins}m BD
+                                </span>
                                 <span className="text-slate-400 text-[10px]">|</span>
                                 <span className="text-slate-600 font-normal text-[10px]">{runProdMins}m prod</span>
                               </div>
@@ -3048,35 +2998,35 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-rose-400">
                   {totalRework}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-amber-300">
+                <td className={`px-1 py-3 border-r border-slate-800 text-center font-mono ${BD_META.noDisc.darkFooterTextClass}`}>
                   {totalNoDisc}m
                   {renderFooterPct(totalNoDisc)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-sky-300">
+                <td className={`px-1 py-3 border-r border-slate-800 text-center font-mono ${BD_META.change.darkFooterTextClass}`}>
                   {totalChange}m
                   {renderFooterPct(totalChange)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-rose-300">
+                <td className={`px-1 py-3 border-r border-slate-800 text-center font-mono ${BD_META.power.darkFooterTextClass}`}>
                   {totalPower}m
                   {renderFooterPct(totalPower)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-purple-300">
+                <td className={`px-1 py-3 border-r border-slate-800 text-center font-mono ${BD_META.operator.darkFooterTextClass}`}>
                   {totalOperator}m
                   {renderFooterPct(totalOperator)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-orange-300">
+                <td className={`px-1 py-3 border-r border-slate-800 text-center font-mono ${BD_META.machineBreakdown.darkFooterTextClass}`}>
                   {totalMachineBd}m
                   {renderFooterPct(totalMachineBd)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-indigo-300">
+                <td className={`px-1 py-3 border-r border-slate-800 text-center font-mono ${BD_META.fixProgSettings.darkFooterTextClass}`}>
                   {totalFixProg}m
                   {renderFooterPct(totalFixProg)}
                 </td>
-                <td className="px-1 py-3 border-r border-slate-800 text-center font-mono text-teal-300">
+                <td className={`px-1 py-3 border-r border-slate-800 text-center font-mono ${BD_META.miscellaneous.darkFooterTextClass}`}>
                   {totalMisc}m
                   {renderFooterPct(totalMisc)}
                 </td>
-                <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-amber-400 bg-slate-800">
+                <td className={`px-2 py-3 border-r border-slate-800 text-center font-mono bg-slate-800 ${TOTAL_DOWNTIME_THEME.textDarkClass}`}>
                   {grandBreakdown}m
                   {renderFooterPct(grandBreakdown)}
                 </td>

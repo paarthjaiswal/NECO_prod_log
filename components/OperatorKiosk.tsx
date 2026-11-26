@@ -18,6 +18,11 @@ import {
   Search,
 } from "lucide-react";
 import {
+  BreakdownKey,
+  DOWNTIME_PALETTE,
+  TOTAL_DOWNTIME_THEME,
+} from "@/services/downtimePalette";
+import {
   MachineShiftRow,
   MasterDataState,
   ShiftType,
@@ -66,15 +71,6 @@ export interface OperatorKioskProps {
   shiftLock?: ShiftLockInfo;
 }
 
-type BreakdownKey =
-  | "noDisc"
-  | "change"
-  | "power"
-  | "operator"
-  | "machineBreakdown"
-  | "fixProgSettings"
-  | "miscellaneous";
-
 interface BreakdownMeta {
   key: BreakdownKey;
   label: string;
@@ -83,71 +79,79 @@ interface BreakdownMeta {
   step2: number;
   badgeBg: string;
   cardBorder: string;
+  dotBg: string;
 }
 
 const BD_CONFIG: BreakdownMeta[] = [
   {
     key: "noDisc",
-    label: "NO/DISC",
-    sublabel: "Material/Disc shortage",
+    label: DOWNTIME_PALETTE.noDisc.shortLabel,
+    sublabel: DOWNTIME_PALETTE.noDisc.sublabel,
     step1: 5,
     step2: 15,
-    badgeBg: "bg-amber-100 text-amber-800 border-amber-200",
-    cardBorder: "border-amber-200/80 hover:border-amber-400",
+    badgeBg: DOWNTIME_PALETTE.noDisc.pillClass,
+    cardBorder: DOWNTIME_PALETTE.noDisc.cardBorderClass,
+    dotBg: DOWNTIME_PALETTE.noDisc.dotBgClass,
   },
   {
     key: "change",
-    label: "CHANGE",
-    sublabel: "Tool insert/Job setup",
+    label: DOWNTIME_PALETTE.change.shortLabel,
+    sublabel: DOWNTIME_PALETTE.change.sublabel,
     step1: 10,
     step2: 20,
-    badgeBg: "bg-sky-100 text-sky-800 border-sky-200",
-    cardBorder: "border-sky-200/80 hover:border-sky-400",
+    badgeBg: DOWNTIME_PALETTE.change.pillClass,
+    cardBorder: DOWNTIME_PALETTE.change.cardBorderClass,
+    dotBg: DOWNTIME_PALETTE.change.dotBgClass,
   },
   {
     key: "power",
-    label: "POWER",
-    sublabel: "Power outage/Trip",
+    label: DOWNTIME_PALETTE.power.shortLabel,
+    sublabel: DOWNTIME_PALETTE.power.sublabel,
     step1: 15,
     step2: 30,
-    badgeBg: "bg-rose-100 text-rose-800 border-rose-200",
-    cardBorder: "border-rose-200/80 hover:border-rose-400",
+    badgeBg: DOWNTIME_PALETTE.power.pillClass,
+    cardBorder: DOWNTIME_PALETTE.power.cardBorderClass,
+    dotBg: DOWNTIME_PALETTE.power.dotBgClass,
   },
   {
     key: "operator",
-    label: "OPERATOR",
-    sublabel: "Unattended/Delay",
+    label: DOWNTIME_PALETTE.operator.shortLabel,
+    sublabel: DOWNTIME_PALETTE.operator.sublabel,
     step1: 5,
     step2: 15,
-    badgeBg: "bg-purple-100 text-purple-800 border-purple-200",
-    cardBorder: "border-purple-200/80 hover:border-purple-400",
+    badgeBg: DOWNTIME_PALETTE.operator.pillClass,
+    cardBorder: DOWNTIME_PALETTE.operator.cardBorderClass,
+    dotBg: DOWNTIME_PALETTE.operator.dotBgClass,
   },
   {
     key: "machineBreakdown",
-    label: "BREAK DOWN",
-    sublabel: "Machine/Mech fault",
+    label: DOWNTIME_PALETTE.machineBreakdown.shortLabel,
+    sublabel: DOWNTIME_PALETTE.machineBreakdown.sublabel,
     step1: 15,
     step2: 30,
-    badgeBg: "bg-orange-100 text-orange-800 border-orange-200",
-    cardBorder: "border-orange-200/80 hover:border-orange-400",
+    badgeBg: DOWNTIME_PALETTE.machineBreakdown.pillClass,
+    cardBorder: DOWNTIME_PALETTE.machineBreakdown.cardBorderClass,
+    dotBg: DOWNTIME_PALETTE.machineBreakdown.dotBgClass,
   },
   {
     key: "fixProgSettings",
-    label: "FIX/PROG",
-    sublabel: "Fixture/Program setting",
+    label: DOWNTIME_PALETTE.fixProgSettings.shortLabel,
+    sublabel: DOWNTIME_PALETTE.fixProgSettings.sublabel,
     step1: 5,
     step2: 15,
-    badgeBg: "bg-indigo-100 text-indigo-800 border-indigo-200",
-    cardBorder: "border-indigo-200/80 hover:border-indigo-400",
+    badgeBg: DOWNTIME_PALETTE.fixProgSettings.pillClass,
+    cardBorder: DOWNTIME_PALETTE.fixProgSettings.cardBorderClass,
+    dotBg: DOWNTIME_PALETTE.fixProgSettings.dotBgClass,
   },
   {
     key: "miscellaneous",
-    label: "MISC.",
-    sublabel: "Other/Misc downtime",
+    label: DOWNTIME_PALETTE.miscellaneous.shortLabel,
+    sublabel: DOWNTIME_PALETTE.miscellaneous.sublabel,
     step1: 5,
     step2: 15,
-    badgeBg: "bg-teal-100 text-teal-800 border-teal-200",
-    cardBorder: "border-teal-200/80 hover:border-teal-400",
+    badgeBg: DOWNTIME_PALETTE.miscellaneous.pillClass,
+    cardBorder: DOWNTIME_PALETTE.miscellaneous.cardBorderClass,
+    dotBg: DOWNTIME_PALETTE.miscellaneous.dotBgClass,
   },
 ];
 
@@ -2091,7 +2095,7 @@ export function OperatorKiosk({
                   Prod: <strong className="text-emerald-400">{timeBalance.productionMinutes}m</strong>
                 </span>
                 <span>
-                  BD: <strong className="text-amber-400">{timeBalance.loggedBreakdownMinutes}m</strong>
+                  BD: <strong className={TOTAL_DOWNTIME_THEME.textDarkClass}>{timeBalance.loggedBreakdownMinutes}m</strong>
                 </span>
                 <span>
                   Total:{" "}
@@ -2117,7 +2121,7 @@ export function OperatorKiosk({
                 />
                 <div
                   style={{ width: `${bdPct}%` }}
-                  className="bg-amber-400 h-full"
+                  className={`${TOTAL_DOWNTIME_THEME.dotBgClass} h-full`}
                   title={`Breakdown: ${timeBalance.loggedBreakdownMinutes}m`}
                 />
               </div>
@@ -2586,7 +2590,7 @@ export function OperatorKiosk({
                 Prod: <strong className="text-slate-900">{runProdMins}m</strong>
               </span>
               <span>
-                BD: <strong className="text-amber-800">{totalBreakdown}m</strong>
+                BD: <strong className={TOTAL_DOWNTIME_THEME.textClass}>{totalBreakdown}m</strong>
               </span>
               <span>
                 Run Total: <strong className="text-slate-900">{runTotalMins}m</strong>
@@ -2633,13 +2637,13 @@ export function OperatorKiosk({
             {/* Header Strip with Unaccounted Time status */}
             <div className="flex items-center justify-between text-xs font-bold text-slate-800 border-b border-slate-100 pb-1.5 flex-wrap gap-1">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                <span className={`w-2 h-2 rounded-full ${TOTAL_DOWNTIME_THEME.dotBgClass}`} />
                 <span>Breakdown & Downtime Minutes</span>
               </span>
 
               <div className="flex items-center gap-2 font-mono text-[11px]">
                 <span className="text-slate-500">
-                  Run BD: <strong className="text-amber-800">{totalBreakdown}m</strong>
+                  Run BD: <strong className={TOTAL_DOWNTIME_THEME.textClass}>{totalBreakdown}m</strong>
                 </span>
 
                 {timeBalance.isBalanced ? (
@@ -2685,8 +2689,9 @@ export function OperatorKiosk({
                   >
                     {/* Top Row: Label & % Pill */}
                     <div className="flex items-center justify-between gap-1 mb-1">
-                      <span className="text-[11px] font-bold text-slate-800 truncate" title={cfg.sublabel}>
-                        {cfg.label}
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-800 truncate" title={cfg.sublabel}>
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${cfg.dotBg}`} />
+                        <span className="truncate">{cfg.label}</span>
                       </span>
                       <span
                         className={`text-[9px] font-bold font-mono px-1 py-0.2 rounded border ${cfg.badgeBg}`}

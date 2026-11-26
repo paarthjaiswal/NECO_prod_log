@@ -28,6 +28,11 @@ import {
 } from "@/services/analyticsEngine";
 import { exportMachineDetailExcel } from "@/services/excelExport";
 import { useFeedback } from "@/context/FeedbackContext";
+import {
+  BD_KEYS,
+  DOWNTIME_PALETTE,
+  TOTAL_DOWNTIME_THEME,
+} from "@/services/downtimePalette";
 
 interface MachineAnalyticsViewProps {
   machineId: string;
@@ -466,7 +471,7 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500 font-sans">Downtime:</span>
-              <span className="font-bold text-rose-600">{overallMetrics.downtimeMinutes} m</span>
+              <span className={`font-bold ${TOTAL_DOWNTIME_THEME.textClass}`}>{overallMetrics.downtimeMinutes} m</span>
             </div>
           </div>
         </div>
@@ -535,101 +540,49 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
       <div className="bg-white p-3.5 rounded-lg border border-slate-200 shadow-2xs space-y-2">
         <div className="flex items-center justify-between text-xs">
           <span className="font-bold text-slate-900 flex items-center gap-1.5">
-            <Wrench className="w-3.5 h-3.5 text-rose-600" />
+            <Wrench className={`w-3.5 h-3.5 ${TOTAL_DOWNTIME_THEME.textClass}`} />
             <span>Machine Downtime Breakdown (7 Categories)</span>
           </span>
           <span className="font-mono text-slate-600 font-bold">
-            Total: <span className="text-rose-600">{overallMetrics.downtimeMinutes} mins</span>
+            Total: <span className={TOTAL_DOWNTIME_THEME.textClass}>{overallMetrics.downtimeMinutes} mins</span>
           </span>
         </div>
 
         {overallMetrics.downtimeMinutes > 0 && (
           <div className="w-full h-3 rounded-full overflow-hidden flex bg-slate-100">
-            {overallMetrics.breakdownTotals.noDisc > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.noDisc / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-slate-500 h-full"
-                title={`No Disc: ${overallMetrics.breakdownTotals.noDisc}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.change > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.change / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-sky-500 h-full"
-                title={`Change: ${overallMetrics.breakdownTotals.change}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.power > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.power / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-amber-500 h-full"
-                title={`Power: ${overallMetrics.breakdownTotals.power}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.operator > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.operator / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-purple-500 h-full"
-                title={`Operator: ${overallMetrics.breakdownTotals.operator}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.machineBreakdown > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.machineBreakdown / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-rose-500 h-full"
-                title={`Break Down: ${overallMetrics.breakdownTotals.machineBreakdown}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.fixProgSettings > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.fixProgSettings / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-orange-500 h-full"
-                title={`Fix / Prog: ${overallMetrics.breakdownTotals.fixProgSettings}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.miscellaneous > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.miscellaneous / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-teal-500 h-full"
-                title={`Misc: ${overallMetrics.breakdownTotals.miscellaneous}m`}
-              />
-            )}
+            {BD_KEYS.map((k) => {
+              const val = overallMetrics.breakdownTotals[k];
+              if (val <= 0) return null;
+              return (
+                <div
+                  key={k}
+                  style={{
+                    width: `${(val / overallMetrics.downtimeMinutes) * 100}%`,
+                  }}
+                  className={`${DOWNTIME_PALETTE[k].barBgClass} h-full`}
+                  title={`${DOWNTIME_PALETTE[k].shortLabel}: ${val}m`}
+                />
+              );
+            })}
           </div>
         )}
 
         {/* Category Chips */}
         <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-1.5 pt-1">
-          {[
-            { label: "NO/DISC", val: overallMetrics.breakdownTotals.noDisc, color: "text-slate-700 bg-slate-50" },
-            { label: "CHANGE", val: overallMetrics.breakdownTotals.change, color: "text-sky-700 bg-sky-50" },
-            { label: "POWER", val: overallMetrics.breakdownTotals.power, color: "text-amber-700 bg-amber-50" },
-            { label: "OPERATOR", val: overallMetrics.breakdownTotals.operator, color: "text-purple-700 bg-purple-50" },
-            { label: "BREAK DOWN", val: overallMetrics.breakdownTotals.machineBreakdown, color: "text-rose-700 bg-rose-50" },
-            { label: "FIX/PROG", val: overallMetrics.breakdownTotals.fixProgSettings, color: "text-orange-700 bg-orange-50" },
-            { label: "MISC.", val: overallMetrics.breakdownTotals.miscellaneous, color: "text-teal-700 bg-teal-50" },
-          ].map((cat) => {
+          {BD_KEYS.map((k) => {
+            const theme = DOWNTIME_PALETTE[k];
+            const val = overallMetrics.breakdownTotals[k];
             const pct =
               overallMetrics.downtimeMinutes > 0
-                ? Math.round((cat.val / overallMetrics.downtimeMinutes) * 100)
+                ? Math.round((val / overallMetrics.downtimeMinutes) * 100)
                 : 0;
             return (
-              <div key={cat.label} className={`p-1.5 rounded border border-slate-200 text-center ${cat.color}`}>
-                <div className="text-[10px] font-bold uppercase truncate">{cat.label}</div>
-                <div className="text-xs font-mono font-bold mt-0.5">{cat.val} m</div>
+              <div key={k} className={`p-1.5 rounded border text-center ${theme.chipClass}`}>
+                <div className="text-[10px] font-bold uppercase truncate flex items-center justify-center gap-1">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${theme.dotBgClass}`} />
+                  <span className="truncate">{theme.shortLabel}</span>
+                </div>
+                <div className="text-xs font-mono font-bold mt-0.5">{val} m</div>
                 <div className="text-[10px] text-slate-500 font-mono">{pct}%</div>
               </div>
             );
@@ -746,7 +699,7 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                         <span className="text-slate-400 text-[10px]"> / {op.stdOutput}</span>
                       </td>
                       <td className="px-3 py-2 text-right text-amber-600">{op.rework}</td>
-                      <td className="px-3 py-2 text-right text-rose-600">{op.downtimeMinutes}m</td>
+                      <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>{op.downtimeMinutes}m</td>
                       <td className="px-3 py-2 text-right">
                         <span
                           className={`px-1.5 py-0.5 rounded text-[10px] font-black border ${getOeeBadgeClass(
@@ -820,7 +773,7 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                     <td className="px-3 py-2 text-right font-bold text-slate-950">{op.actualOutput}</td>
                     <td className="px-3 py-2 text-right text-amber-600">{op.rework}</td>
                     <td className="px-3 py-2 text-right font-bold text-emerald-700">{op.goodOutput}</td>
-                    <td className="px-3 py-2 text-right text-rose-600">{op.downtimeMinutes}m</td>
+                    <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>{op.downtimeMinutes}m</td>
                     <td className="px-3 py-2 text-right text-slate-700">{op.availabilityPct}%</td>
                     <td className="px-3 py-2 text-right text-slate-700">{op.qualityPct}%</td>
                     <td className="px-3 py-2 text-right font-black">
@@ -1013,7 +966,7 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                         {/* 6. BD Mins */}
                         <td className="px-3 py-2 text-right">
                           {d.downtimeMinutes > 0 ? (
-                            <span className="text-rose-600 font-bold">{d.downtimeMinutes}m</span>
+                            <span className={`font-bold ${TOTAL_DOWNTIME_THEME.textClass}`}>{d.downtimeMinutes}m</span>
                           ) : (
                             <span className="text-slate-400">0m</span>
                           )}
@@ -1096,7 +1049,7 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                       <td className="px-3 py-2 text-right text-slate-600">{row.stdOutput}</td>
                       <td className="px-3 py-2 text-right font-bold text-slate-950">{row.actualOutput}</td>
                       <td className="px-3 py-2 text-right text-amber-600">{row.rework}</td>
-                      <td className="px-3 py-2 text-right text-rose-600">{row.totalBdMinutes}m</td>
+                      <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>{row.totalBdMinutes}m</td>
                       <td className="px-3 py-2 text-right">
                         <span
                           className={`px-1.5 py-0.5 rounded text-[10px] font-black border ${getOeeBadgeClass(

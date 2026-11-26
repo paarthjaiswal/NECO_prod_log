@@ -11,12 +11,12 @@ import {
   Filter,
   RotateCcw,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   ExternalLink,
   Cpu,
   ArrowUpDown,
   CheckCircle2,
-  AlertTriangle,
   Target,
   FileText,
 } from "lucide-react";
@@ -32,7 +32,9 @@ import {
   exportItemTraceabilityExcel,
   exportFilteredAnalyticsWorkbook,
   exportActiveAnalyticsTabExcel,
+  exportDailySheetViewExcel,
 } from "@/services/excelExport";
+import { buildCanonicalItemKey } from "@/services/storageService";
 import { getAnalyticsLogs, getAnalyticsItemProduction } from "@/actions/shiftActions";
 import { useFeedback } from "@/context/FeedbackContext";
 import {
@@ -52,6 +54,12 @@ import {
 } from "@/services/analyticsEngine";
 import { MachineAnalyticsView } from "./MachineAnalyticsView";
 import { ShiftSheetPreviewModal } from "./ShiftSheetPreviewModal";
+import { ShiftSheetReadOnlyContent } from "./ShiftSheetReadOnlyContent";
+import {
+  BD_KEYS,
+  DOWNTIME_PALETTE,
+  TOTAL_DOWNTIME_THEME,
+} from "@/services/downtimePalette";
 
 interface AnalyticsPreviewProps {
   rows: MachineShiftRow[];
@@ -63,8 +71,42 @@ interface AnalyticsPreviewProps {
   onOpenShiftSheet?: (date: string, shift: string, line?: string) => void;
 }
 
-type TabType = "product" | "line" | "shift" | "period" | "machine";
+type TabType = "product" | "line" | "shift" | "period" | "machine" | "daily_sheet";
 type PresetKey = "today" | "yesterday" | "thisWeek" | "lastWeek" | "thisMonth" | "custom";
+
+function formatDateWithWeekday(dateStr: string): string {
+  if (!dateStr) return "—";
+  try {
+    const d = new Date(dateStr + "T00:00:00Z");
+    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    return `${dateStr} (${days[d.getUTCDay()] || ""})`;
+  } catch {
+    return dateStr;
+  }
+}
+
+function getShortShiftLabel(shift: string): string {
+  const s = (shift || "").trim();
+  if (/^shift\s*a\b/i.test(s)) return "Shift A";
+  if (/^shift\s*b\b/i.test(s)) return "Shift B";
+  if (/^shift\s*c\b/i.test(s)) return "Shift C";
+  const parenIdx = s.indexOf("(");
+  return parenIdx > 0 ? s.slice(0, parenIdx).trim() : s;
+}
+
+function compareShiftsCanonicallyLocal(a: string, b: string): number {
+  const rank = (sh: string) => {
+    const s = (sh || "").trim().toLowerCase();
+    if (/^shift\s*a\b/.test(s)) return 1;
+    if (/^shift\s*b\b/.test(s)) return 2;
+    if (/^shift\s*c\b/.test(s)) return 3;
+    return 4;
+  };
+  const rA = rank(a);
+  const rB = rank(b);
+  if (rA !== rB) return rA - rB;
+  return a.localeCompare(b);
+}
 
 function getLocalDateString(d: Date): string {
   const year = d.getFullYear();
@@ -549,6 +591,309 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     return groupByMachine(filteredRows).sort(machineComparator);
   }, [filteredRows, machineComparator]);
 
+  // --------------------------------------------------------------------------
+  // TAB 6: DAILY SHEET TAB STATE, FACETS & FILTERING (Zero DB refetch)
+  // --------------------------------------------------------------------------
+  const availableDailySheetDates = useMemo(() => {
+    const dateSet = new Set<string>();
+    for (const r of enrichedAllRows) {
+      if (r.date) dateSet.add(r.date);
+    }
+    for (const p of historicalItemProduction) {
+      if (p.date) dateSet.add(p.date);
+    }
+    return Array.from(dateSet).sort((a, b) => b.localeCompare(a));
+  }, [enrichedAllRows, historicalItemProduction]);
+
+  const [dsDate, setDsDate] = useState<string>("");
+  const [dsLine, setDsLine] = useState<string>("all");
+  const [dsShift, setDsShift] = useState<string>("all");
+  const [dsItemKey, setDsItemKey] = useState<string>("all");
+  const [dsMachineId, setDsMachineId] = useState<string>("all");
+  const [dsOperator, setDsOperator] = useState<string>("all");
+
+  // Snap dsDate cleanly when top date range changes
+  useEffect(() => {
+    if (availableDailySheetDates.length === 0) {
+      if (dsDate !== "") setDsDate("");
+    } else if (!dsDate || !availableDailySheetDates.includes(dsDate)) {
+      setDsDate(availableDailySheetDates[0]);
+    }
+  }, [availableDailySheetDates, dsDate]);
+
+  // Canonical item key resolver across masterData & shift_item_production
+  const dsItemResolver = useMemo(() => {
+    const idMap = new Map<string, { key: string; code: string; name: string }>();
+    const nameMap = new Map<string, { key: string; code: string; name: string }>();
+    const codeMap = new Map<string, { key: string; code: string; name: string }>();
+
+    for (const it of masterData?.items || []) {
+      const code = (it.itemCode || "").trim();
+      const name = (it.itemName || "").trim();
+      const key = buildCanonicalItemKey(code, name);
+      if (!key) continue;
+      const meta = { key, code, name: name || code };
+      if (it.id) idMap.set(it.id.trim().toLowerCase(), meta);
+      if (name) nameMap.set(name.toLowerCase(), meta);
+      if (code) codeMap.set(code.toLowerCase(), meta);
+    }
+    for (const p of historicalItemProduction) {
+      const code = (p.itemCode || "").trim();
+      const name = (p.itemName || "").trim();
+      const key = (p.itemKey || buildCanonicalItemKey(code, name)).trim().toLowerCase();
+      if (!key) continue;
+      const meta = { key, code, name: name || code || key };
+      if (p.itemId && !idMap.has(p.itemId.trim().toLowerCase())) {
+        idMap.set(p.itemId.trim().toLowerCase(), meta);
+      }
+      if (name && !nameMap.has(name.toLowerCase())) {
+        nameMap.set(name.toLowerCase(), meta);
+      }
+      if (code && !codeMap.has(code.toLowerCase())) {
+        codeMap.set(code.toLowerCase(), meta);
+      }
+    }
+
+    return (rawId?: string | null, rawName?: string | null, rawCode?: string | null) => {
+      const nId = (rawId || "").trim().toLowerCase();
+      const nName = (rawName || "").trim().toLowerCase();
+      const nCode = (rawCode || "").trim().toLowerCase();
+      const matched =
+        (nCode && codeMap.get(nCode)) ||
+        (nId && (idMap.get(nId) || codeMap.get(nId))) ||
+        (nName && nameMap.get(nName));
+      if (matched) return matched;
+      const key = buildCanonicalItemKey(rawCode, rawName) || buildCanonicalItemKey(rawId, undefined);
+      if (!key) return null;
+      return {
+        key,
+        code: (rawCode || "").trim(),
+        name: (rawName || rawCode || rawId || "").trim() || key,
+      };
+    };
+  }, [masterData?.items, historicalItemProduction]);
+
+  // Sync top-bar filters into Daily Sheet selectors when top-bar filters change
+  useEffect(() => {
+    setDsLine(filterLine !== "all" ? filterLine : "all");
+  }, [filterLine]);
+
+  useEffect(() => {
+    setDsShift(filterShift !== "all" ? filterShift : "all");
+  }, [filterShift]);
+
+  useEffect(() => {
+    if (filterProduct === "all") {
+      setDsItemKey("all");
+    } else {
+      const resolved = dsItemResolver(filterProduct, filterProduct, filterProduct);
+      setDsItemKey(resolved ? resolved.key : filterProduct.toLowerCase());
+    }
+  }, [filterProduct, dsItemResolver]);
+
+  useEffect(() => {
+    setDsMachineId(filterMachine !== "all" ? filterMachine : "all");
+  }, [filterMachine]);
+
+  useEffect(() => {
+    setDsOperator(filterOperator !== "all" ? filterOperator : "all");
+  }, [filterOperator]);
+
+  // Dynamic options derived from the selected date
+  const dsDateLogs = useMemo(() => {
+    if (!dsDate) return [];
+    return enrichedAllRows.filter((r) => (r.date || "") === dsDate);
+  }, [enrichedAllRows, dsDate]);
+
+  const dsDateProd = useMemo(() => {
+    if (!dsDate) return [];
+    return historicalItemProduction.filter((p) => (p.date || "") === dsDate);
+  }, [historicalItemProduction, dsDate]);
+
+  const dsOptions = useMemo(() => {
+    const lineSet = new Set<string>();
+    const shiftSet = new Set<string>();
+    const itemMap = new Map<string, { key: string; code: string; name: string }>();
+    const machineMap = new Map<string, { id: string; name: string }>();
+    const operatorSet = new Set<string>();
+
+    for (const r of dsDateLogs) {
+      if (r.line) lineSet.add(r.line);
+      if (r.shift) shiftSet.add(r.shift);
+      const itemMeta = dsItemResolver(r.itemId, r.itemName, undefined);
+      if (itemMeta && !itemMap.has(itemMeta.key)) {
+        itemMap.set(itemMeta.key, itemMeta);
+      }
+      const lineMatches =
+        dsLine === "all" || (r.line || "").toLowerCase() === dsLine.toLowerCase();
+      if (lineMatches) {
+        const mId = r.machineId || r.machineName;
+        if (mId && !machineMap.has(mId)) {
+          machineMap.set(mId, { id: mId, name: r.machineName || mId });
+        }
+        const op = (r.operatorName || "").trim();
+        if (op) operatorSet.add(op);
+      }
+    }
+
+    for (const p of dsDateProd) {
+      if (p.line) lineSet.add(p.line);
+      if (p.shift) shiftSet.add(p.shift);
+      const itemMeta = dsItemResolver(p.itemId, p.itemName, p.itemCode);
+      if (itemMeta && !itemMap.has(itemMeta.key)) {
+        itemMap.set(itemMeta.key, itemMeta);
+      }
+    }
+
+    // Preserve currently selected filter values so dropdowns never trap the user
+    if (dsLine !== "all") lineSet.add(dsLine);
+    if (dsShift !== "all") shiftSet.add(dsShift);
+    if (dsItemKey !== "all" && !itemMap.has(dsItemKey)) {
+      itemMap.set(dsItemKey, { key: dsItemKey, code: "", name: dsItemKey });
+    }
+    if (dsMachineId !== "all" && !machineMap.has(dsMachineId)) {
+      const mMatch = availableFacets.machines.find((m) => m.id === dsMachineId);
+      machineMap.set(dsMachineId, { id: dsMachineId, name: mMatch?.name || dsMachineId });
+    }
+    if (dsOperator !== "all") operatorSet.add(dsOperator);
+
+    return {
+      lines: Array.from(lineSet).sort((a, b) => a.localeCompare(b)),
+      shifts: Array.from(shiftSet).sort(compareShiftsCanonicallyLocal),
+      items: Array.from(itemMap.values()).sort((a, b) => a.name.localeCompare(b.name)),
+      machines: Array.from(machineMap.values()).sort((a, b) => a.name.localeCompare(b.name)),
+      operators: Array.from(operatorSet).sort((a, b) => a.localeCompare(b)),
+    };
+  }, [
+    dsDateLogs,
+    dsDateProd,
+    dsItemResolver,
+    dsLine,
+    dsShift,
+    dsItemKey,
+    dsMachineId,
+    dsOperator,
+    availableFacets.machines,
+  ]);
+
+  const dailySheetRows = useMemo(() => {
+    return dsDateLogs.filter((r) => {
+      if (dsLine !== "all" && (r.line || "").toLowerCase() !== dsLine.toLowerCase()) {
+        return false;
+      }
+      if (dsShift !== "all" && (r.shift || "").toLowerCase() !== dsShift.toLowerCase()) {
+        return false;
+      }
+      if (dsItemKey !== "all") {
+        const meta = dsItemResolver(r.itemId, r.itemName, undefined);
+        if (!meta || meta.key !== dsItemKey) return false;
+      }
+      if (dsMachineId !== "all") {
+        const target = dsMachineId.toLowerCase();
+        const matchId = (r.machineId || "").toLowerCase() === target;
+        const matchName = (r.machineName || "").toLowerCase() === target;
+        if (!matchId && !matchName) return false;
+      }
+      if (
+        dsOperator !== "all" &&
+        (r.operatorName || "").trim().toLowerCase() !== dsOperator.toLowerCase()
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [dsDateLogs, dsLine, dsShift, dsItemKey, dsMachineId, dsOperator, dsItemResolver]);
+
+  const dailySheetItemProdRows = useMemo(() => {
+    const base = dsDateProd.filter((p) => {
+      if (dsLine !== "all" && (p.line || "").toLowerCase() !== dsLine.toLowerCase()) {
+        return false;
+      }
+      if (dsShift !== "all" && (p.shift || "").toLowerCase() !== dsShift.toLowerCase()) {
+        return false;
+      }
+      if (dsItemKey !== "all") {
+        const meta = dsItemResolver(p.itemId, p.itemName, p.itemCode);
+        if (!meta || meta.key !== dsItemKey) return false;
+      }
+      return true;
+    });
+
+    // If granular Machine or Operator filter is active, scope Pre-QC rows to (shift, line, itemKey) tuples touched
+    if (dsMachineId !== "all" || dsOperator !== "all") {
+      const touched = new Set<string>();
+      for (const r of dailySheetRows) {
+        const meta = dsItemResolver(r.itemId, r.itemName, undefined);
+        if (!meta) continue;
+        touched.add(
+          `${(r.shift || "").toLowerCase()}__${(r.line || "").toLowerCase()}__${meta.key}`
+        );
+      }
+      return base.filter((p) => {
+        const meta = dsItemResolver(p.itemId, p.itemName, p.itemCode);
+        if (!meta) return false;
+        return touched.has(
+          `${(p.shift || "").toLowerCase()}__${(p.line || "").toLowerCase()}__${meta.key}`
+        );
+      });
+    }
+
+    return base;
+  }, [dsDateProd, dsLine, dsShift, dsItemKey, dsMachineId, dsOperator, dsItemResolver, dailySheetRows]);
+
+  const handleExportDailySheetExcel = useCallback(() => {
+    try {
+      if (!dsDate || (dailySheetRows.length === 0 && dailySheetItemProdRows.length === 0)) {
+        notifyError(
+          "No Daily Sheet Data",
+          "No shift logs or Pre-QC production entries match the current Daily Sheet filters."
+        );
+        return;
+      }
+      const selectedItemObj = dsOptions.items.find((it) => it.key === dsItemKey);
+      const selectedMachObj = dsOptions.machines.find((m) => m.id === dsMachineId);
+      exportDailySheetViewExcel({
+        date: dsDate,
+        line: dsLine,
+        shift: dsShift,
+        itemLabel:
+          dsItemKey === "all"
+            ? "All Items"
+            : selectedItemObj
+            ? selectedItemObj.code &&
+              selectedItemObj.code.toLowerCase() !== selectedItemObj.name.toLowerCase()
+              ? `${selectedItemObj.name} (${selectedItemObj.code})`
+              : selectedItemObj.name
+            : dsItemKey,
+        machineLabel:
+          dsMachineId === "all" ? "All Machines" : selectedMachObj?.name || dsMachineId,
+        operatorLabel: dsOperator === "all" ? "All Operators" : dsOperator,
+        rows: dailySheetRows,
+        itemProdRows: dailySheetItemProdRows,
+      });
+      notifySuccess(
+        "Daily Sheet Exported",
+        `Exported Daily Shift Sheet for ${dsDate} (${dsLine === "all" ? "All Lines" : dsLine}).`
+      );
+    } catch (err) {
+      console.error("Daily sheet Excel export failed:", err);
+      notifyError("Export Failed", "Failed to export Daily Sheet Excel workbook.");
+    }
+  }, [
+    dsDate,
+    dsLine,
+    dsShift,
+    dsItemKey,
+    dsMachineId,
+    dsOperator,
+    dsOptions.items,
+    dsOptions.machines,
+    dailySheetRows,
+    dailySheetItemProdRows,
+    notifySuccess,
+    notifyError,
+  ]);
+
   const toggleExpandProduct = (key: string) => {
     setExpandedProducts((prev) => {
       const next = new Set(prev);
@@ -662,6 +1007,10 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   const handleExportActiveTab = useCallback(
     (tabKey: TabType) => {
+      if (tabKey === "daily_sheet") {
+        handleExportDailySheetExcel();
+        return;
+      }
       try {
         if (filteredRows.length === 0) {
           notifyError("No Data to Export", "The current filters returned 0 records. Adjust filters to export.");
@@ -679,7 +1028,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           groupedMachines: groupedMachineMatrix,
         });
 
-        const tabNames: Record<TabType, string> = {
+        const tabNames: Record<Exclude<TabType, "daily_sheet">, string> = {
           product: "Product Traceability Matrix",
           line: "Line Performance Matrix",
           shift: "Shift Efficiency Matrix",
@@ -700,6 +1049,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       }
     },
     [
+      handleExportDailySheetExcel,
       filteredRows,
       activeFiltersMeta,
       periodGranularity,
@@ -1057,7 +1407,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500">Total Downtime:</span>
-              <span className="font-mono font-bold text-rose-600">
+              <span className={`font-mono font-bold ${TOTAL_DOWNTIME_THEME.textClass}`}>
                 {overallMetrics.downtimeMinutes.toLocaleString()} m
               </span>
             </div>
@@ -1149,12 +1499,12 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       <div className="bg-white rounded-lg border border-slate-200 p-3 shadow-2xs space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-slate-800 uppercase tracking-wider text-[11px] flex items-center gap-1">
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+            <span className="font-bold text-slate-800 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+              <span className={`w-2 h-2 rounded-full ${TOTAL_DOWNTIME_THEME.dotBgClass}`} />
               <span>7 Breakdown Categories:</span>
             </span>
             <span className="text-slate-500 text-[11px]">
-              Total Downtime: <strong className="text-slate-800">{overallMetrics.downtimeMinutes} mins</strong>
+              Total Downtime: <strong className={`font-mono ${TOTAL_DOWNTIME_THEME.textClass}`}>{overallMetrics.downtimeMinutes} mins</strong>
             </span>
           </div>
 
@@ -1175,93 +1525,41 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
         {/* Stacked CSS Bar */}
         {overallMetrics.downtimeMinutes > 0 && (
-          <div className="w-full h-2 rounded-full overflow-hidden flex bg-slate-100">
-            {overallMetrics.breakdownTotals.noDisc > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.noDisc / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-slate-500 h-full"
-                title={`No Disc: ${overallMetrics.breakdownTotals.noDisc}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.change > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.change / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-sky-500 h-full"
-                title={`Change: ${overallMetrics.breakdownTotals.change}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.power > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.power / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-amber-500 h-full"
-                title={`Power: ${overallMetrics.breakdownTotals.power}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.operator > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.operator / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-purple-500 h-full"
-                title={`Operator: ${overallMetrics.breakdownTotals.operator}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.machineBreakdown > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.machineBreakdown / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-rose-500 h-full"
-                title={`Break Down: ${overallMetrics.breakdownTotals.machineBreakdown}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.fixProgSettings > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.fixProgSettings / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-orange-500 h-full"
-                title={`Fix / Prog: ${overallMetrics.breakdownTotals.fixProgSettings}m`}
-              />
-            )}
-            {overallMetrics.breakdownTotals.miscellaneous > 0 && (
-              <div
-                style={{
-                  width: `${(overallMetrics.breakdownTotals.miscellaneous / overallMetrics.downtimeMinutes) * 100}%`,
-                }}
-                className="bg-teal-500 h-full"
-                title={`Misc: ${overallMetrics.breakdownTotals.miscellaneous}m`}
-              />
-            )}
+          <div className="w-full h-2.5 rounded-full overflow-hidden flex bg-slate-100">
+            {BD_KEYS.map((k) => {
+              const val = overallMetrics.breakdownTotals[k];
+              if (val <= 0) return null;
+              return (
+                <div
+                  key={k}
+                  style={{
+                    width: `${(val / overallMetrics.downtimeMinutes) * 100}%`,
+                  }}
+                  className={`${DOWNTIME_PALETTE[k].barBgClass} h-full`}
+                  title={`${DOWNTIME_PALETTE[k].shortLabel}: ${val}m`}
+                />
+              );
+            })}
           </div>
         )}
 
         {/* Breakdown category chips */}
         <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2 pt-1">
-          {[
-            { label: "NO/DISC", val: overallMetrics.breakdownTotals.noDisc, color: "text-slate-600 bg-slate-50" },
-            { label: "CHANGE", val: overallMetrics.breakdownTotals.change, color: "text-sky-700 bg-sky-50" },
-            { label: "POWER", val: overallMetrics.breakdownTotals.power, color: "text-amber-700 bg-amber-50" },
-            { label: "OPERATOR", val: overallMetrics.breakdownTotals.operator, color: "text-purple-700 bg-purple-50" },
-            { label: "BREAK DOWN", val: overallMetrics.breakdownTotals.machineBreakdown, color: "text-rose-700 bg-rose-50" },
-            { label: "FIX/PROG", val: overallMetrics.breakdownTotals.fixProgSettings, color: "text-orange-700 bg-orange-50" },
-            { label: "MISC.", val: overallMetrics.breakdownTotals.miscellaneous, color: "text-teal-700 bg-teal-50" },
-          ].map((cat) => {
+          {BD_KEYS.map((k) => {
+            const theme = DOWNTIME_PALETTE[k];
+            const val = overallMetrics.breakdownTotals[k];
             const pct =
               overallMetrics.downtimeMinutes > 0
-                ? Math.round((cat.val / overallMetrics.downtimeMinutes) * 100)
+                ? Math.round((val / overallMetrics.downtimeMinutes) * 100)
                 : 0;
             return (
-              <div key={cat.label} className={`p-1.5 rounded border border-slate-200 text-center ${cat.color}`}>
-                <div className="text-[10px] font-bold uppercase truncate">{cat.label}</div>
-                <div className="text-xs font-mono font-bold mt-0.5">{cat.val} m</div>
-                <div className="text-[10px] text-slate-500">{pct}%</div>
+              <div key={k} className={`p-1.5 rounded border text-center ${theme.chipClass}`}>
+                <div className="text-[10px] font-bold uppercase truncate flex items-center justify-center gap-1">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${theme.dotBgClass}`} />
+                  <span className="truncate">{theme.shortLabel}</span>
+                </div>
+                <div className="text-xs font-mono font-bold mt-0.5">{val} m</div>
+                <div className="text-[10px] text-slate-500 font-mono">{pct}%</div>
               </div>
             );
           })}
@@ -1280,6 +1578,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             { id: "shift", label: "By Shift", icon: Clock },
             { id: "period", label: "By Day / Week", icon: Calendar },
             { id: "machine", label: "By Machine", icon: Cpu },
+            { id: "daily_sheet", label: "Daily Sheet", icon: FileText },
           ].map((t) => {
             const Icon = t.icon;
             const isActive = activeTab === t.id;
@@ -1595,7 +1894,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                           </td>
 
                                           {/* Downtime (m) */}
-                                          <td className="px-3 py-2 text-right font-mono text-rose-600">
+                                          <td className={`px-3 py-2 text-right font-mono ${TOTAL_DOWNTIME_THEME.textClass}`}>
                                             {m.downtimeMinutes}m
                                           </td>
 
@@ -1723,7 +2022,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                       <td className="px-3 py-2 text-right font-bold text-slate-900">{m.actualOutput}</td>
                                       <td className="px-3 py-2 text-right text-amber-600">{m.rework}</td>
                                       <td className="px-3 py-2 text-right text-emerald-700 font-bold">{m.goodOutput}</td>
-                                      <td className="px-3 py-2 text-right text-rose-600">{m.breakdownMinutes}m</td>
+                                      <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>{m.breakdownMinutes}m</td>
                                       <td className="px-3 py-2 text-right text-slate-700">{m.metrics.availabilityPct}%</td>
                                       <td className="px-3 py-2 text-right text-slate-700">{m.metrics.qualityPct}%</td>
                                       <td className="px-3 py-2 text-right font-black">
@@ -1785,9 +2084,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               </button>
             </div>
 
-            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+            <div className="overflow-x-auto overflow-y-auto max-h-[68vh] border border-slate-200 rounded-lg">
               <table className="w-full text-xs text-left">
-                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold sticky top-0 z-20 shadow-xs">
                   <tr>
                     <th className="px-3 py-2.5">Line Name</th>
                     <th className="px-3 py-2.5 text-center">Machines (Perm / Temp)</th>
@@ -1820,7 +2119,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                         {(l.preQcProduction ?? l.finishedProduction ?? 0).toLocaleString()}
                       </td>
                       <td className="px-3 py-2 text-right text-amber-600">{l.metrics.totalRework.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right text-rose-600">{l.metrics.downtimeMinutes}m</td>
+                      <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>{l.metrics.downtimeMinutes}m</td>
                       <td className="px-3 py-2 text-right text-slate-700">{l.metrics.availabilityPct}%</td>
                       <td className="px-3 py-2 text-right text-slate-700">{l.metrics.qualityPct}%</td>
                       <td className="px-3 py-2 text-right">
@@ -1885,9 +2184,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               </div>
             </div>
 
-            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+            <div className="overflow-x-auto overflow-y-auto max-h-[68vh] border border-slate-200 rounded-lg">
               <table className="w-full text-xs text-left">
-                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold sticky top-0 z-20 shadow-xs">
                   <tr>
                     <th className="px-3 py-2.5">Shift Name</th>
                     <th className="px-3 py-2.5 text-center">Active Machines</th>
@@ -1938,7 +2237,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                             {(s.preQcProduction ?? s.finishedProduction ?? 0).toLocaleString()}
                           </td>
                           <td className="px-3 py-2 text-right text-amber-600">{s.metrics.totalRework.toLocaleString()}</td>
-                          <td className="px-3 py-2 text-right text-rose-600">{s.metrics.downtimeMinutes}m</td>
+                          <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>{s.metrics.downtimeMinutes}m</td>
                           <td className="px-3 py-2 text-right text-slate-700">{s.metrics.availabilityPct}%</td>
                           <td className="px-3 py-2 text-right text-slate-700">{s.metrics.qualityPct}%</td>
                           <td className="px-3 py-2 text-right">
@@ -2038,7 +2337,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                                 <span className="text-slate-400">0</span>
                                               )}
                                             </td>
-                                            <td className="px-3 py-2 text-right font-mono tabular-nums text-rose-600">
+                                            <td className={`px-3 py-2 text-right font-mono tabular-nums ${TOTAL_DOWNTIME_THEME.textClass}`}>
                                               {entry.downtimeMinutes}m
                                             </td>
                                             <td className="px-3 py-2 text-right font-mono tabular-nums text-slate-700">
@@ -2180,9 +2479,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               </div>
             </div>
 
-            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+            <div className="overflow-x-auto overflow-y-auto max-h-[68vh] border border-slate-200 rounded-lg">
               <table className="w-full text-xs text-left">
-                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold sticky top-0 z-20 shadow-xs">
                   <tr>
                     <th className="px-3 py-2.5">
                       {periodGranularity === "day" ? "Date" : "ISO Week Range"}
@@ -2259,7 +2558,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                             {(p.preQcProduction ?? p.finishedProduction ?? 0).toLocaleString()}
                           </td>
                           <td className="px-3 py-2 text-right text-amber-600">{p.metrics.totalRework.toLocaleString()}</td>
-                          <td className="px-3 py-2 text-right text-rose-600">{p.metrics.downtimeMinutes}m</td>
+                          <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>{p.metrics.downtimeMinutes}m</td>
                           <td className="px-3 py-2 text-right text-slate-700">{p.metrics.availabilityPct}%</td>
                           <td className="px-3 py-2 text-right text-slate-700">{p.metrics.qualityPct}%</td>
                           <td className="px-3 py-2 text-right">
@@ -2458,7 +2757,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                                 )}
                                               </td>
 
-                                              <td className="px-3 py-2 text-right font-mono tabular-nums text-rose-600">
+                                              <td className={`px-3 py-2 text-right font-mono tabular-nums ${TOTAL_DOWNTIME_THEME.textClass}`}>
                                                 {shiftRow.machineRunsCount > 0
                                                   ? `${shiftRow.downtimeMinutes}m`
                                                   : "—"}
@@ -2615,9 +2914,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               </div>
             </div>
 
-            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+            <div className="overflow-x-auto overflow-y-auto max-h-[68vh] border border-slate-200 rounded-lg">
               <table className="w-full text-xs text-left">
-                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold">
+                <thead className="bg-slate-900 text-slate-100 uppercase text-[10px] font-semibold sticky top-0 z-20 shadow-xs">
                   <tr>
                     <th className="px-3 py-2.5">Machine</th>
                     <th className="px-3 py-2.5">Line</th>
@@ -2679,7 +2978,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                             <td className="px-3 py-2 text-right text-amber-700">
                               {group.metrics.totalRework.toLocaleString()}
                             </td>
-                            <td className="px-3 py-2 text-right text-rose-700">
+                            <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>
                               {group.metrics.downtimeMinutes}m
                             </td>
                             <td className="px-3 py-2 text-right text-slate-700">
@@ -2750,7 +3049,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                             <td className="px-3 py-2 text-right text-amber-600">
                               {m.metrics.totalRework.toLocaleString()}
                             </td>
-                            <td className="px-3 py-2 text-right text-rose-600">
+                            <td className={`px-3 py-2 text-right ${TOTAL_DOWNTIME_THEME.textClass}`}>
                               {m.metrics.downtimeMinutes}m
                             </td>
                             <td className="px-3 py-2 text-right text-slate-700">
@@ -2790,6 +3089,272 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
             </div>
           </div>
         )}
+
+        {/* TAB 6: DAILY SHEET (INLINE SHIFT SHEET VIEW) */}
+        {activeTab === "daily_sheet" && (() => {
+          const currentDateIdx = availableDailySheetDates.indexOf(dsDate);
+          const hasPrevDate =
+            currentDateIdx >= 0 && currentDateIdx < availableDailySheetDates.length - 1;
+          const hasNextDate = currentDateIdx > 0;
+          const openTargetLine =
+            dsLine !== "all"
+              ? dsLine
+              : dailySheetRows[0]?.line || dsOptions.lines[0] || "";
+          const openTargetShift =
+            dsShift !== "all"
+              ? dsShift
+              : dailySheetRows[0]?.shift || dsOptions.shifts[0] || "";
+          const hasGranularFilter =
+            dsItemKey !== "all" ||
+            dsMachineId !== "all" ||
+            dsOperator !== "all" ||
+            dsShift !== "all";
+
+          return (
+            <div className="p-4 space-y-4">
+              {/* Row 1 & Row 2 Full-Width Control Bar */}
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2.5">
+                {/* Row 1: Date Navigator, Line Pills, Shift Pills & Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {/* Date Navigator */}
+                    <div className="inline-flex items-center bg-white border border-slate-300 rounded-md shadow-2xs overflow-hidden">
+                      <button
+                        type="button"
+                        disabled={!hasPrevDate}
+                        onClick={() =>
+                          hasPrevDate &&
+                          setDsDate(availableDailySheetDates[currentDateIdx + 1])
+                        }
+                        className="px-2 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed border-r border-slate-200 inline-flex items-center gap-0.5 cursor-pointer"
+                        title="Previous active date"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                        <span>Prev</span>
+                      </button>
+                      <select
+                        value={dsDate}
+                        onChange={(e) => setDsDate(e.target.value)}
+                        disabled={availableDailySheetDates.length === 0}
+                        className="px-2.5 py-1.5 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none cursor-pointer"
+                        aria-label="Select Daily Sheet Date"
+                      >
+                        {availableDailySheetDates.length === 0 ? (
+                          <option value="">No dates in range</option>
+                        ) : (
+                          availableDailySheetDates.map((d) => (
+                            <option key={d} value={d}>
+                              {formatDateWithWeekday(d)}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!hasNextDate}
+                        onClick={() =>
+                          hasNextDate &&
+                          setDsDate(availableDailySheetDates[currentDateIdx - 1])
+                        }
+                        className="px-2 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed border-l border-slate-200 inline-flex items-center gap-0.5 cursor-pointer"
+                        title="Next active date"
+                      >
+                        <span>Next</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Line Pills */}
+                    <div className="inline-flex items-center gap-1 bg-slate-200/70 p-0.5 rounded-md border border-slate-200 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => setDsLine("all")}
+                        className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                          dsLine === "all"
+                            ? "bg-white text-slate-900 shadow-2xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        All Lines
+                      </button>
+                      {dsOptions.lines.map((line) => (
+                        <button
+                          key={line}
+                          type="button"
+                          onClick={() => setDsLine(line)}
+                          className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                            dsLine.toLowerCase() === line.toLowerCase()
+                              ? "bg-blue-600 text-white shadow-2xs"
+                              : "text-slate-600 hover:text-slate-900 hover:bg-white/60"
+                          }`}
+                        >
+                          {line}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Shift Pills */}
+                    <div className="inline-flex items-center gap-1 bg-slate-200/70 p-0.5 rounded-md border border-slate-200 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => setDsShift("all")}
+                        className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                          dsShift === "all"
+                            ? "bg-white text-slate-900 shadow-2xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        All Shifts
+                      </button>
+                      {dsOptions.shifts.map((shift) => (
+                        <button
+                          key={shift}
+                          type="button"
+                          onClick={() => setDsShift(shift)}
+                          title={shift}
+                          className={`px-2.5 py-1 text-xs font-bold rounded transition-colors cursor-pointer ${
+                            dsShift.toLowerCase() === shift.toLowerCase()
+                              ? "bg-slate-900 text-white shadow-2xs"
+                              : "text-slate-600 hover:text-slate-900 hover:bg-white/60"
+                          }`}
+                        >
+                          {getShortShiftLabel(shift)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Right-Aligned Actions */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {onOpenShiftSheet && dsDate && (
+                      <button
+                        type="button"
+                        disabled={!openTargetShift || !openTargetLine}
+                        onClick={() =>
+                          onOpenShiftSheet(dsDate, openTargetShift, openTargetLine)
+                        }
+                        title={
+                          openTargetShift && openTargetLine
+                            ? `Open editable Daily Shift Sheet for ${dsDate} · ${getShortShiftLabel(
+                                openTargetShift
+                              )} · ${openTargetLine}`
+                            : "Select a date with active shift data"
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-emerald-950 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                      >
+                        <span>Open in Daily Shift Sheet</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={
+                        !dsDate ||
+                        (dailySheetRows.length === 0 && dailySheetItemProdRows.length === 0)
+                      }
+                      onClick={handleExportDailySheetExcel}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-2xs transition-colors cursor-pointer"
+                      title="Export current Daily Sheet selection to styled Excel"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      <span>Export Daily Sheet Excel</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Row 2: Item & Granular Filters */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="font-semibold text-slate-600">Item:</span>
+                      <select
+                        value={dsItemKey}
+                        onChange={(e) => setDsItemKey(e.target.value)}
+                        className="bg-white border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800 max-w-52"
+                      >
+                        <option value="all">All Items</option>
+                        {dsOptions.items.map((it) => (
+                          <option key={it.key} value={it.key}>
+                            {it.code && it.code.toLowerCase() !== it.name.toLowerCase()
+                              ? `${it.name} [${it.code}]`
+                              : it.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="font-semibold text-slate-600">Machine:</span>
+                      <select
+                        value={dsMachineId}
+                        onChange={(e) => setDsMachineId(e.target.value)}
+                        className="bg-white border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800 max-w-48"
+                      >
+                        <option value="all">All Machines</option>
+                        {dsOptions.machines.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="font-semibold text-slate-600">Operator:</span>
+                      <select
+                        value={dsOperator}
+                        onChange={(e) => setDsOperator(e.target.value)}
+                        className="bg-white border border-slate-300 rounded px-2 py-1 text-xs font-semibold text-slate-800 max-w-44"
+                      >
+                        <option value="all">All Operators</option>
+                        {dsOptions.operators.map((op) => (
+                          <option key={op} value={op}>
+                            {op}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {hasGranularFilter && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDsItemKey("all");
+                          setDsMachineId("all");
+                          setDsOperator("all");
+                          setDsShift("all");
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded transition-colors cursor-pointer"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>Reset Sheet Filters</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {(dsMachineId !== "all" || dsOperator !== "all") && (
+                    <span className="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                      Showing filtered machine rows — Pre-QC Shift Production reflects shift-level item totals.
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Full-Width Inline Daily Shift Sheet Table + Pre-QC Card */}
+              <ShiftSheetReadOnlyContent
+                rows={dailySheetRows}
+                itemProdRows={dailySheetItemProdRows}
+                groupByShift={dsShift === "all"}
+                emptyMessage={
+                  dsDate
+                    ? `No machine log rows recorded for ${dsDate} matching the selected sheet filters.`
+                    : "No production logs loaded in the selected date range."
+                }
+                onSelectMachine={(machineId) => handleSelectAnalyticsMachine(machineId)}
+              />
+            </div>
+          );
+        })()}
       </div>
 
       <ShiftSheetPreviewModal
