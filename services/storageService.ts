@@ -32,7 +32,7 @@ export function calculateTotalBreakdown(
 
 /**
  * Single source-of-truth gatekeeper for empty/idle machine rows.
- * Returns true when a row has 0 actual output, 0 rework, 0 breakdown minutes, and no remarks.
+ * Returns true when a row has 0 actual output, 0 rework, 0 breakdown minutes, 0 overtime, and no remarks.
  * Idle or blank rows must NEVER be submitted to public.shift_logs.
  */
 export function isShiftRowEmpty(row: MachineShiftRow | null | undefined): boolean {
@@ -42,6 +42,7 @@ export function isShiftRowEmpty(row: MachineShiftRow | null | undefined): boolea
     (Number(row.actualOutput) || 0) <= 0 &&
     (Number(row.rework) || 0) <= 0 &&
     totalBd <= 0 &&
+    (Number(row.overtimeMinutes) || 0) <= 0 &&
     !(row.remarks || "").trim()
   );
 }
@@ -303,19 +304,45 @@ export interface ShiftTimeBalance {
 }
 
 /**
+ * Resolves effective working minutes for a single machine row: baseShiftMinutes + overtimeMinutes.
+ * Avoids double-counting overtime if `totalWorkingMinutes` already includes it and no explicit base is provided.
+ */
+export function resolveEffectiveWorkingMinutes(
+  baseShiftWorkingMinutes?: number,
+  row?: Pick<
+    MachineShiftRow,
+    "shiftWorkingMinutes" | "totalWorkingMinutes" | "overtimeMinutes"
+  >
+): number {
+  const ot = Math.max(0, Number(row?.overtimeMinutes) || 0);
+  const explicitBase =
+    Number(baseShiftWorkingMinutes) || Number(row?.shiftWorkingMinutes) || 0;
+  if (explicitBase > 0) {
+    return Number((explicitBase + ot).toFixed(2));
+  }
+  const total = Number(row?.totalWorkingMinutes) || 0;
+  return total > 0 ? total : ot;
+}
+
+/**
  * Computes the exact time-accounting balance for a machine row in a shift.
- * Enforces: Total Productive Time (actualOutput * cycleTime) + Total Breakdown Time = Shift Timing.
- * Total time must not exceed shift timing—it must be exactly equal.
+ * Enforces: Total Productive Time (actualOutput * cycleTime) + Total Breakdown Time = Shift Timing (+ Overtime).
+ * Total time must not exceed effective shift timing—it must be exactly equal.
  */
 export function calculateShiftTimeBalance(
   row: Pick<
     MachineShiftRow,
-    "cycleTime" | "actualOutput" | "breakdown" | "totalWorkingMinutes"
+    | "cycleTime"
+    | "actualOutput"
+    | "breakdown"
+    | "totalWorkingMinutes"
+    | "shiftWorkingMinutes"
+    | "overtimeMinutes"
   > & { itemId?: string; operatorName?: string; stdOutput?: number },
   shiftWorkingMinutes?: number
 ): ShiftTimeBalance {
-  const shiftMins =
-    Number(shiftWorkingMinutes) || Number(row.totalWorkingMinutes) || 0;
+  const shiftMins = resolveEffectiveWorkingMinutes(shiftWorkingMinutes, row);
+  const ot = Math.max(0, Number(row.overtimeMinutes) || 0);
   const ct = Number(row.cycleTime) || 0;
   const actual = Number(row.actualOutput) || 0;
   const std = Number(row.stdOutput) || 0;
@@ -327,6 +354,7 @@ export function calculateShiftTimeBalance(
     !row.operatorName &&
     actual === 0 &&
     loggedBreakdown === 0 &&
+    ot === 0 &&
     ct === 0;
 
   if (isUntouched || shiftMins <= 0) {
@@ -456,11 +484,19 @@ export function calculateMachineGroupTimeBalance(
   shiftWorkingMinutes?: number
 ): MachineGroupTimeBalance {
   const machineRows = allRows.filter((r) => r.machineId === machineId);
-  const shiftMins =
+  const totalOt = machineRows.reduce(
+    (sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0),
+    0
+  );
+  const firstRowOt = Math.max(0, Number(machineRows[0]?.overtimeMinutes) || 0);
+  const baseShiftMins =
     Number(shiftWorkingMinutes) ||
     Number(machineRows[0]?.shiftWorkingMinutes) ||
-    Number(machineRows[0]?.totalWorkingMinutes) ||
+    (machineRows[0]?.totalWorkingMinutes
+      ? Math.max(0, Number(machineRows[0].totalWorkingMinutes) - firstRowOt)
+      : 0) ||
     1305;
+  const shiftMins = Number((baseShiftMins + totalOt).toFixed(2));
 
   const rowProductionMinutes: Record<string, number> = {};
   const rowBreakdownMinutes: Record<string, number> = {};
@@ -498,8 +534,9 @@ export function calculateMachineGroupTimeBalance(
   const allUntouched = machineRows.every((r) => {
     const act = Number(r.actualOutput) || 0;
     const ct = Number(r.cycleTime) || 0;
+    const ot = Math.max(0, Number(r.overtimeMinutes) || 0);
     const bd = calculateTotalBreakdown(r.breakdown);
-    return !r.itemId && !r.operatorName && act === 0 && bd === 0 && ct === 0;
+    return !r.itemId && !r.operatorName && act === 0 && bd === 0 && ot === 0 && ct === 0;
   });
 
   if (allUntouched || shiftMins <= 0) {
@@ -674,8 +711,13 @@ export function calculateSplitRowSuggestedStd(
   if (!targetRow) return 0;
 
   const machineRows = allRows.filter((r) => r.machineId === targetRow.machineId);
+  const totalOt = machineRows.reduce(
+    (sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0),
+    0
+  );
+  const effectiveShiftMins = Number(((Number(shiftWorkingMinutes) || 0) + totalOt).toFixed(2));
   if (machineRows.length <= 1) {
-    return Math.floor(shiftWorkingMinutes / newCycleTime);
+    return Math.floor(effectiveShiftMins / newCycleTime);
   }
 
   const otherRuns = machineRows.filter((r) => r.id !== targetRowId);
@@ -688,14 +730,14 @@ export function calculateSplitRowSuggestedStd(
     return sum;
   }, 0);
 
-  const remainingMins = Math.max(0, Number((shiftWorkingMinutes - otherTargetMins).toFixed(2)));
+  const remainingMins = Math.max(0, Number((effectiveShiftMins - otherTargetMins).toFixed(2)));
   return Math.floor(remainingMins / newCycleTime);
 }
 
 /**
- * Proportionally distributes shift working minutes and computes stdOutput for each run
+ * Proportionally distributes shift working minutes (+ overtime) and computes stdOutput for each run
  * of a machine group.
- * - Single run: standard shiftWorkingMinutes / cycleTime
+ * - Single run: standard (baseShiftWorkingMinutes + overtimeMinutes) / cycleTime
  * - Multiple split runs:
  *   - Unlocks stdOutput so users can enter exact split targets.
  *   - NEVER overwrites user-entered stdOutput (> 0) on split rows when actualOutput or breakdown changes!
@@ -709,11 +751,19 @@ export function recalculateMachineGroupStdOutputs(
   const machineRows = allRows.filter((r) => r.machineId === machineId);
   if (machineRows.length === 0) return allRows;
 
-  const shiftMins =
+  const totalOt = machineRows.reduce(
+    (sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0),
+    0
+  );
+  const firstRowOt = Math.max(0, Number(machineRows[0]?.overtimeMinutes) || 0);
+  const baseShiftMins =
     Number(shiftWorkingMinutes) ||
     Number(machineRows[0]?.shiftWorkingMinutes) ||
-    Number(machineRows[0]?.totalWorkingMinutes) ||
+    (machineRows[0]?.totalWorkingMinutes
+      ? Math.max(0, Number(machineRows[0].totalWorkingMinutes) - firstRowOt)
+      : 0) ||
     1305;
+  const shiftMins = Number((baseShiftMins + totalOt).toFixed(2));
 
   // Single run: standard behavior
   if (machineRows.length === 1) {

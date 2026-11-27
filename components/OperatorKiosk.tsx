@@ -442,7 +442,14 @@ export function OperatorKiosk({
     isShiftLocked,
   ]);
 
-  const rowShiftMins = shiftWorkingMinutes || draft?.totalWorkingMinutes || 0;
+  const rowShiftMins =
+    shiftWorkingMinutes ||
+    draft?.shiftWorkingMinutes ||
+    Math.max(
+      0,
+      (draft?.totalWorkingMinutes || 0) - (Number(draft?.overtimeMinutes) || 0)
+    ) ||
+    0;
 
   // Active machine's run list
   const currentMachineRuns = useMemo(() => {
@@ -672,14 +679,19 @@ export function OperatorKiosk({
     );
 
     const isSplit = currentMachineRuns.length > 1;
+    const baseMins = shiftWorkingMinutes || draft.shiftWorkingMinutes || rowShiftMins || 465;
+    const draftOt = Math.max(0, Number(draft.overtimeMinutes) || 0);
+    const effectiveMins = baseMins + draftOt;
     const targetStd = isSplit
       ? calculateSplitRowSuggestedStd(
           rows,
           draft.id,
           target.cycleTime,
-          shiftWorkingMinutes || draft.totalWorkingMinutes
+          baseMins
         )
-      : target.stdOutput;
+      : target.cycleTime > 0
+      ? Math.floor(effectiveMins / target.cycleTime)
+      : 0;
 
     updateDraft({
       itemId,
@@ -687,7 +699,8 @@ export function OperatorKiosk({
       operation: target.operation,
       cycleTime: target.cycleTime,
       stdOutput: targetStd,
-      totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+      shiftWorkingMinutes: baseMins,
+      totalWorkingMinutes: effectiveMins,
     });
   };
 
@@ -712,20 +725,26 @@ export function OperatorKiosk({
     );
 
     const isSplit = currentMachineRuns.length > 1;
+    const baseMins = shiftWorkingMinutes || draft.shiftWorkingMinutes || rowShiftMins || 465;
+    const draftOt = Math.max(0, Number(draft.overtimeMinutes) || 0);
+    const effectiveMins = baseMins + draftOt;
     const targetStd = isSplit
       ? calculateSplitRowSuggestedStd(
           rows,
           draft.id,
           target.cycleTime,
-          shiftWorkingMinutes || draft.totalWorkingMinutes
+          baseMins
         )
-      : target.stdOutput;
+      : target.cycleTime > 0
+      ? Math.floor(effectiveMins / target.cycleTime)
+      : 0;
 
     updateDraft({
       operation: operationName,
       cycleTime: target.cycleTime,
       stdOutput: targetStd,
-      totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+      shiftWorkingMinutes: baseMins,
+      totalWorkingMinutes: effectiveMins,
     });
   };
 
@@ -1219,9 +1238,13 @@ export function OperatorKiosk({
     if (onSaveMachineRuns) {
       onSaveMachineRuns(runsToSave);
     } else {
+      const otMins = Math.round(Math.max(0, Number(draft.overtimeMinutes) || 0));
+      const baseMins = shiftWorkingMinutes || draft.shiftWorkingMinutes || rowShiftMins || 465;
       onSaveMachine({
         ...draft,
-        totalWorkingMinutes: shiftWorkingMinutes || draft.totalWorkingMinutes,
+        overtimeMinutes: otMins,
+        shiftWorkingMinutes: baseMins,
+        totalWorkingMinutes: baseMins + otMins,
       });
     }
 
@@ -1458,6 +1481,7 @@ export function OperatorKiosk({
           !!r.itemId ||
           !!r.operatorName ||
           (r.actualOutput || 0) > 0 ||
+          (r.overtimeMinutes || 0) > 0 ||
           calculateTotalBreakdown(r.breakdown) > 0 ||
           (r.cycleTime || 0) > 0
       );
@@ -1494,6 +1518,7 @@ export function OperatorKiosk({
           !!r.itemId ||
           !!r.operatorName ||
           (r.actualOutput || 0) > 0 ||
+          (r.overtimeMinutes || 0) > 0 ||
           calculateTotalBreakdown(r.breakdown) > 0 ||
           (r.cycleTime || 0) > 0
       );
@@ -1748,9 +1773,11 @@ export function OperatorKiosk({
                 !!r.itemId ||
                 !!r.operatorName ||
                 (r.actualOutput || 0) > 0 ||
+                (r.overtimeMinutes || 0) > 0 ||
                 calculateTotalBreakdown(r.breakdown) > 0 ||
                 (r.cycleTime || 0) > 0
             );
+            const totalOt = machRuns.reduce((sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0), 0);
             const isLogged = totalStd > 0 || totalAct > 0;
             const efficiency = totalStd > 0 ? calculateEfficiency(totalAct, totalStd) : 0;
             const rowShiftMins = shiftWorkingMinutes || machRuns[0]?.totalWorkingMinutes || 0;
@@ -1785,6 +1812,11 @@ export function OperatorKiosk({
                       {machRuns.length > 1 && (
                         <span className="px-1 py-0.2 rounded bg-blue-100 text-blue-800 text-[9px] font-bold">
                           {machRuns.length} runs
+                        </span>
+                      )}
+                      {totalOt > 0 && (
+                        <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-900 text-[9px] font-mono font-bold border border-amber-300">
+                          +{totalOt}m OT
                         </span>
                       )}
                       {(machine.type === "TEMP" ||
@@ -1910,14 +1942,20 @@ export function OperatorKiosk({
 
   const hasEntryError = hasEnteredOutputOrBd && !timeBalance.isBalanced;
 
-  // Shift progress bar percentages
+  // Shift progress bar percentages (including Overtime)
+  const effectiveShiftMins = timeBalance.shiftMinutes || rowShiftMins;
+  const draftOvertimeMins = Math.max(0, Number(draft.overtimeMinutes) || 0);
+  const totalMachineOtMins = currentMachineRuns.reduce(
+    (sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0),
+    0
+  );
   const prodPct =
-    rowShiftMins > 0
-      ? Math.min(100, Math.round((timeBalance.productionMinutes / rowShiftMins) * 100))
+    effectiveShiftMins > 0
+      ? Math.min(100, Math.round((timeBalance.productionMinutes / effectiveShiftMins) * 100))
       : 0;
   const bdPct =
-    rowShiftMins > 0
-      ? Math.min(100 - prodPct, Math.round((timeBalance.loggedBreakdownMinutes / rowShiftMins) * 100))
+    effectiveShiftMins > 0
+      ? Math.min(100 - prodPct, Math.round((timeBalance.loggedBreakdownMinutes / effectiveShiftMins) * 100))
       : 0;
 
   return (
@@ -2085,6 +2123,71 @@ export function OperatorKiosk({
           </div>
         </div>
 
+        {/* Center: Overtime (mins) Input & Quick Presets */}
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-950/70 px-2.5 py-1 rounded border border-slate-800 text-xs">
+          <span className="text-[11px] font-bold text-amber-300 whitespace-nowrap">
+            Overtime (mins):
+          </span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            inputMode="numeric"
+            disabled={isShiftLocked}
+            value={draftOvertimeMins > 0 ? draftOvertimeMins : ""}
+            onChange={(e) => {
+              const ot = Math.round(Math.max(0, parseInt(e.target.value, 10) || 0));
+              const baseMins = shiftWorkingMinutes || draft.shiftWorkingMinutes || rowShiftMins || 465;
+              updateDraft({
+                overtimeMinutes: ot,
+                shiftWorkingMinutes: baseMins,
+                totalWorkingMinutes: baseMins + ot,
+              });
+            }}
+            placeholder="0"
+            className="w-14 px-1.5 py-0.5 text-center font-mono font-bold text-xs rounded bg-slate-900 border border-amber-500/60 text-amber-200 focus:outline-none focus:border-amber-400 disabled:opacity-50"
+          />
+          {!isShiftLocked && (
+            <div className="flex items-center gap-1">
+              {[30, 60, 90, 120].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => {
+                    const nextOt = draftOvertimeMins + preset;
+                    const baseMins = shiftWorkingMinutes || draft.shiftWorkingMinutes || rowShiftMins || 465;
+                    updateDraft({
+                      overtimeMinutes: nextOt,
+                      shiftWorkingMinutes: baseMins,
+                      totalWorkingMinutes: baseMins + nextOt,
+                    });
+                  }}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 hover:bg-amber-500 hover:text-slate-950 text-amber-200 border border-amber-500/40 transition-colors cursor-pointer"
+                >
+                  +{preset}m
+                </button>
+              ))}
+              {draftOvertimeMins > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const baseMins = shiftWorkingMinutes || draft.shiftWorkingMinutes || rowShiftMins || 465;
+                    updateDraft({
+                      overtimeMinutes: 0,
+                      shiftWorkingMinutes: baseMins,
+                      totalWorkingMinutes: baseMins,
+                    });
+                  }}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-950 hover:bg-rose-800 text-rose-200 border border-rose-700 cursor-pointer"
+                  title="Clear run overtime"
+                >
+                  0
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Center/Right: Desktop Shift Time Balance Meter & Primary Save Button (Zero-Scroll PC) */}
         <div className="hidden lg:flex items-center gap-3">
           {/* Shift Time Balance Meter */}
@@ -2108,8 +2211,11 @@ export function OperatorKiosk({
                         : "text-amber-400"
                     }
                   >
-                    {timeBalance.totalAccountedMinutes} / {rowShiftMins}m
+                    {timeBalance.totalAccountedMinutes} / {effectiveShiftMins}m
                   </strong>
+                  {totalMachineOtMins > 0 && (
+                    <span className="ml-1 text-amber-300 font-bold">(+{totalMachineOtMins}m OT)</span>
+                  )}
                 </span>
               </div>
               {/* Slim CSS Progress Bar */}
@@ -2403,7 +2509,8 @@ export function OperatorKiosk({
                     const ctVal = parseFloat(e.target.value);
                     if (!isNaN(ctVal) && ctVal >= 0) {
                       const isSplit = currentMachineRuns.length > 1;
-                      const shiftMins = shiftWorkingMinutes || draft.totalWorkingMinutes || 1305;
+                      const baseMins = shiftWorkingMinutes || draft.shiftWorkingMinutes || rowShiftMins || 465;
+                      const shiftMins = baseMins + totalMachineOtMins;
                       const newStd = isSplit
                         ? draft.stdOutput
                         : ctVal > 0

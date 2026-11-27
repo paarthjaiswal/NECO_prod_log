@@ -441,9 +441,14 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                 : "Needs Improvement"}
             </div>
           </div>
-          <div className="text-[10px] font-mono flex items-center justify-between pt-1.5 border-t border-current/20 opacity-90">
+          <div className="text-[10px] font-mono flex items-center justify-between pt-1.5 border-t border-current/20 opacity-90 gap-1 flex-wrap">
             <span>Oper: {overallMetrics.operatingMinutes}m</span>
             <span>Plan: {overallMetrics.plannedMinutes}m</span>
+            {overallMetrics.totalOvertimeMinutes > 0 && (
+              <span className="px-1 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                +{overallMetrics.totalOvertimeMinutes}m OT
+              </span>
+            )}
           </div>
         </div>
 
@@ -473,6 +478,14 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
               <span className="text-slate-500 font-sans">Downtime:</span>
               <span className={`font-bold ${TOTAL_DOWNTIME_THEME.textClass}`}>{overallMetrics.downtimeMinutes} m</span>
             </div>
+            {overallMetrics.totalOvertimeMinutes > 0 && (
+              <div className="flex justify-between">
+                <span className="text-amber-700 font-sans font-semibold">OT Logged:</span>
+                <span className="font-bold text-amber-800">
+                  {(overallMetrics.totalOvertimeMinutes / 60).toFixed(1)} hrs ({overallMetrics.totalOvertimeMinutes}m)
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -928,6 +941,11 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                                 {d.runsCount} runs
                               </span>
                             )}
+                            {d.overtimeMinutes > 0 && (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-mono font-bold">
+                                +{d.overtimeMinutes}m OT
+                              </span>
+                            )}
                           </div>
                         </td>
 
@@ -1020,6 +1038,7 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                     <th className="px-3 py-2 text-center">Run</th>
                     <th className="px-3 py-2">Operator</th>
                     <th className="px-3 py-2">Item & Op</th>
+                    <th className="px-3 py-2 text-right">OT (m)</th>
                     <th className="px-3 py-2 text-right">Target</th>
                     <th className="px-3 py-2 text-right">Actual</th>
                     <th className="px-3 py-2 text-right">Rework</th>
@@ -1045,6 +1064,15 @@ export const MachineAnalyticsView: React.FC<MachineAnalyticsViewProps> = ({
                       <td className="px-3 py-2 font-sans">
                         <div className="font-bold text-slate-900">{row.itemName}</div>
                         <div className="text-[10px] text-slate-500">{row.operation} ({row.cycleTime}m)</div>
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {row.overtimeMinutes > 0 ? (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
+                            +{row.overtimeMinutes}m
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">0</span>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-right text-slate-600">{row.stdOutput}</td>
                       <td className="px-3 py-2 text-right font-bold text-slate-950">{row.actualOutput}</td>

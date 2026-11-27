@@ -173,6 +173,12 @@ export function ensureAllLineMachinesInRows(
 
       deduplicatedRuns.forEach((r, runIdx) => {
         if (r.id) assignedRowIds.add(r.id);
+        const otMins = Math.max(0, Number(r.overtimeMinutes) || 0);
+        const baseMins =
+          shiftWorkingMinutes ||
+          r.shiftWorkingMinutes ||
+          Math.max(0, (r.totalWorkingMinutes || 1305) - otMins) ||
+          1305;
         result.push({
           ...r,
           date: date || r.date,
@@ -184,8 +190,9 @@ export function ensureAllLineMachinesInRows(
           machineId: machine.id,
           machineName: machine.name,
           machineCode: machine.code || r.machineCode || undefined,
-          totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes || 1305,
-          shiftWorkingMinutes: shiftWorkingMinutes || r.shiftWorkingMinutes || 1305,
+          totalWorkingMinutes: baseMins + otMins,
+          shiftWorkingMinutes: baseMins,
+          overtimeMinutes: otMins,
         });
       });
     } else {
@@ -207,6 +214,7 @@ export function ensureAllLineMachinesInRows(
         cycleTime: 0,
         totalWorkingMinutes: shiftWorkingMinutes || 1305,
         shiftWorkingMinutes: shiftWorkingMinutes || 1305,
+        overtimeMinutes: 0,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -271,6 +279,12 @@ export function ensureAllLineMachinesInRows(
     );
 
     deduplicatedRuns.forEach((r, runIdx) => {
+      const otMins = Math.max(0, Number(r.overtimeMinutes) || 0);
+      const baseMins =
+        shiftWorkingMinutes ||
+        r.shiftWorkingMinutes ||
+        Math.max(0, (r.totalWorkingMinutes || 1305) - otMins) ||
+        1305;
       result.push({
         ...r,
         date: date || r.date,
@@ -279,8 +293,9 @@ export function ensureAllLineMachinesInRows(
         srNo: nextSrNo,
         runNo: Number(r.runNo) || runIdx + 1,
         isTempMachine: true,
-        totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes || 1305,
-        shiftWorkingMinutes: shiftWorkingMinutes || 1305,
+        totalWorkingMinutes: baseMins + otMins,
+        shiftWorkingMinutes: baseMins,
+        overtimeMinutes: otMins,
       });
     });
     nextSrNo++;
@@ -931,6 +946,7 @@ export default function DashboardClient({
         !!row.itemId ||
         !!row.operatorName ||
         (row.actualOutput || 0) > 0 ||
+        (row.overtimeMinutes || 0) > 0 ||
         calculateTotalBreakdown(row.breakdown) > 0 ||
         (row.cycleTime || 0) > 0;
       if (isTouched) {

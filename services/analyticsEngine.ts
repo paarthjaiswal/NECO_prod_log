@@ -21,6 +21,7 @@ import { calculateTotalBreakdown, isShiftRowEmpty, buildCanonicalItemKey } from 
 
 export interface EnrichedAnalyticsRow extends MachineShiftRow {
   allocatedPlannedMinutes: number;
+  overtimeMinutes: number;
   isSplitRun: boolean;
   totalBreakdownMinutes: number;
   operatingMinutes: number;
@@ -53,6 +54,8 @@ export interface OeeMetrics {
   oeePct: number;
   planAchievementPct: number;
   breakdownTotals: BreakdownTotals;
+  totalOvertimeMinutes: number;
+  overtimeRowsCount: number;
   tempMachineRunsCount: number;
   splitRunsCount: number;
   rowCount: number;
@@ -312,11 +315,27 @@ export function computeAllocatedPlannedMinutes(logs: MachineShiftRow[]): Enriche
 
   for (const group of groups.values()) {
     const isSplit = group.length > 1;
-    const shiftTotal = Math.max(...group.map((r) => Number(r.totalWorkingMinutes) || 465));
+    const groupTotalOt = group.reduce(
+      (sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0),
+      0
+    );
+    const baseCandidates = group.map((r) => {
+      const explicitBase = Number(r.shiftWorkingMinutes) || 0;
+      if (explicitBase > 0) return explicitBase;
+      const rOt = Math.max(0, Number(r.overtimeMinutes) || 0);
+      const rTotal = Number(r.totalWorkingMinutes) || 465;
+      return Math.max(0, rTotal - rOt);
+    });
+    const baseShift = Math.max(...baseCandidates, 0) || 465;
+    const shiftTotal = Number((baseShift + groupTotalOt).toFixed(2));
 
     if (!isSplit) {
       const r = group[0];
-      const allocatedPlanned = Number(r.totalWorkingMinutes) || 465;
+      const rOt = Math.max(0, Number(r.overtimeMinutes) || 0);
+      const allocatedPlanned =
+        Number(r.shiftWorkingMinutes) > 0
+          ? Number((Number(r.shiftWorkingMinutes) + rOt).toFixed(2))
+          : Number(r.totalWorkingMinutes) || 465;
       const bdMins = calculateTotalBreakdown(r.breakdown);
       const actual = Number(r.actualOutput) || 0;
       const rework = Number(r.rework) || 0;
@@ -324,6 +343,7 @@ export function computeAllocatedPlannedMinutes(logs: MachineShiftRow[]): Enriche
 
       enrichedRows.push({
         ...r,
+        overtimeMinutes: rOt,
         allocatedPlannedMinutes: allocatedPlanned,
         isSplitRun: false,
         totalBreakdownMinutes: bdMins,
@@ -352,6 +372,7 @@ export function computeAllocatedPlannedMinutes(logs: MachineShiftRow[]): Enriche
           allocated = Number((shiftTotal / group.length).toFixed(2));
         }
 
+        const rOt = Math.max(0, Number(r.overtimeMinutes) || 0);
         const bdMins = calculateTotalBreakdown(r.breakdown);
         const actual = Number(r.actualOutput) || 0;
         const rework = Number(r.rework) || 0;
@@ -359,6 +380,7 @@ export function computeAllocatedPlannedMinutes(logs: MachineShiftRow[]): Enriche
 
         enrichedRows.push({
           ...r,
+          overtimeMinutes: rOt,
           allocatedPlannedMinutes: allocated,
           isSplitRun: true,
           totalBreakdownMinutes: bdMins,
@@ -395,6 +417,8 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
   let fixProgSettings = 0;
   let miscellaneous = 0;
 
+  let totalOvertimeMinutes = 0;
+  let overtimeRowsCount = 0;
   let tempMachineRunsCount = 0;
   let splitRunsCount = 0;
 
@@ -405,6 +429,11 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
     totalActual += Number(r.actualOutput) || 0;
     totalStd += Number(r.stdOutput) || 0;
     totalRework += Number(r.rework) || 0;
+    const rOt = Math.max(0, Number(r.overtimeMinutes) || 0);
+    if (rOt > 0) {
+      totalOvertimeMinutes += rOt;
+      overtimeRowsCount++;
+    }
     const rGood = Number(r.goodOutput) || 0;
     goodOutput += rGood;
     const ct = Number(r.cycleTime) || 0;
@@ -427,6 +456,7 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
 
   plannedMinutes = Number(plannedMinutes.toFixed(2));
   downtimeMinutes = Number(downtimeMinutes.toFixed(2));
+  totalOvertimeMinutes = Number(totalOvertimeMinutes.toFixed(2));
   const operatingMinutes = Number(Math.max(0, plannedMinutes - downtimeMinutes).toFixed(2));
   idealRunMinutes = Number(idealRunMinutes.toFixed(2));
   goodIdealMinutes = Number(goodIdealMinutes.toFixed(2));
@@ -463,6 +493,8 @@ export function calculateOeeMetrics(enrichedRows: EnrichedAnalyticsRow[]): OeeMe
       miscellaneous: Number(miscellaneous.toFixed(2)),
       total: downtimeMinutes,
     },
+    totalOvertimeMinutes,
+    overtimeRowsCount,
     tempMachineRunsCount,
     splitRunsCount,
     rowCount: enrichedRows.length,
@@ -1714,6 +1746,7 @@ export interface MachineDailySummary {
   actualOutput: number;
   rework: number;
   goodOutput: number;
+  overtimeMinutes: number;
   downtimeMinutes: number;
   planAchievementPct: number;
   availabilityPct: number;
@@ -1732,6 +1765,7 @@ export interface MachineShiftLogHistoryItem {
   itemName: string;
   operation: string;
   cycleTime: number;
+  overtimeMinutes: number;
   stdOutput: number;
   actualOutput: number;
   rework: number;
@@ -2047,6 +2081,7 @@ export function buildMachineDetailAnalytics(params: {
       actualOutput: groupMetrics.totalActual,
       rework: groupMetrics.totalRework,
       goodOutput: groupMetrics.goodOutput,
+      overtimeMinutes: groupMetrics.totalOvertimeMinutes,
       downtimeMinutes: groupMetrics.downtimeMinutes,
       planAchievementPct,
       availabilityPct: groupMetrics.availabilityPct,
@@ -2103,6 +2138,7 @@ export function buildMachineDetailAnalytics(params: {
       itemName: r.itemName || r.itemId || "—",
       operation: r.operation || "—",
       cycleTime: Number(r.cycleTime) || 0,
+      overtimeMinutes: Math.max(0, Number(r.overtimeMinutes) || 0),
       stdOutput: Number(r.stdOutput) || 0,
       actualOutput: Number(r.actualOutput) || 0,
       rework: Number(r.rework) || 0,

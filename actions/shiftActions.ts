@@ -53,6 +53,7 @@ export interface DbShiftLogRow {
   operation: string | null;
   cycle_time: number | null;
   total_working_minutes: number | null;
+  overtime_minutes?: number | null;
   std_output: number | null;
   actual_output: number | null;
   rework: number | null;
@@ -240,6 +241,7 @@ function resolveCleanShiftDisplayName(
 
 function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
   const totalWorking = Number(dbRow.total_working_minutes ?? 1305);
+  const overtimeMinutes = Math.round(Math.max(0, Number(dbRow.overtime_minutes ?? 0)));
   const noDisc = Number(Number(dbRow.bd_no_disc ?? 0).toFixed(2));
   const change = Number(Number(dbRow.bd_change ?? 0).toFixed(2));
   const power = Number(Number(dbRow.bd_power ?? 0).toFixed(2));
@@ -273,6 +275,7 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
     operation: dbRow.operation ?? "",
     cycleTime: Number(Number(dbRow.cycle_time ?? 0).toFixed(2)),
     totalWorkingMinutes: totalWorking,
+    overtimeMinutes,
     stdOutput: Number(dbRow.std_output ?? 0),
     actualOutput: Number(dbRow.actual_output ?? 0),
     rework: Number(dbRow.rework ?? 0),
@@ -326,6 +329,12 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow, validItemIdSet?: Set<string>) {
   const finalOperation = isItemValid ? (uiRow.operation?.trim() ?? "") : "";
   const finalCycleTime = isItemValid ? Number(Math.max(0, Number(uiRow.cycleTime) || 0).toFixed(2)) : 0;
   const finalStdOutput = isItemValid ? Math.round(Number(uiRow.stdOutput) || 0) : 0;
+  const overtimeMinutes = Math.round(Math.max(0, Number(uiRow.overtimeMinutes) || 0));
+  const baseShiftWorking = Number(uiRow.shiftWorkingMinutes) || 0;
+  const effectiveTotalWorking =
+    baseShiftWorking > 0
+      ? Math.round(baseShiftWorking + overtimeMinutes)
+      : Math.round(Number(uiRow.totalWorkingMinutes) || 1305);
 
   return {
     id: deterministicId,
@@ -342,7 +351,8 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow, validItemIdSet?: Set<string>) {
     item_name: finalItemName,
     operation: finalOperation,
     cycle_time: finalCycleTime,
-    total_working_minutes: Math.round(Number(uiRow.totalWorkingMinutes) || 1305),
+    total_working_minutes: effectiveTotalWorking,
+    overtime_minutes: overtimeMinutes,
     std_output: finalStdOutput,
     actual_output: Math.round(Number(uiRow.actualOutput) || 0),
     rework: Math.round(Number(uiRow.rework) || 0),
@@ -497,6 +507,7 @@ function isPopulatedDbLogRow(log: DbShiftLogRow): boolean {
     (Number(log.actual_output) || 0) > 0 ||
     (Number(log.rework) || 0) > 0 ||
     bdTotal > 0 ||
+    (Number(log.overtime_minutes) || 0) > 0 ||
     Boolean(log.remarks && log.remarks.trim())
   );
 }
@@ -588,6 +599,12 @@ function hydrateShiftSheetRows(
       // Emit ONLY the saved rows for that machine (sorted by run_no ASC, normalizing machineId: machine.id and machineName: machine.name)
       machineLogs.forEach((log, runIdx) => {
         const uiRow = mapDbRowToUiRow(log);
+        const otMins = Math.max(0, Number(uiRow.overtimeMinutes) || 0);
+        const baseMins =
+          shiftWorkingMinutes ||
+          uiRow.shiftWorkingMinutes ||
+          Math.max(0, (uiRow.totalWorkingMinutes || 1305) - otMins) ||
+          1305;
         result.push({
           ...uiRow,
           srNo: index + 1,
@@ -596,8 +613,9 @@ function hydrateShiftSheetRows(
           machineId: machine.id,
           machineName: machine.name,
           machineCode: machine.code || undefined,
-          totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes || 1305,
-          shiftWorkingMinutes: shiftWorkingMinutes || 1305,
+          totalWorkingMinutes: baseMins + otMins,
+          shiftWorkingMinutes: baseMins,
+          overtimeMinutes: otMins,
         });
       });
       // CRITICAL: DO NOT emit an empty row for that machine!
@@ -621,6 +639,7 @@ function hydrateShiftSheetRows(
         cycleTime: 0,
         totalWorkingMinutes: shiftWorkingMinutes || 1305,
         shiftWorkingMinutes: shiftWorkingMinutes || 1305,
+        overtimeMinutes: 0,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -676,13 +695,20 @@ function hydrateShiftSheetRows(
 
     deduplicated.forEach((log, runIdx) => {
       const uiRow = mapDbRowToUiRow(log);
+      const otMins = Math.max(0, Number(uiRow.overtimeMinutes) || 0);
+      const baseMins =
+        shiftWorkingMinutes ||
+        uiRow.shiftWorkingMinutes ||
+        Math.max(0, (uiRow.totalWorkingMinutes || 1305) - otMins) ||
+        1305;
       result.push({
         ...uiRow,
         srNo: nextSrNo,
         runNo: Number(log.run_no) || runIdx + 1,
         isTempMachine: true,
-        totalWorkingMinutes: shiftWorkingMinutes || uiRow.totalWorkingMinutes || 1305,
-        shiftWorkingMinutes: shiftWorkingMinutes || 1305,
+        totalWorkingMinutes: baseMins + otMins,
+        shiftWorkingMinutes: baseMins,
+        overtimeMinutes: otMins,
       });
     });
     nextSrNo++;

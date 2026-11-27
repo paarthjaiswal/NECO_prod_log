@@ -26,6 +26,7 @@ import {
 import {
   calculateEfficiency,
   calculateTotalBreakdown,
+  calculateDynamicStdOutput,
   resolveMachineItemTarget,
   getOperationsForItem,
   getUniqueItems,
@@ -55,6 +56,7 @@ const BD_META = DOWNTIME_PALETTE;
 
 const NAV_COLS = [
   'cycleTime',
+  'overtimeMinutes',
   'stdOutput',
   'actualOutput',
   'rework',
@@ -428,7 +430,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
 
   const shiftWorkingMinutes =
     activeShiftObj?.shiftWorkingMinutes ??
-    rows[0]?.totalWorkingMinutes ??
+    rows[0]?.shiftWorkingMinutes ??
+    Math.max(
+      0,
+      (rows[0]?.totalWorkingMinutes || 0) - (Number(rows[0]?.overtimeMinutes) || 0)
+    ) ??
     0;
 
   const hasUnsavedChanges = hasUnsavedDraft;
@@ -465,6 +471,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         (Number(r.actualOutput) || 0) > 0 ||
         (Number(r.stdOutput) || 0) > 0 ||
         (Number(r.rework) || 0) > 0 ||
+        (Number(r.overtimeMinutes) || 0) > 0 ||
         Boolean(r.operatorName && r.operatorName.trim()) ||
         Boolean(r.itemId && r.itemId.trim()) ||
         Boolean(r.itemName && r.itemName.trim()) ||
@@ -776,9 +783,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       );
 
       const isSplitMachine = rows.filter((r) => r.machineId === currentRow.machineId).length > 1;
+      const otMins = Math.max(0, Number(currentRow.overtimeMinutes) || 0);
+      const baseMins = shiftWorkingMinutes || currentRow.shiftWorkingMinutes || 465;
+      const effectiveWorking = baseMins + otMins;
       const targetStd = isSplitMachine
-        ? calculateSplitRowSuggestedStd(rows, currentRow.id, target.cycleTime, shiftWorkingMinutes)
-        : target.stdOutput;
+        ? calculateSplitRowSuggestedStd(rows, currentRow.id, target.cycleTime, baseMins)
+        : calculateDynamicStdOutput(target.cycleTime, effectiveWorking);
 
       updateRow(index, {
         itemId,
@@ -786,7 +796,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         operation: target.operation,
         cycleTime: target.cycleTime,
         stdOutput: targetStd,
-        totalWorkingMinutes: shiftWorkingMinutes,
+        shiftWorkingMinutes: baseMins,
+        totalWorkingMinutes: effectiveWorking,
       });
     },
     [isShiftLocked, rows, items, cycleTimes, shiftWorkingMinutes, updateRow]
@@ -813,15 +824,19 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       );
 
       const isSplitMachine = rows.filter((r) => r.machineId === currentRow.machineId).length > 1;
+      const otMins = Math.max(0, Number(currentRow.overtimeMinutes) || 0);
+      const baseMins = shiftWorkingMinutes || currentRow.shiftWorkingMinutes || 465;
+      const effectiveWorking = baseMins + otMins;
       const targetStd = isSplitMachine
-        ? calculateSplitRowSuggestedStd(rows, currentRow.id, target.cycleTime, shiftWorkingMinutes)
-        : target.stdOutput;
+        ? calculateSplitRowSuggestedStd(rows, currentRow.id, target.cycleTime, baseMins)
+        : calculateDynamicStdOutput(target.cycleTime, effectiveWorking);
 
       updateRow(index, {
         operation: operationName,
         cycleTime: target.cycleTime,
         stdOutput: targetStd,
-        totalWorkingMinutes: shiftWorkingMinutes,
+        shiftWorkingMinutes: baseMins,
+        totalWorkingMinutes: effectiveWorking,
       });
     },
     [isShiftLocked, rows, items, cycleTimes, shiftWorkingMinutes, updateRow]
@@ -1228,23 +1243,59 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     const newCt = Math.max(0, Number(rawVal) || 0);
     const row = rows[rowIndex];
     if (!row) return;
-    const shiftMins =
-      Number(row.shiftWorkingMinutes ?? row.totalWorkingMinutes) ||
+    const baseMins =
       shiftWorkingMinutes ||
+      Number(row.shiftWorkingMinutes) ||
+      Math.max(0, (Number(row.totalWorkingMinutes) || 465) - (Number(row.overtimeMinutes) || 0)) ||
       465;
 
     const machRuns = rows.filter((r) => r.machineId === row.machineId);
     if (machRuns.length > 1) {
-      const suggestedStd = calculateSplitRowSuggestedStd(rows, row.id, newCt, shiftMins);
+      const suggestedStd = calculateSplitRowSuggestedStd(rows, row.id, newCt, baseMins);
       const updated = rows.map((r, i) =>
         i === rowIndex ? { ...r, cycleTime: newCt, stdOutput: suggestedStd } : r
       );
       onRowsChange(updated);
     } else {
       const updated = rows.map((r, i) => (i === rowIndex ? { ...r, cycleTime: newCt } : r));
-      const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, shiftMins);
+      const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, baseMins);
       onRowsChange(recomputed);
     }
+  };
+
+  // 6B. Machine Overtime Change Handler (baseShiftMinutes + overtimeMinutes -> Live Std Output & Time Balance)
+  const handleOvertimeChange = (rowIndex: number, rawVal: string) => {
+    if (isShiftLocked) return;
+    const targetRow = cleanRows[rowIndex] || rows[rowIndex];
+    if (!targetRow) return;
+    const matchIdx = rows.findIndex(
+      (r) =>
+        (targetRow.id && r.id === targetRow.id) ||
+        (r.machineId === targetRow.machineId && (r.runNo || 1) === (targetRow.runNo || 1))
+    );
+    const idx = matchIdx >= 0 ? matchIdx : rowIndex;
+    const row = rows[idx];
+    if (!row) return;
+
+    const newOt = Math.round(Math.max(0, Number(rawVal) || 0));
+    const baseMins =
+      shiftWorkingMinutes ||
+      Number(row.shiftWorkingMinutes) ||
+      Math.max(0, (Number(row.totalWorkingMinutes) || 465) - (Number(row.overtimeMinutes) || 0)) ||
+      465;
+
+    const updated = rows.map((r, i) =>
+      i === idx
+        ? {
+            ...r,
+            overtimeMinutes: newOt,
+            shiftWorkingMinutes: baseMins,
+            totalWorkingMinutes: baseMins + newOt,
+          }
+        : r
+    );
+    const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, baseMins);
+    onRowsChange(recomputed);
   };
 
   // Handle Breakdown Sub-column update
@@ -1339,6 +1390,57 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     setBulkBdMinutes('');
   };
 
+  // Apply bulk line overtime (+30m/+60m/+90m/+120m or Clear) to active machines (or all primary runs if none active)
+  const handleApplyBulkLineOt = (minsOrClear: number | 'clear') => {
+    if (isShiftLocked) return;
+    const hasActive = activeMachineIds.size > 0;
+    const seenMach = new Set<string>();
+    const touchedIds = new Set<string>();
+
+    let updated = rows.map((row) => {
+      const baseMins =
+        shiftWorkingMinutes ||
+        Number(row.shiftWorkingMinutes) ||
+        Math.max(0, (Number(row.totalWorkingMinutes) || 465) - (Number(row.overtimeMinutes) || 0)) ||
+        465;
+
+      if (minsOrClear === 'clear') {
+        touchedIds.add(row.machineId);
+        return {
+          ...row,
+          overtimeMinutes: 0,
+          shiftWorkingMinutes: baseMins,
+          totalWorkingMinutes: baseMins,
+        };
+      }
+
+      const isTargetMachine = !hasActive || activeMachineIds.has(row.machineId);
+      const isPrimaryRunForMachine = !seenMach.has(row.machineId);
+      if (row.machineId) seenMach.add(row.machineId);
+
+      if (!isTargetMachine || !isPrimaryRunForMachine) {
+        return row;
+      }
+
+      touchedIds.add(row.machineId);
+      const nextOt = Math.round(Math.max(0, (Number(row.overtimeMinutes) || 0) + minsOrClear));
+      return {
+        ...row,
+        overtimeMinutes: nextOt,
+        shiftWorkingMinutes: baseMins,
+        totalWorkingMinutes: baseMins + nextOt,
+      };
+    });
+
+    touchedIds.forEach((mId) => {
+      const mRow = updated.find((r) => r.machineId === mId);
+      const baseMins = shiftWorkingMinutes || Number(mRow?.shiftWorkingMinutes) || 465;
+      updated = recalculateMachineGroupStdOutputs(updated, mId, baseMins);
+    });
+
+    onRowsChange(updated);
+  };
+
   // Excel-style Arrow Key & Enter navigation across numeric cells
   const handleGridKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
@@ -1391,7 +1493,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         itemName: '',
         operation: '',
         cycleTime: 0,
+        shiftWorkingMinutes: shiftWorkingMinutes,
         totalWorkingMinutes: shiftWorkingMinutes,
+        overtimeMinutes: 0,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -1418,6 +1522,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
           !!r.itemId ||
           !!r.operatorName ||
           (r.actualOutput || 0) > 0 ||
+          (r.overtimeMinutes || 0) > 0 ||
           calculateTotalBreakdown(r.breakdown) > 0 ||
           (r.cycleTime || 0) > 0
       );
@@ -1481,19 +1586,33 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         remarks: it.remarks,
       }));
 
-    const cleanRowsToSave = cleanRows.map((r) => ({
-      ...r,
-      date: currentDate || r.date,
-      shift: currentShift || r.shift,
-      line: currentLine || r.line,
-      totalWorkingMinutes: shiftWorkingMinutes || r.totalWorkingMinutes,
-    }));
+    const cleanRowsToSave = cleanRows.map((r) => {
+      const otMins = Math.round(Math.max(0, Number(r.overtimeMinutes) || 0));
+      const baseMins =
+        shiftWorkingMinutes ||
+        Number(r.shiftWorkingMinutes) ||
+        Math.max(0, (Number(r.totalWorkingMinutes) || 1305) - otMins) ||
+        1305;
+      return {
+        ...r,
+        date: currentDate || r.date,
+        shift: currentShift || r.shift,
+        line: currentLine || r.line,
+        overtimeMinutes: otMins,
+        shiftWorkingMinutes: baseMins,
+        totalWorkingMinutes: baseMins + otMins,
+      };
+    });
 
     onSave(cleanRowsToSave, finishedTotalsToSave);
     onSaveShift(cleanRowsToSave, finishedTotalsToSave);
   };
 
   // Calculations for summary footer row
+  const totalOtMinutes = cleanRows.reduce((acc, r) => acc + Math.max(0, Number(r.overtimeMinutes) || 0), 0);
+  const otMachineCount = new Set(
+    cleanRows.filter((r) => (Number(r.overtimeMinutes) || 0) > 0).map((r) => r.machineId)
+  ).size;
   const totalStd = cleanRows.reduce((acc, r) => acc + (Number(r.stdOutput) || 0), 0);
   const totalAct = cleanRows.reduce((acc, r) => acc + (Number(r.actualOutput) || 0), 0);
   const totalRework = cleanRows.reduce((acc, r) => acc + (Number(r.rework) || 0), 0);
@@ -1534,6 +1653,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         !!r.itemId ||
         !!r.operatorName ||
         (r.actualOutput || 0) > 0 ||
+        (r.overtimeMinutes || 0) > 0 ||
         calculateTotalBreakdown(r.breakdown) > 0 ||
         (r.cycleTime || 0) > 0;
       if (isTouched && r.machineId) set.add(r.machineId);
@@ -1631,6 +1751,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
               <>
                 <span className="text-slate-600">·</span>
                 <span className="text-amber-300 font-mono">{shiftWorkingMinutes}m</span>
+              </>
+            )}
+            {totalOtMinutes > 0 && (
+              <>
+                <span className="text-slate-600">·</span>
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-300 font-mono font-bold text-[11px]">
+                  +{totalOtMinutes}m OT ({otMachineCount} mach)
+                </span>
               </>
             )}
           </div>
@@ -1897,39 +2025,68 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
             </button>
           </div>
 
-          {/* Right: Line-Wide Bulk Breakdown Applier */}
-          <div className="flex flex-wrap items-center gap-1.5 border-t sm:border-t-0 sm:border-l border-slate-200 pt-2 sm:pt-0 sm:pl-3 w-full sm:w-auto">
-            <span className="font-semibold text-slate-600 whitespace-nowrap">Line-Wide BD:</span>
-            <select
-              value={bulkBdField}
-              onChange={(e) => setBulkBdField(e.target.value as BreakdownKey)}
-              className="border border-slate-300 rounded px-2 py-1 text-xs bg-slate-50 font-medium text-slate-800 focus:outline-none focus:border-slate-800"
+          {/* Right: Line-Wide Bulk Breakdown & Overtime Appliers */}
+          <div className="flex flex-wrap items-center gap-2 border-t sm:border-t-0 sm:border-l border-slate-200 pt-2 sm:pt-0 sm:pl-3 w-full sm:w-auto">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="font-semibold text-slate-600 whitespace-nowrap">Line-Wide BD:</span>
+              <select
+                value={bulkBdField}
+                onChange={(e) => setBulkBdField(e.target.value as BreakdownKey)}
+                className="border border-slate-300 rounded px-2 py-1 text-xs bg-slate-50 font-medium text-slate-800 focus:outline-none focus:border-slate-800"
+              >
+                <option value="power">POWER (All Machines)</option>
+                <option value="noDisc">NO/DISC (All Machines)</option>
+                <option value="change">CHANGE (All Machines)</option>
+                <option value="operator">OPERATOR (All Machines)</option>
+                <option value="machineBreakdown">BREAK DOWN (All Machines)</option>
+                <option value="fixProgSettings">FIX/PROG SETTINGS (All Machines)</option>
+                <option value="miscellaneous">MISCELLANEOUS (All Machines)</option>
+              </select>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="Mins"
+                value={bulkBdMinutes}
+                onChange={(e) => setBulkBdMinutes(e.target.value)}
+                className="w-16 border border-slate-300 rounded px-2 py-1 text-xs font-mono text-center focus:outline-none focus:border-slate-800"
+              />
+              <button
+                type="button"
+                onClick={handleApplyBulkLineBd}
+                disabled={!bulkBdMinutes || Number(bulkBdMinutes) <= 0}
+                className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white px-2.5 py-1 rounded text-xs font-semibold whitespace-nowrap transition-colors"
+              >
+                + Apply to All
+              </button>
+            </div>
+
+            {/* + Line OT Helper */}
+            <div
+              className="flex flex-wrap items-center gap-1 border-t sm:border-t-0 sm:border-l border-slate-200 pt-1.5 sm:pt-0 sm:pl-2.5"
+              title="Add overtime minutes across active machines on this line (or all machines if none active yet)"
             >
-              <option value="power">POWER (All Machines)</option>
-              <option value="noDisc">NO/DISC (All Machines)</option>
-              <option value="change">CHANGE (All Machines)</option>
-              <option value="operator">OPERATOR (All Machines)</option>
-              <option value="machineBreakdown">BREAK DOWN (All Machines)</option>
-              <option value="fixProgSettings">FIX/PROG SETTINGS (All Machines)</option>
-              <option value="miscellaneous">MISCELLANEOUS (All Machines)</option>
-            </select>
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="Mins"
-              value={bulkBdMinutes}
-              onChange={(e) => setBulkBdMinutes(e.target.value)}
-              className="w-16 border border-slate-300 rounded px-2 py-1 text-xs font-mono text-center focus:outline-none focus:border-slate-800"
-            />
-            <button
-              type="button"
-              onClick={handleApplyBulkLineBd}
-              disabled={!bulkBdMinutes || Number(bulkBdMinutes) <= 0}
-              className="bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white px-2.5 py-1 rounded text-xs font-semibold whitespace-nowrap transition-colors"
-            >
-              + Apply to All
-            </button>
+              <span className="font-bold text-amber-800 whitespace-nowrap">+ Line OT:</span>
+              {[30, 60, 90, 120].map((otMins) => (
+                <button
+                  key={otMins}
+                  type="button"
+                  onClick={() => handleApplyBulkLineOt(otMins)}
+                  className="px-2 py-1 bg-amber-50 hover:bg-amber-500 hover:text-slate-950 text-amber-900 font-mono font-bold rounded border border-amber-300 transition-colors cursor-pointer"
+                >
+                  +{otMins}m
+                </button>
+              ))}
+              {totalOtMinutes > 0 && (
+                <button
+                  type="button"
+                  onClick={() => handleApplyBulkLineOt('clear')}
+                  className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold rounded border border-rose-200 cursor-pointer"
+                >
+                  Clear OT
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -2053,6 +2210,13 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-22">
                   CYCLE TIME
                 </th>
+                <th
+                  rowSpan={2}
+                  className="px-2 py-2.5 border-r border-slate-800 text-center w-18 bg-amber-950/60 text-amber-200"
+                  title="Machine overtime minutes added to base shift time"
+                >
+                  OT (m)
+                </th>
                 <th rowSpan={2} className="px-2 py-2.5 border-r border-slate-800 text-center w-20">
                   STD O/PUT
                 </th>
@@ -2117,11 +2281,15 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 const rowOperations = row.itemId
                   ? getOperations(row.itemId, row.machineId, row.machineName)
                   : [];
-                const rowWorkingMinutes = row.totalWorkingMinutes || shiftWorkingMinutes;
-                const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
-
-                const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
+                const rowShiftMins =
+                  shiftWorkingMinutes ||
+                  row.shiftWorkingMinutes ||
+                  Math.max(0, (row.totalWorkingMinutes || 0) - (Number(row.overtimeMinutes) || 0)) ||
+                  row.totalWorkingMinutes;
                 const timeBalance = machineBalances.get(row.machineId) || calculateMachineGroupTimeBalance(cleanRows, row.machineId, rowShiftMins);
+                const rowWorkingMinutes = timeBalance.shiftMinutes || row.totalWorkingMinutes || shiftWorkingMinutes;
+                const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
+                const rowOtMins = Math.max(0, Number(row.overtimeMinutes) || 0);
                 const isSplitMachine = cleanRows.filter((r) => r.machineId === row.machineId).length > 1;
                 const rowSummary = timeBalance.rowBreakdownSummary?.[row.id] ?? {
                   prodMins: timeBalance.rowProductionMinutes?.[row.id] ?? Number(((row.actualOutput || 0) * (row.cycleTime || 0)).toFixed(2)),
@@ -2142,7 +2310,11 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           ? 'bg-rose-50/70 hover:bg-rose-100/60 border-l-4 border-l-rose-600'
                           : 'bg-amber-50/50 hover:bg-amber-100/50 border-l-4 border-l-amber-500'
                         : isMachineActive && timeBalance.isBalanced
-                        ? 'border-l-4 border-l-emerald-500 hover:bg-emerald-50/20'
+                        ? rowOtMins > 0
+                          ? 'border-l-4 border-l-emerald-500 bg-amber-50/35 hover:bg-amber-50/60'
+                          : 'border-l-4 border-l-emerald-500 hover:bg-emerald-50/20'
+                        : rowOtMins > 0
+                        ? 'border-l-4 border-l-amber-400 bg-amber-50/35 hover:bg-amber-50/60'
                         : isUnderperforming
                         ? 'border-l-2 border-l-amber-400 hover:bg-slate-50/80'
                         : index % 2 === 0
@@ -2231,6 +2403,14 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                               {(row.isTempMachine || row.machineId.startsWith("temp_")) && (
                                 <span className="px-1.5 py-0.5 rounded text-[9px] font-black tracking-wider uppercase bg-amber-100 text-amber-900 border border-amber-300">
                                   TEMP
+                                </span>
+                              )}
+                              {rowOtMins > 0 && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-amber-100 text-amber-900 border border-amber-300"
+                                  title={`+${rowOtMins}m Overtime added (${rowWorkingMinutes}m effective planned time)`}
+                                >
+                                  +{rowOtMins}m OT
                                 </span>
                               )}
                             </div>
@@ -2613,6 +2793,40 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       />
                     </td>
 
+                    {/* 5C. MACHINE OVERTIME (MINS) */}
+                    <td
+                      className={`px-1.5 py-1 border-r border-slate-200 text-center ${
+                        rowOtMins > 0 ? 'bg-amber-50/70' : ''
+                      }`}
+                    >
+                      <input
+                        type="number"
+                        step="1"
+                        min="0"
+                        disabled={isShiftLocked}
+                        readOnly={isShiftLocked}
+                        data-grid-cell={`${index}-overtimeMinutes`}
+                        value={rowOtMins > 0 ? rowOtMins : ''}
+                        placeholder="0"
+                        onFocus={(e) => e.target.select()}
+                        onClick={(e) => (e.target as HTMLInputElement).select()}
+                        onKeyDown={(e) => handleGridKeyDown(e, index, 'overtimeMinutes')}
+                        onChange={(e) => handleOvertimeChange(index, e.target.value)}
+                        title={
+                          isShiftLocked
+                            ? 'Shift is locked (Read-Only)'
+                            : `Machine overtime in minutes (Effective Planned = ${rowWorkingMinutes}m)`
+                        }
+                        className={`w-14 mx-auto text-center font-mono text-xs px-1 py-1 rounded border focus:outline-none ${
+                          isShiftLocked
+                            ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed'
+                            : rowOtMins > 0
+                            ? 'bg-amber-100 text-amber-950 font-bold border-amber-400 focus:border-amber-600'
+                            : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 focus:border-amber-500'
+                        }`}
+                      />
+                    </td>
+
                     {/* 6. STD O/PUT */}
                     <td className="px-1 py-1 border-r border-slate-200 text-center">
                       <input
@@ -2989,6 +3203,16 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                 <td className="px-2 py-3 border-r border-slate-800 text-center text-slate-400 font-normal">
                   —
                 </td>
+                <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-amber-300">
+                  {totalOtMinutes > 0 ? (
+                    <div>
+                      <div>+{totalOtMinutes}m</div>
+                      <div className="text-[10px] text-amber-400/80 font-normal">({otMachineCount} mach)</div>
+                    </div>
+                  ) : (
+                    <span className="text-slate-500 font-normal">0m</span>
+                  )}
+                </td>
                 <td className="px-2 py-3 border-r border-slate-800 text-center font-mono text-slate-200">
                   {totalStd}
                 </td>
@@ -3042,7 +3266,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   ) : activeMachineCount > 0 ? (
                     <div className="mt-1 text-emerald-400 font-semibold flex items-center gap-1 text-[11px]">
                       <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                      <span>All active machines balanced ({shiftWorkingMinutes}m)</span>
+                      <span>
+                        All active machines balanced ({shiftWorkingMinutes}m
+                        {totalOtMinutes > 0 ? ` + ${totalOtMinutes}m OT` : ''})
+                      </span>
                     </div>
                   ) : null}
                 </td>

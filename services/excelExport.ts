@@ -155,6 +155,8 @@ export function getHeaderFill(header: string): string {
     norm.includes("planned shift time") ||
     norm.includes("operating time") ||
     norm.includes("ideal run") ||
+    norm === "ot (m)" ||
+    norm.includes("overtime") ||
     norm.includes("eff %") ||
     norm.includes("efficiency") ||
     norm.includes("variance") ||
@@ -306,7 +308,9 @@ export function getNumberFormat(header: string, sampleValue: unknown): string | 
     norm.includes("allocations") ||
     norm === "sr no" ||
     norm === "run no" ||
-    norm === "run #"
+    norm === "run #" ||
+    norm === "ot (m)" ||
+    norm.includes("overtime")
   ) {
     if (typeof sampleValue === "number") {
       return "#,##0";
@@ -363,6 +367,16 @@ export function getDataCellStyle(
     if (!isNaN(num) && num > 0) {
       bg = EXCEL_PALETTE.roseTint;
       fontColor = EXCEL_PALETTE.roseText;
+      bold = true;
+    }
+  }
+
+  // 2B. Overtime (subtle amber tint when > 0)
+  if (norm === "ot (m)" || norm.includes("overtime")) {
+    const num = typeof rawVal === "number" ? rawVal : parseFloat(String(rawVal));
+    if (!isNaN(num) && num > 0) {
+      bg = EXCEL_PALETTE.amberTint;
+      fontColor = EXCEL_PALETTE.amberDarkText;
       bold = true;
     }
   }
@@ -1062,6 +1076,7 @@ export function formatRowForExport(row: MachineShiftRow): Record<string, string 
 
 function formatEnrichedLogRow(r: EnrichedAnalyticsRow): (string | number)[] {
   const ct = Number(r.cycleTime) || 0;
+  const ot = Math.max(0, Number(r.overtimeMinutes) || 0);
   const std = Number(r.stdOutput) || 0;
   const act = Number(r.actualOutput) || 0;
   const rew = Number(r.rework) || 0;
@@ -1097,6 +1112,7 @@ function formatEnrichedLogRow(r: EnrichedAnalyticsRow): (string | number)[] {
     r.itemId || "",
     r.operation || "",
     ct,
+    ot,
     planned,
     oper,
     std,
@@ -1159,6 +1175,7 @@ export interface ActiveFiltersMetadata {
   includeTemp?: boolean;
   tempOnly?: boolean;
   splitOnly?: boolean;
+  otOnly?: boolean;
   exportedAt?: string;
 }
 
@@ -1187,6 +1204,7 @@ export function buildFilterMetadataRows(filters: ActiveFiltersMetadata): (string
   else toggles.push("Include TEMP");
 
   if (filters.splitOnly) toggles.push("Split Runs Only");
+  if (filters.otOnly) toggles.push("OT Only");
 
   rows.push(["TOGGLES / MODES", toggles.join(", ")]);
   rows.push(["EXPORTED AT", filters.exportedAt || new Date().toLocaleString()]);
@@ -1224,6 +1242,7 @@ export function buildFilterMetadataList(filters: ActiveFiltersMetadata): Array<{
   else toggles.push("Include TEMP");
 
   if (filters.splitOnly) toggles.push("Split Runs Only");
+  if (filters.otOnly) toggles.push("OT Only");
 
   list.push({ label: "TOGGLES / MODES", value: toggles.join(", ") });
   list.push({ label: "EXPORTED AT", value: filters.exportedAt || new Date().toLocaleString() });
@@ -2151,6 +2170,10 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     { label: "Scheduled Target", value: overallMetrics.totalStd },
     { label: "Good Output", value: overallMetrics.goodOutput },
     { label: "Total Breakdown", value: `${overallMetrics.downtimeMinutes} mins` },
+    {
+      label: "Total OT Hours",
+      value: `${(overallMetrics.totalOvertimeMinutes / 60).toFixed(1)} hrs (${overallMetrics.totalOvertimeMinutes}m)`,
+    },
   ];
 
   const ws1 = buildStyledWorksheet({
@@ -2256,6 +2279,7 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     "Operator",
     "Operation",
     "Cycle Time",
+    "OT (m)",
     "Std Output",
     "Actual Output",
     "Good Output",
@@ -2298,8 +2322,8 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
       const dTableRows: (string | number)[][] = sortedDRows.map((r) => {
         const f = formatEnrichedLogRow(r);
         return [
-          f[1], f[2], f[3], f[5], f[6], f[7], f[10], f[11], f[14], f[15], f[16], f[17], f[18],
-          f[19], f[20], f[21], f[22], f[23], f[24], f[25], f[26], f[27], f[28], f[29], f[30],
+          f[1], f[2], f[3], f[5], f[6], f[7], f[10], f[11], f[12], f[15], f[16], f[17], f[18],
+          f[19], f[20], f[21], f[22], f[23], f[24], f[25], f[26], f[27], f[28], f[29], f[30], f[31],
         ];
       });
 
@@ -2312,6 +2336,7 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
         "-",
         "-",
         "-",
+        dMetrics.totalOvertimeMinutes,
         dMetrics.totalStd,
         dMetrics.totalActual,
         dMetrics.goodOutput,
@@ -2361,8 +2386,8 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
     const consolidatedRows: (string | number)[][] = sortedAll.map((r) => {
       const f = formatEnrichedLogRow(r);
       return [
-        f[0], f[1], f[2], f[3], f[5], f[6], f[7], f[10], f[11], f[14], f[15], f[16], f[17], f[18],
-        f[19], f[20], f[21], f[22], f[23], f[24], f[25], f[26], f[27], f[28], f[29], f[30],
+        f[0], f[1], f[2], f[3], f[5], f[6], f[7], f[10], f[11], f[12], f[15], f[16], f[17], f[18],
+        f[19], f[20], f[21], f[22], f[23], f[24], f[25], f[26], f[27], f[28], f[29], f[30], f[31],
       ];
     });
 
@@ -2376,6 +2401,7 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
       "-",
       "-",
       "-",
+      overallMetrics.totalOvertimeMinutes,
       overallMetrics.totalStd,
       overallMetrics.totalActual,
       overallMetrics.goodOutput,
@@ -2555,6 +2581,10 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     { label: "Scheduled Target", value: overallMetrics.totalStd },
     { label: "Good Output", value: overallMetrics.goodOutput },
     { label: "Total Breakdown", value: `${overallMetrics.downtimeMinutes} mins` },
+    {
+      label: "Total OT Hours",
+      value: `${(overallMetrics.totalOvertimeMinutes / 60).toFixed(1)} hrs (${overallMetrics.totalOvertimeMinutes}m)`,
+    },
   ];
 
   // --------------------------------------------------------------------------
@@ -2590,6 +2620,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     headers: ["Metric", "Value", "Unit"],
     rows: [
       ["Planned Shift Time", overallMetrics.plannedMinutes, "mins"],
+      ["Overtime Logged", overallMetrics.totalOvertimeMinutes, "mins"],
       ["Operating Time", overallMetrics.operatingMinutes, "mins"],
       ["Total Breakdown Downtime", overallMetrics.downtimeMinutes, "mins"],
       ["Ideal Run Time", overallMetrics.idealRunMinutes, "mins"],
@@ -3006,6 +3037,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     "Item Code",
     "Operation",
     "Cycle Time",
+    "OT (m)",
     "Planned Mins",
     "Operating Mins",
     "Std Output",
@@ -3049,6 +3081,7 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
     "-",
     "-",
     "-",
+    overallMetrics.totalOvertimeMinutes,
     overallMetrics.plannedMinutes,
     overallMetrics.operatingMinutes,
     overallMetrics.totalStd,
@@ -3594,6 +3627,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
     "Item Code",
     "Operation",
     "Cycle Time",
+    "OT (m)",
     "Planned Mins",
     "Operating Mins",
     "Std Output",
@@ -3637,6 +3671,7 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
     "-",
     "-",
     "-",
+    overallMetrics.totalOvertimeMinutes,
     overallMetrics.plannedMinutes,
     overallMetrics.operatingMinutes,
     overallMetrics.totalStd,
@@ -3725,6 +3760,10 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
     { label: "Target (Std)", value: `${overallMetrics.totalStd} pcs` },
     { label: "Good Output", value: `${overallMetrics.goodOutput} pcs` },
     { label: "Total Downtime", value: `${overallMetrics.downtimeMinutes} mins` },
+    {
+      label: "Total OT Hours",
+      value: `${(overallMetrics.totalOvertimeMinutes / 60).toFixed(1)} hrs (${overallMetrics.totalOvertimeMinutes}m)`,
+    },
   ];
 
   const oeeSection: StyledWorksheetSection = {
@@ -3754,6 +3793,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
     headers: ["Metric", "Value", "Unit"],
     rows: [
       ["Planned Shift Time", overallMetrics.plannedMinutes, "mins"],
+      ["Overtime Logged", overallMetrics.totalOvertimeMinutes, "mins"],
       ["Operating Time", overallMetrics.operatingMinutes, "mins"],
       ["Total Breakdown Downtime", overallMetrics.downtimeMinutes, "mins"],
       ["Ideal Run Time", overallMetrics.idealRunMinutes, "mins"],
@@ -3979,6 +4019,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
     "Shifts",
     "Runs",
     "Avg CT (mins)",
+    "OT (m)",
     "Target (Std)",
     "Actual Output",
     "Good Output",
@@ -3991,7 +4032,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
   ];
   const dailyRows =
     dailySummary.length === 0
-      ? [["No daily production records found", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
+      ? [["No daily production records found", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
       : dailySummary.map((d) => [
           d.date,
           d.itemName,
@@ -4000,6 +4041,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
           d.shiftsRun.join(", "),
           d.runsCount,
           d.avgCycleTime,
+          d.overtimeMinutes,
           d.stdOutput,
           d.actualOutput,
           d.goodOutput,
@@ -4021,6 +4063,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
           "-",
           dailySummary.reduce((acc, d) => acc + d.runsCount, 0),
           "-",
+          overallMetrics.totalOvertimeMinutes,
           overallMetrics.totalStd,
           overallMetrics.totalActual,
           overallMetrics.goodOutput,
@@ -4055,6 +4098,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
     "Item Name",
     "Operation",
     "Cycle Time",
+    "OT (m)",
     "Target (Std)",
     "Actual Output",
     "Good Output",
@@ -4072,7 +4116,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
   ];
   const shiftLogRows =
     shiftLogHistory.length === 0
-      ? [["No shift logs found for this machine", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
+      ? [["No shift logs found for this machine", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
       : shiftLogHistory.map((s) => {
           const sGood = Math.max(0, (s.actualOutput || 0) - (s.rework || 0));
           return [
@@ -4085,6 +4129,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
             s.itemName,
             s.operation,
             s.cycleTime,
+            s.overtimeMinutes,
             s.stdOutput,
             s.actualOutput,
             sGood,
@@ -4114,6 +4159,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
           "-",
           "-",
           "-",
+          overallMetrics.totalOvertimeMinutes,
           overallMetrics.totalStd,
           overallMetrics.totalActual,
           overallMetrics.goodOutput,
@@ -4231,6 +4277,7 @@ export function exportDailySheetViewExcel(params: ExportDailySheetViewParams): v
     "Item",
     "Operation",
     "Cycle Time",
+    "OT (m)",
     "Std Output",
     "Actual Output",
     "Rework",
@@ -4273,6 +4320,7 @@ export function exportDailySheetViewExcel(params: ExportDailySheetViewParams): v
       r.itemName || r.itemId || "—",
       r.operation || "—",
       Number(r.cycleTime) || 0,
+      Math.max(0, Number(r.overtimeMinutes) || 0),
       Number(r.stdOutput) || 0,
       Number(r.actualOutput) || 0,
       Number(r.rework) || 0,
@@ -4302,6 +4350,7 @@ export function exportDailySheetViewExcel(params: ExportDailySheetViewParams): v
           "—",
           "—",
           "—",
+          overallMetrics.totalOvertimeMinutes,
           overallMetrics.totalStd,
           overallMetrics.totalActual,
           overallMetrics.totalRework,

@@ -112,8 +112,9 @@ export interface MachineShiftRow {
   itemName: string;
   operation: string;
   cycleTime: number;           // NEW: Snapshotted cycle time
-  totalWorkingMinutes: number; // NEW: Snapshotted working time (default 1305)
-  shiftWorkingMinutes?: number;
+  totalWorkingMinutes: number; // NEW: Effective planned working time (baseShiftMinutes + overtimeMinutes)
+  shiftWorkingMinutes?: number; // Base shift working minutes (without machine overtime)
+  overtimeMinutes?: number;    // Machine-level overtime minutes for this row (default 0)
   stdOutput: number;
   actualOutput: number;
   rework: number;

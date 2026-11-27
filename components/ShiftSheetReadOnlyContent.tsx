@@ -66,8 +66,10 @@ function computeUniqueShiftMinutes(rows: EnrichedAnalyticsRow[], fallback?: numb
   const seenShiftKeys = new Map<string, number>();
   for (const r of rows) {
     const k = `${r.date || ""}__${(r.shift || "").toLowerCase()}`;
+    const rOt = Math.max(0, Number(r.overtimeMinutes) || 0);
     const mins =
-      Number(r.shiftWorkingMinutes ?? r.totalWorkingMinutes) ||
+      Number(r.shiftWorkingMinutes) ||
+      Math.max(0, (Number(r.totalWorkingMinutes) || 0) - rOt) ||
       getDefaultWorkingMinutes(r.shift || "");
     if (!seenShiftKeys.has(k) || mins > (seenShiftKeys.get(k) || 0)) {
       seenShiftKeys.set(k, mins);
@@ -183,11 +185,12 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
     const rowMetrics = calculateOeeMetrics([row]);
     const accountedMins = Math.round((row.idealRunMinutes || 0) + totalBd);
     const plannedMins = Math.round(row.allocatedPlannedMinutes || 0);
+    const rowOt = Math.max(0, Number(row.overtimeMinutes) || 0);
 
     return (
       <tr
         key={row.id || `${row.shift}_${row.line}_${row.machineId}_${row.runNo || 1}_${idx}`}
-        className="hover:bg-slate-50 transition-colors"
+        className={`hover:bg-slate-50 transition-colors ${rowOt > 0 ? "bg-amber-50/35" : ""}`}
       >
         <td className="px-2 py-1.5 border-r border-slate-200 text-center font-mono text-slate-500">
           {row.srNo || idx + 1}
@@ -228,6 +231,11 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
                 R{row.runNo || 1}
               </span>
             )}
+            {rowOt > 0 && (
+              <span className="px-1 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-mono font-bold">
+                +{rowOt}m OT
+              </span>
+            )}
           </div>
         </td>
         <td className="px-2 py-1.5 border-r border-slate-200 text-slate-700">
@@ -241,6 +249,13 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
         </td>
         <td className="px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums text-slate-600">
           {Number(row.cycleTime) > 0 ? row.cycleTime : "—"}
+        </td>
+        <td
+          className={`px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums ${
+            rowOt > 0 ? "bg-amber-100/70 text-amber-900 font-bold" : "text-slate-400"
+          }`}
+        >
+          {rowOt > 0 ? `+${rowOt}m` : "0"}
         </td>
         <td className="px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums text-slate-700">
           {(Number(row.stdOutput) || 0).toLocaleString()}
@@ -327,6 +342,9 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
         >
           {label}
         </td>
+        <td className="px-2 py-2 border-r border-slate-300 text-right font-mono tabular-nums text-amber-800">
+          {metrics.totalOvertimeMinutes > 0 ? `+${metrics.totalOvertimeMinutes}m` : "0"}
+        </td>
         <td className="px-2 py-2 border-r border-slate-300 text-right font-mono tabular-nums">
           {metrics.totalStd.toLocaleString()}
         </td>
@@ -378,9 +396,16 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
       {/* Compact KPI Strip Above Table */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <div className="bg-white border border-slate-200 rounded-md px-3 py-2 shadow-2xs">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
-            Working Mins
-          </span>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              Working Mins
+            </span>
+            {totalsMetrics.totalOvertimeMinutes > 0 && (
+              <span className="px-1 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-mono font-bold">
+                +{totalsMetrics.totalOvertimeMinutes}m OT
+              </span>
+            )}
+          </div>
           <span className="text-sm font-mono font-extrabold text-slate-900">
             {workingMinutes > 0 ? `${workingMinutes.toLocaleString()}m` : "—"}
           </span>
@@ -477,6 +502,13 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
                 <th rowSpan={2} className="px-2 py-2 border-r border-slate-800 text-right">
                   CT
                 </th>
+                <th
+                  rowSpan={2}
+                  className="px-2 py-2 border-r border-slate-800 text-right bg-amber-950/60 text-amber-200"
+                  title="Machine overtime minutes added to base shift time"
+                >
+                  OT (m)
+                </th>
                 <th rowSpan={2} className="px-2 py-2 border-r border-slate-800 text-right">
                   Std
                 </th>
@@ -530,7 +562,7 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
             <tbody className="divide-y divide-slate-200">
               {sortedRows.length === 0 ? (
                 <tr>
-                  <td colSpan={20} className="px-4 py-8 text-center text-slate-500 italic">
+                  <td colSpan={21} className="px-4 py-8 text-center text-slate-500 italic">
                     {emptyMessage || "No machine log rows recorded for this selection."}
                   </td>
                 </tr>
@@ -538,7 +570,7 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
                 shiftSections.map((sec) => (
                   <React.Fragment key={sec.shift}>
                     <tr className="bg-sky-50/90 border-t-2 border-slate-300">
-                      <td colSpan={20} className="px-3 py-2 font-sans">
+                      <td colSpan={21} className="px-3 py-2 font-sans">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <Clock className="w-3.5 h-3.5 text-blue-700" />

@@ -324,6 +324,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [includeTempMachines, setIncludeTempMachines] = useState<boolean>(true);
   const [tempOnly, setTempOnly] = useState<boolean>(false);
   const [splitRunsOnly, setSplitRunsOnly] = useState<boolean>(false);
+  const [otOnly, setOtOnly] = useState<boolean>(false);
 
   // Available facet options derived from data
   const availableFacets = useMemo(() => {
@@ -384,7 +385,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     filterOperator !== "all" ||
     !includeTempMachines ||
     tempOnly ||
-    splitRunsOnly;
+    splitRunsOnly ||
+    otOnly;
 
   const handleResetFilters = () => {
     setFilterProduct("all");
@@ -395,6 +397,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     setIncludeTempMachines(true);
     setTempOnly(false);
     setSplitRunsOnly(false);
+    setOtOnly(false);
   };
 
   // Filtered rows for analytics calculations
@@ -433,6 +436,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       if (splitRunsOnly && !r.isSplitRun) {
         return false;
       }
+      if (otOnly && (Number(r.overtimeMinutes) || 0) <= 0) {
+        return false;
+      }
       return true;
     });
   }, [
@@ -445,6 +451,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     includeTempMachines,
     tempOnly,
     splitRunsOnly,
+    otOnly,
   ]);
 
   // Filtered shift-level finished goods totals reflecting active filters
@@ -529,7 +536,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     filterOperator !== "all" ||
     !includeTempMachines ||
     tempOnly ||
-    splitRunsOnly;
+    splitRunsOnly ||
+    otOnly;
 
   // Tab 4: Period Rollups
   const periodRollups = useMemo(() => {
@@ -918,6 +926,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       includeTemp: includeTempMachines,
       tempOnly,
       splitOnly: splitRunsOnly,
+      otOnly,
     }),
     [
       fromDate,
@@ -930,6 +939,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       includeTempMachines,
       tempOnly,
       splitRunsOnly,
+      otOnly,
     ]
   );
 
@@ -1334,6 +1344,19 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
               Split Runs Only
             </button>
 
+            <button
+              type="button"
+              onClick={() => setOtOnly(!otOnly)}
+              className={`px-2 py-0.5 text-[11px] font-semibold rounded border cursor-pointer transition-colors ${
+                otOnly
+                  ? "bg-amber-100 text-amber-950 border-amber-400 font-bold"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+              }`}
+              title="Filter only runs where machine overtime (OT > 0) was logged"
+            >
+              OT Only
+            </button>
+
             {hasActiveFacetFilters && (
               <button
                 type="button"
@@ -1375,9 +1398,14 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 : "Needs Process Improvement"}
             </div>
           </div>
-          <div className="text-[11px] font-mono flex items-center justify-between pt-2 border-t border-current/20 opacity-90">
+          <div className="text-[11px] font-mono flex items-center justify-between pt-2 border-t border-current/20 opacity-90 gap-1 flex-wrap">
             <span>Oper: {overallMetrics.operatingMinutes.toFixed(1)}m</span>
             <span>Plan: {overallMetrics.plannedMinutes.toFixed(1)}m</span>
+            {overallMetrics.totalOvertimeMinutes > 0 && (
+              <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
+                +{overallMetrics.totalOvertimeMinutes}m OT
+              </span>
+            )}
           </div>
         </div>
 
@@ -1411,6 +1439,14 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 {overallMetrics.downtimeMinutes.toLocaleString()} m
               </span>
             </div>
+            {overallMetrics.totalOvertimeMinutes > 0 && (
+              <div className="flex justify-between">
+                <span className="text-amber-700 font-semibold">OT Logged:</span>
+                <span className="font-mono font-bold text-amber-800">
+                  {(overallMetrics.totalOvertimeMinutes / 60).toFixed(1)} hrs ({overallMetrics.totalOvertimeMinutes.toLocaleString()} mins)
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -1509,6 +1545,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
           </div>
 
           <div className="flex items-center gap-2 text-[11px] font-mono">
+            {overallMetrics.totalOvertimeMinutes > 0 && (
+              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                {overallMetrics.overtimeRowsCount} OT Runs (+{overallMetrics.totalOvertimeMinutes}m)
+              </span>
+            )}
             {overallMetrics.tempMachineRunsCount > 0 && (
               <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
                 {overallMetrics.tempMachineRunsCount} Temp Machine Runs
@@ -2104,7 +2145,16 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {lineRollups.map((l) => (
                     <tr key={l.line} className="hover:bg-slate-50">
-                      <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">{l.line}</td>
+                      <td className="px-3 py-2 font-sans font-bold text-slate-900 whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span>{l.line}</span>
+                          {l.metrics.totalOvertimeMinutes > 0 && (
+                            <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-mono font-bold">
+                              +{l.metrics.totalOvertimeMinutes}m OT
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-2 text-center font-sans text-slate-600">
                         {l.machineCount} total ({l.permMachineCount} perm / {l.tempMachineCount} temp)
                       </td>
@@ -2223,6 +2273,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                               <span className="text-[10px] font-normal text-slate-400">
                                 ({s.dailyEntries.length} {s.dailyEntries.length === 1 ? "day" : "days"})
                               </span>
+                              {s.metrics.totalOvertimeMinutes > 0 && (
+                                <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-mono font-bold">
+                                  +{s.metrics.totalOvertimeMinutes}m OT
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-3 py-2 text-center font-sans text-slate-600">{s.machineCount}</td>
@@ -2527,6 +2582,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                 </span>
                               )}
                               <span>{p.periodLabel}</span>
+                              {p.metrics.totalOvertimeMinutes > 0 && (
+                                <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-mono font-bold">
+                                  +{p.metrics.totalOvertimeMinutes}m OT
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-3 py-2 font-sans">
@@ -3021,6 +3081,11 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                 {m.isTempMachine && (
                                   <span className="px-1 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
                                     TEMP
+                                  </span>
+                                )}
+                                {m.metrics.totalOvertimeMinutes > 0 && (
+                                  <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-mono font-bold">
+                                    +{m.metrics.totalOvertimeMinutes}m OT
                                   </span>
                                 )}
                               </div>
