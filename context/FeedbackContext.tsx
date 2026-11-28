@@ -25,14 +25,16 @@ export interface RunWithFeedbackOptions {
   successDetail?: string;
   errorTitle?: string;
   rethrow?: boolean;
+  taskKey?: string;
 }
 
 export interface FeedbackContextValue {
   pendingCount: number;
   loadingMessage: string;
   notification: FeedbackNotification | null;
-  startLoading: (message?: string) => string;
+  startLoading: (message?: string, taskKey?: string) => string;
   stopLoading: (taskId?: string) => void;
+  cancelLoadingKey: (taskKey: string) => void;
   notifySuccess: (title: string, detail?: string) => void;
   notifyError: (title: string, detail?: string) => void;
   clearNotification: () => void;
@@ -45,6 +47,7 @@ export interface FeedbackContextValue {
 interface ActiveTask {
   message: string;
   timestamp: number;
+  taskKey?: string;
 }
 
 const FeedbackContext = createContext<FeedbackContextValue | null>(null);
@@ -65,13 +68,21 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const startLoading = useCallback((message?: string): string => {
+  const startLoading = useCallback((message?: string, taskKey?: string): string => {
     const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setTasks((prev) => {
       const next = new Map(prev);
+      if (taskKey) {
+        for (const [existingId, existingTask] of next.entries()) {
+          if (existingTask.taskKey === taskKey) {
+            next.delete(existingId);
+          }
+        }
+      }
       next.set(taskId, {
         message: message || "Syncing with server...",
         timestamp: Date.now(),
+        taskKey,
       });
       return next;
     });
@@ -81,6 +92,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   const stopLoading = useCallback((taskId?: string) => {
     setTasks((prev) => {
       if (prev.size === 0) return prev;
+      if (taskId && !prev.has(taskId)) return prev;
       const next = new Map(prev);
       if (taskId) {
         next.delete(taskId);
@@ -89,6 +101,22 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
         if (firstKey) next.delete(firstKey);
       }
       return next;
+    });
+  }, []);
+
+  const cancelLoadingKey = useCallback((taskKey: string) => {
+    if (!taskKey) return;
+    setTasks((prev) => {
+      if (prev.size === 0) return prev;
+      let removed = false;
+      const next = new Map(prev);
+      for (const [id, task] of next.entries()) {
+        if (task.taskKey === taskKey) {
+          next.delete(id);
+          removed = true;
+        }
+      }
+      return removed ? next : prev;
     });
   }, []);
 
@@ -154,7 +182,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       task: () => Promise<T>,
       options?: RunWithFeedbackOptions
     ): Promise<T | undefined> => {
-      const taskId = startLoading(options?.loadingMessage);
+      const taskId = startLoading(options?.loadingMessage, options?.taskKey);
       try {
         const result = await task();
         if (options?.successTitle) {
@@ -190,6 +218,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       notification,
       startLoading,
       stopLoading,
+      cancelLoadingKey,
       notifySuccess,
       notifyError,
       clearNotification,
@@ -201,6 +230,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       notification,
       startLoading,
       stopLoading,
+      cancelLoadingKey,
       notifySuccess,
       notifyError,
       clearNotification,

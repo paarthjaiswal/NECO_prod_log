@@ -172,7 +172,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   onOpenMachine,
   onOpenShiftSheet,
 }) => {
-  const { runWithFeedback, notifySuccess, notifyError } = useFeedback();
+  const { runWithFeedback, cancelLoadingKey, notifySuccess, notifyError } = useFeedback();
 
   // --------------------------------------------------------------------------
   // DATE RANGE CONTROLS & STATE
@@ -181,6 +181,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [activePreset, setActivePreset] = useState<PresetKey>("thisWeek");
   const [fromDate, setFromDate] = useState<string>(initialPresets.thisWeek.from);
   const [toDate, setToDate] = useState<string>(initialPresets.thisWeek.to);
+  const [customFromInput, setCustomFromInput] = useState<string>(initialPresets.thisWeek.from);
+  const [customToInput, setCustomToInput] = useState<string>(initialPresets.thisWeek.to);
 
   // Data loaded from Supabase
   const [historicalLogs, setHistoricalLogs] = useState<MachineShiftRow[]>([]);
@@ -241,45 +243,91 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
   const handleDateRangeChange = useCallback(
     (from: string, to: string, preset?: string) => {
-      setFromDate(from);
-      setToDate(to);
-      if (
+      const presetKey =
         preset &&
         (["today", "yesterday", "thisWeek", "lastWeek", "thisMonth", "single", "custom"] as const).includes(
           preset as PresetKey
         )
+          ? (preset as PresetKey)
+          : "custom";
+
+      let resolvedFrom = from;
+      let resolvedTo = to;
+      if (
+        (!resolvedFrom || !resolvedTo) &&
+        (presetKey === "today" ||
+          presetKey === "yesterday" ||
+          presetKey === "thisWeek" ||
+          presetKey === "lastWeek" ||
+          presetKey === "thisMonth")
       ) {
-        setActivePreset(preset as PresetKey);
-      } else {
-        setActivePreset("custom");
+        resolvedFrom = initialPresets[presetKey].from;
+        resolvedTo = initialPresets[presetKey].to;
       }
+
+      if (!resolvedFrom || !resolvedTo) {
+        return;
+      }
+
+      setFromDate(resolvedFrom);
+      setToDate(resolvedTo);
+      setCustomFromInput(resolvedFrom);
+      setCustomToInput(resolvedTo);
+      setActivePreset(presetKey);
     },
-    []
+    [initialPresets]
   );
 
   const lastFetchedRangeRef = useRef<string>("");
+  const fetchIdRef = useRef<number>(0);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      fetchIdRef.current += 1;
+      lastFetchedRangeRef.current = "";
+      cancelLoadingKey("analytics-fetch");
+    };
+  }, [cancelLoadingKey]);
 
   const fetchRange = useCallback(
     async (from: string, to: string) => {
+      if (!from || !to) {
+        return;
+      }
       const rangeKey = `${from}_to_${to}`;
       if (lastFetchedRangeRef.current === rangeKey) {
         return;
       }
       lastFetchedRangeRef.current = rangeKey;
+      const currentFetchId = ++fetchIdRef.current;
 
       await runWithFeedback(
         async () => {
-          const [logsData, itemProdData] = await Promise.all([
-            getAnalyticsLogs(from, to),
-            getAnalyticsItemProduction(from, to),
-          ]);
-          setHistoricalLogs(logsData || []);
-          setHistoricalItemProduction(itemProdData || []);
-          return logsData;
+          try {
+            const [logsData, itemProdData] = await Promise.all([
+              getAnalyticsLogs(from, to),
+              getAnalyticsItemProduction(from, to),
+            ]);
+            if (!isMountedRef.current || currentFetchId !== fetchIdRef.current) {
+              return logsData;
+            }
+            setHistoricalLogs(logsData || []);
+            setHistoricalItemProduction(itemProdData || []);
+            return logsData;
+          } catch (err) {
+            if (currentFetchId === fetchIdRef.current) {
+              lastFetchedRangeRef.current = "";
+            }
+            throw err;
+          }
         },
         {
           loadingMessage: "Loading analytics data...",
           errorTitle: "Analytics Fetch Failed",
+          taskKey: "analytics-fetch",
         }
       );
     },
@@ -296,6 +344,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     setActivePreset(key);
     setFromDate(dates.from);
     setToDate(dates.to);
+    setCustomFromInput(dates.from);
+    setCustomToInput(dates.to);
   };
 
   const handleSelectSingleDateMode = () => {
@@ -303,6 +353,8 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     setActivePreset("single");
     setFromDate(targetDate);
     setToDate(targetDate);
+    setCustomFromInput(targetDate);
+    setCustomToInput(targetDate);
   };
 
   const handleSingleDateValueChange = (nextDate: string) => {
@@ -310,19 +362,30 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     setActivePreset("single");
     setFromDate(nextDate);
     setToDate(nextDate);
+    setCustomFromInput(nextDate);
+    setCustomToInput(nextDate);
   };
 
   const handleSelectCustomRangeMode = () => {
     const fallback = fromDate || toDate || initialPresets.today.from;
-    if (!fromDate) setFromDate(fallback);
-    if (!toDate) setToDate(fallback);
+    const nextFrom = fromDate || fallback;
+    const nextTo = toDate || fallback;
+    setCustomFromInput(nextFrom);
+    setCustomToInput(nextTo);
     setActivePreset("custom");
   };
 
   const handleApplyCustomDates = () => {
+    const nextFrom = customFromInput || fromDate || initialPresets.today.from;
+    const nextTo = customToInput || toDate || nextFrom;
     setActivePreset("custom");
-    lastFetchedRangeRef.current = "";
-    fetchRange(fromDate, toDate);
+    if (nextFrom === fromDate && nextTo === toDate) {
+      lastFetchedRangeRef.current = "";
+      fetchRange(nextFrom, nextTo);
+    } else {
+      setFromDate(nextFrom);
+      setToDate(nextTo);
+    }
   };
 
   // --------------------------------------------------------------------------
@@ -1289,9 +1352,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <span className="text-[11px] font-semibold text-slate-500">From:</span>
                     <input
                       type="date"
-                      value={fromDate}
+                      value={customFromInput}
                       onChange={(e) => {
-                        setFromDate(e.target.value);
+                        setCustomFromInput(e.target.value);
                         setActivePreset("custom");
                       }}
                       className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
@@ -1301,9 +1364,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                     <span className="text-[11px] font-semibold text-slate-500">To:</span>
                     <input
                       type="date"
-                      value={toDate}
+                      value={customToInput}
                       onChange={(e) => {
-                        setToDate(e.target.value);
+                        setCustomToInput(e.target.value);
                         setActivePreset("custom");
                       }}
                       className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"

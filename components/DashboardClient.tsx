@@ -693,7 +693,15 @@ export default function DashboardClient({
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
   const [isPending] = useTransition();
 
-  const { runWithFeedback } = useFeedback();
+  const { runWithFeedback, cancelLoadingKey } = useFeedback();
+  const shiftFetchIdRef = useRef<number>(0);
+
+  useEffect(() => {
+    return () => {
+      shiftFetchIdRef.current += 1;
+      cancelLoadingKey("shift-sheet-fetch");
+    };
+  }, [cancelLoadingKey]);
 
   const draftKey = getDraftKey(selectedDate, selectedShift, selectedLine);
   const prevFilterRef = useRef<{
@@ -799,6 +807,7 @@ export default function DashboardClient({
     };
 
     let isMounted = true;
+    const currentFetchId = ++shiftFetchIdRef.current;
 
     // Immediately replace currentShiftRows with clean default rows for the new selection
     // so stale rows from the previous shift/date/line are NEVER retained or merged
@@ -845,6 +854,7 @@ export default function DashboardClient({
               );
               setCurrentShiftRows(reconciled);
               setHasUnsavedDraft(true);
+              cancelLoadingKey("shift-sheet-fetch");
               return;
             } else {
               localStorage.removeItem(activeDraftKey);
@@ -862,7 +872,7 @@ export default function DashboardClient({
           getShiftSheetRows(selectedDate, selectedShift, selectedLine),
           getShiftItemProduction(selectedDate, selectedShift, selectedLine),
         ]);
-        if (isMounted) {
+        if (isMounted && currentFetchId === shiftFetchIdRef.current) {
           const reconciled = ensureAllLineMachinesInRows(
             freshRows,
             currentLineMachines,
@@ -880,11 +890,13 @@ export default function DashboardClient({
       {
         loadingMessage: `Loading ${selectedLine} (${selectedShift})...`,
         errorTitle: "Failed to load shift sheet",
+        taskKey: "shift-sheet-fetch",
       }
     );
 
     return () => {
       isMounted = false;
+      shiftFetchIdRef.current += 1;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate, selectedShift, selectedLine]);
@@ -903,6 +915,7 @@ export default function DashboardClient({
       // ignore
     }
     setHasUnsavedDraft(false);
+    const currentFetchId = ++shiftFetchIdRef.current;
 
     await runWithFeedback(
       async () => {
@@ -918,8 +931,10 @@ export default function DashboardClient({
           selectedLine,
           activeShiftWorkingMinutes
         );
-        setCurrentShiftRows(reconciled);
-        setShiftItemTotals(freshItemProd || []);
+        if (currentFetchId === shiftFetchIdRef.current) {
+          setCurrentShiftRows(reconciled);
+          setShiftItemTotals(freshItemProd || []);
+        }
         return reconciled;
       },
       {
@@ -927,6 +942,7 @@ export default function DashboardClient({
         successTitle: "Draft Discarded",
         successDetail: "Restored last saved server data",
         errorTitle: "Could not reload shift rows",
+        taskKey: "shift-sheet-fetch",
       }
     );
   };
