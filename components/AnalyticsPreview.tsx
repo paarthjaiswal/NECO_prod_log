@@ -72,17 +72,31 @@ interface AnalyticsPreviewProps {
 }
 
 type TabType = "product" | "line" | "shift" | "period" | "machine" | "daily_sheet";
-type PresetKey = "today" | "yesterday" | "thisWeek" | "lastWeek" | "thisMonth" | "custom";
+type PresetKey = "today" | "yesterday" | "thisWeek" | "lastWeek" | "thisMonth" | "single" | "custom";
 
-function formatDateWithWeekday(dateStr: string): string {
-  if (!dateStr) return "—";
+function getShortWeekday(dateStr: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return "";
   try {
     const d = new Date(dateStr + "T00:00:00Z");
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    return `${dateStr} (${days[d.getUTCDay()] || ""})`;
+    return days[d.getUTCDay()] || "";
   } catch {
-    return dateStr;
+    return "";
   }
+}
+
+function shiftIsoDate(dateStr: string, deltaDays: number): string {
+  const parts = (dateStr || "").split("-").map(Number);
+  if (parts.length !== 3 || parts.some((n) => isNaN(n))) return dateStr;
+  const [y, m, d] = parts;
+  const next = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  return next.toISOString().slice(0, 10);
+}
+
+function formatDateWithWeekday(dateStr: string): string {
+  if (!dateStr) return "—";
+  const wd = getShortWeekday(dateStr);
+  return wd ? `${dateStr} (${wd})` : dateStr;
 }
 
 function getShortShiftLabel(shift: string): string {
@@ -231,7 +245,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       setToDate(to);
       if (
         preset &&
-        (["today", "yesterday", "thisWeek", "lastWeek", "thisMonth", "custom"] as const).includes(
+        (["today", "yesterday", "thisWeek", "lastWeek", "thisMonth", "single", "custom"] as const).includes(
           preset as PresetKey
         )
       ) {
@@ -282,6 +296,27 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     setActivePreset(key);
     setFromDate(dates.from);
     setToDate(dates.to);
+  };
+
+  const handleSelectSingleDateMode = () => {
+    const targetDate = toDate || fromDate || initialPresets.today.from;
+    setActivePreset("single");
+    setFromDate(targetDate);
+    setToDate(targetDate);
+  };
+
+  const handleSingleDateValueChange = (nextDate: string) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(nextDate)) return;
+    setActivePreset("single");
+    setFromDate(nextDate);
+    setToDate(nextDate);
+  };
+
+  const handleSelectCustomRangeMode = () => {
+    const fallback = fromDate || toDate || initialPresets.today.from;
+    if (!fromDate) setFromDate(fallback);
+    if (!toDate) setToDate(fallback);
+    setActivePreset("custom");
   };
 
   const handleApplyCustomDates = () => {
@@ -549,6 +584,18 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
     );
   }, [filteredRows, periodGranularity, filteredShiftItemTotals, masterData?.items]);
 
+  // Auto-expand single date row in Chronological Trends when in Single Date mode
+  useEffect(() => {
+    if (
+      activePreset === "single" &&
+      periodGranularity === "day" &&
+      periodRollups.length === 1
+    ) {
+      const onlyKey = periodRollups[0].periodKey;
+      setExpandedTrendDates((prev) => (prev.has(onlyKey) ? prev : new Set([onlyKey])));
+    }
+  }, [activePreset, periodGranularity, periodRollups]);
+
   const toggleExpandTrendDate = (dateKey: string) => {
     setExpandedTrendDates((prev) => {
       const next = new Set(prev);
@@ -620,14 +667,18 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   const [dsMachineId, setDsMachineId] = useState<string>("all");
   const [dsOperator, setDsOperator] = useState<string>("all");
 
-  // Snap dsDate cleanly when top date range changes
+  // Snap dsDate cleanly when top date range changes (auto-sync when single day is active)
   useEffect(() => {
+    if (fromDate && toDate && fromDate === toDate) {
+      if (dsDate !== fromDate) setDsDate(fromDate);
+      return;
+    }
     if (availableDailySheetDates.length === 0) {
       if (dsDate !== "") setDsDate("");
     } else if (!dsDate || !availableDailySheetDates.includes(dsDate)) {
       setDsDate(availableDailySheetDates[0]);
     }
-  }, [availableDailySheetDates, dsDate]);
+  }, [fromDate, toDate, availableDailySheetDates, dsDate]);
 
   // Canonical item key resolver across masterData & shift_item_production
   const dsItemResolver = useMemo(() => {
@@ -958,7 +1009,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       });
       notifySuccess(
         "Excel Export Complete",
-        `Exported filtered analytics report (${filteredRows.length} logs, ${fromDate} to ${toDate}).`
+        `Exported filtered analytics report (${filteredRows.length} logs, ${
+          fromDate === toDate ? fromDate : `${fromDate} to ${toDate}`
+        }).`
       );
     } catch (err) {
       console.error("Filtered Excel export failed:", err);
@@ -1051,7 +1104,9 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
 
         notifySuccess(
           "Tab Export Complete",
-          `Exported ${tabNames[tabKey]} (${fromDate} to ${toDate}).`
+          `Exported ${tabNames[tabKey]} (${
+            fromDate === toDate ? fromDate : `${fromDate} to ${toDate}`
+          }).`
         );
       } catch (err) {
         console.error("Tab Excel export failed:", err);
@@ -1075,7 +1130,7 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
   );
 
   const handleExportCSV = () => {
-    const rangeTag = `${fromDate}_to_${toDate}`;
+    const rangeTag = fromDate === toDate ? fromDate : `${fromDate}_to_${toDate}`;
     exportHistoricalToCSV(
       filteredRows,
       fromDate,
@@ -1163,41 +1218,105 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                 </button>
               );
             })}
+            <button
+              type="button"
+              onClick={handleSelectSingleDateMode}
+              className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
+                activePreset === "single"
+                  ? "bg-blue-700 text-white shadow-2xs"
+                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+              }`}
+              title="Inspect a single specific calendar day"
+            >
+              Single Date
+            </button>
+            <button
+              type="button"
+              onClick={handleSelectCustomRangeMode}
+              className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
+                activePreset === "custom"
+                  ? "bg-slate-900 text-white shadow-2xs"
+                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+              }`}
+              title="Select custom From and To dates"
+            >
+              Custom Range
+            </button>
           </div>
 
           {/* Date Pickers + Apply */}
           <div className="flex items-center gap-1.5 flex-wrap">
-            <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
-              <span className="text-[11px] font-semibold text-slate-500">From:</span>
-              <input
-                type="date"
-                value={fromDate}
-                onChange={(e) => {
-                  setFromDate(e.target.value);
-                  setActivePreset("custom");
-                }}
-                className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
-              />
-            </div>
-            <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
-              <span className="text-[11px] font-semibold text-slate-500">To:</span>
-              <input
-                type="date"
-                value={toDate}
-                onChange={(e) => {
-                  setToDate(e.target.value);
-                  setActivePreset("custom");
-                }}
-                className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
-              />
-            </div>
-            <button
-              type="button"
-              onClick={handleApplyCustomDates}
-              className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
-            >
-              Apply
-            </button>
+            {activePreset === "single" ? (
+              <div className="flex items-center bg-slate-50 border border-blue-200 rounded overflow-hidden">
+                <button
+                  type="button"
+                  title="Previous day"
+                  onClick={() => handleSingleDateValueChange(shiftIsoDate(fromDate, -1))}
+                  className="px-2 py-1 text-slate-600 hover:text-slate-900 hover:bg-slate-200/80 border-r border-slate-200 transition-colors cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-slate-700">
+                  <input
+                    type="date"
+                    value={fromDate}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        handleSingleDateValueChange(e.target.value);
+                      }
+                    }}
+                    className="bg-transparent text-xs font-mono font-semibold text-slate-900 focus:outline-none cursor-pointer"
+                  />
+                  {getShortWeekday(fromDate) && (
+                    <span className="px-1.5 py-0.2 rounded bg-blue-100 text-blue-800 text-[10px] font-bold">
+                      {getShortWeekday(fromDate)}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  title="Next day"
+                  onClick={() => handleSingleDateValueChange(shiftIsoDate(fromDate, 1))}
+                  className="px-2 py-1 text-slate-600 hover:text-slate-900 hover:bg-slate-200/80 border-l border-slate-200 transition-colors cursor-pointer"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+                  <span className="text-[11px] font-semibold text-slate-500">From:</span>
+                  <input
+                    type="date"
+                    value={fromDate}
+                    onChange={(e) => {
+                      setFromDate(e.target.value);
+                      setActivePreset("custom");
+                    }}
+                    className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
+                  />
+                </div>
+                <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+                  <span className="text-[11px] font-semibold text-slate-500">To:</span>
+                  <input
+                    type="date"
+                    value={toDate}
+                    onChange={(e) => {
+                      setToDate(e.target.value);
+                      setActivePreset("custom");
+                    }}
+                    className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleApplyCustomDates}
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+                >
+                  Apply
+                </button>
+              </>
+            )}
 
             {/* Export buttons */}
             <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200 ml-1">

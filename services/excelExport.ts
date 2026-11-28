@@ -1183,13 +1183,24 @@ export interface ActiveFiltersMetadata {
   exportedAt?: string;
 }
 
+const formatDateRangeValue = (fromDate: string, toDate: string): string =>
+  fromDate && toDate && fromDate === toDate ? fromDate : `${fromDate} to ${toDate}`;
+
+const formatDateRangeFileTag = (fromDate: string, toDate: string): string =>
+  fromDate && toDate && fromDate === toDate ? fromDate : `${fromDate}_to_${toDate}`;
+
 export function buildFilterMetadataRows(filters: ActiveFiltersMetadata): (string | number)[][] {
   const rows: (string | number)[][] = [];
 
   if (filters.reportTitle) {
     rows.push(["REPORT TITLE", filters.reportTitle]);
   }
-  rows.push(["DATE RANGE", `${filters.fromDate} to ${filters.toDate}`]);
+  rows.push([
+    filters.fromDate && filters.toDate && filters.fromDate === filters.toDate
+      ? "DATE"
+      : "DATE RANGE",
+    formatDateRangeValue(filters.fromDate, filters.toDate),
+  ]);
   rows.push(["LINE FILTER", filters.line && filters.line !== "all" ? filters.line : "All Lines"]);
   rows.push(["SHIFT FILTER", filters.shift && filters.shift !== "all" ? filters.shift : "All Shifts"]);
   if (filters.product && filters.product !== "all") {
@@ -1220,7 +1231,13 @@ export function buildFilterMetadataRows(filters: ActiveFiltersMetadata): (string
 export function buildFilterMetadataList(filters: ActiveFiltersMetadata): Array<{ label: string; value: string | number }> {
   const list: Array<{ label: string; value: string | number }> = [];
 
-  list.push({ label: "DATE RANGE", value: `${filters.fromDate} to ${filters.toDate}` });
+  list.push({
+    label:
+      filters.fromDate && filters.toDate && filters.fromDate === filters.toDate
+        ? "DATE"
+        : "DATE RANGE",
+    value: formatDateRangeValue(filters.fromDate, filters.toDate),
+  });
   list.push({
     label: "LINE FILTER",
     value: filters.line && filters.line !== "all" ? filters.line : "All Lines",
@@ -2438,7 +2455,10 @@ export function exportItemTraceabilityExcel(params: ExportItemTraceabilityParams
   }
 
   const cleanName = sanitizeFileName(product.productName);
-  const filename = `Item_${cleanName}_${activeFilters.fromDate}_to_${activeFilters.toDate}.xlsx`;
+  const filename = `Item_${cleanName}_${formatDateRangeFileTag(
+    activeFilters.fromDate,
+    activeFilters.toDate
+  )}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
 
@@ -3117,7 +3137,10 @@ export function exportFilteredAnalyticsWorkbook(params: ExportFilteredAnalyticsP
   });
   XLSX.utils.book_append_sheet(wb, ws7, sanitizeSheetName("Filtered Shift Logs", usedNames));
 
-  const filename = `Analytics_Report_${activeFilters.fromDate}_to_${activeFilters.toDate}.xlsx`;
+  const filename = `Analytics_Report_${formatDateRangeFileTag(
+    activeFilters.fromDate,
+    activeFilters.toDate
+  )}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
 
@@ -3708,7 +3731,10 @@ export function exportActiveAnalyticsTabExcel(params: ExportActiveAnalyticsTabPa
   XLSX.utils.book_append_sheet(wb, ws2, sanitizeSheetName("Supporting Shift Logs", usedNames));
 
   const cleanTab = sanitizeFileName(tabSheetTitle);
-  const filename = `Analytics_${cleanTab}_${activeFilters.fromDate}_to_${activeFilters.toDate}.xlsx`;
+  const filename = `Analytics_${cleanTab}_${formatDateRangeFileTag(
+    activeFilters.fromDate,
+    activeFilters.toDate
+  )}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
 
@@ -3747,7 +3773,10 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
     { label: "MACHINE ID", value: machineMeta.id },
     { label: "LINE", value: machineMeta.line },
     { label: "MACHINE TYPE", value: machineMeta.isTempMachine ? "Temporary Machine (TEMP)" : "Permanent Machine" },
-    { label: "DATE RANGE", value: `${fromDate} to ${toDate}` },
+    {
+      label: fromDate && toDate && fromDate === toDate ? "DATE" : "DATE RANGE",
+      value: formatDateRangeValue(fromDate, toDate),
+    },
     { label: "SHIFT FILTER", value: shiftFilter },
     { label: "EXPORTED AT", value: new Date().toLocaleString() },
   ];
@@ -4191,7 +4220,7 @@ export function exportMachineDetailExcel(params: ExportMachineDetailParams): voi
   XLSX.utils.book_append_sheet(wb, ws5, sanitizeSheetName("Shift-by-Shift Logs", usedNames));
 
   const cleanName = sanitizeFileName(machineMeta.name);
-  const filename = `Machine_${cleanName}_${fromDate}_to_${toDate}.xlsx`;
+  const filename = `Machine_${cleanName}_${formatDateRangeFileTag(fromDate, toDate)}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
 
