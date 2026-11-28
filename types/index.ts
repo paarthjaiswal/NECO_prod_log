@@ -104,6 +104,8 @@ export interface MachineShiftRow {
   srNo: number;
   runNo?: number;              // Multi-Run / Split Row index (1, 2, 3...)
   isTempMachine?: boolean;     // Temporary machine for this shift (not in Master Data)
+  isMergedDt?: boolean;        // Merged Downtime mode across split runs of a machine (default true when split)
+  isManualStd?: boolean;       // Supervisor manually overrode Std Output for this split run
   machineId: string;
   machineCode?: string;
   machineName: string;

@@ -170,6 +170,8 @@ export function ensureAllLineMachinesInRows(
       const deduplicatedRuns = Array.from(byRunNo.values()).sort(
         (a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1)
       );
+      const isMergedGroup =
+        deduplicatedRuns.length >= 2 && deduplicatedRuns.every((r) => Boolean(r.isMergedDt));
 
       deduplicatedRuns.forEach((r, runIdx) => {
         if (r.id) assignedRowIds.add(r.id);
@@ -190,7 +192,9 @@ export function ensureAllLineMachinesInRows(
           machineId: machine.id,
           machineName: machine.name,
           machineCode: machine.code || r.machineCode || undefined,
-          totalWorkingMinutes: baseMins + otMins,
+          totalWorkingMinutes: isMergedGroup
+            ? Number(r.totalWorkingMinutes) || baseMins
+            : baseMins + otMins,
           shiftWorkingMinutes: baseMins,
           overtimeMinutes: otMins,
         });
@@ -278,6 +282,9 @@ export function ensureAllLineMachinesInRows(
       (a, b) => (Number(a.runNo) || 1) - (Number(b.runNo) || 1)
     );
 
+    const isMergedTempGroup =
+      deduplicatedRuns.length >= 2 && deduplicatedRuns.every((r) => Boolean(r.isMergedDt));
+
     deduplicatedRuns.forEach((r, runIdx) => {
       const otMins = Math.max(0, Number(r.overtimeMinutes) || 0);
       const baseMins =
@@ -293,7 +300,9 @@ export function ensureAllLineMachinesInRows(
         srNo: nextSrNo,
         runNo: Number(r.runNo) || runIdx + 1,
         isTempMachine: true,
-        totalWorkingMinutes: baseMins + otMins,
+        totalWorkingMinutes: isMergedTempGroup
+          ? Number(r.totalWorkingMinutes) || baseMins
+          : baseMins + otMins,
         shiftWorkingMinutes: baseMins,
         overtimeMinutes: otMins,
       });

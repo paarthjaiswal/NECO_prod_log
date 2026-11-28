@@ -23,6 +23,8 @@ export interface EnrichedAnalyticsRow extends MachineShiftRow {
   allocatedPlannedMinutes: number;
   overtimeMinutes: number;
   isSplitRun: boolean;
+  isMergedDt: boolean;
+  isManualStd: boolean;
   totalBreakdownMinutes: number;
   operatingMinutes: number;
   idealRunMinutes: number;
@@ -68,6 +70,7 @@ export interface ProductMatrixRow {
   operation: string;
   isTempMachine: boolean;
   splitRunsCount: number;
+  hasMergedDt?: boolean;
   runNos: number[];
   stdOutput: number;
   actualOutput: number;
@@ -116,6 +119,7 @@ export interface ProductOperationMachineRow {
   line: string;
   isTempMachine: boolean;
   splitRunsCount: number;
+  hasMergedDt?: boolean;
   runsCount: number;
   minSrNo: number;
   stdOutput: number;
@@ -346,13 +350,39 @@ export function computeAllocatedPlannedMinutes(logs: MachineShiftRow[]): Enriche
         overtimeMinutes: rOt,
         allocatedPlannedMinutes: allocatedPlanned,
         isSplitRun: false,
+        isMergedDt: Boolean(r.isMergedDt),
+        isManualStd: Boolean(r.isManualStd),
         totalBreakdownMinutes: bdMins,
         operatingMinutes: Math.max(0, allocatedPlanned - bdMins),
         idealRunMinutes: Number((actual * ct).toFixed(2)),
         goodOutput: Math.max(0, actual - rework),
       });
+    } else if (group.some((r) => Boolean(r.isMergedDt))) {
+      // Merged-DT split rows: each row's totalWorkingMinutes ALREADY holds its exact allocated slice
+      // (summing to baseShiftMinutes + groupTotalOt without double-counting).
+      group.forEach((r) => {
+        const rOt = Math.max(0, Number(r.overtimeMinutes) || 0);
+        const allocated = Number(r.totalWorkingMinutes) || 0;
+        const bdMins = calculateTotalBreakdown(r.breakdown);
+        const actual = Number(r.actualOutput) || 0;
+        const rework = Number(r.rework) || 0;
+        const ct = Number(r.cycleTime) || 0;
+
+        enrichedRows.push({
+          ...r,
+          overtimeMinutes: rOt,
+          allocatedPlannedMinutes: allocated,
+          isSplitRun: true,
+          isMergedDt: true,
+          isManualStd: Boolean(r.isManualStd),
+          totalBreakdownMinutes: bdMins,
+          operatingMinutes: Math.max(0, allocated - bdMins),
+          idealRunMinutes: Number((actual * ct).toFixed(2)),
+          goodOutput: Math.max(0, actual - rework),
+        });
+      });
     } else {
-      // Multiple split runs for this machine-shift: compute weights
+      // Separate-DT or legacy split runs for this machine-shift: compute proportional weights
       const rawSlices = group.map((r) => {
         const std = Number(r.stdOutput) || 0;
         const actual = Number(r.actualOutput) || 0;
@@ -383,6 +413,8 @@ export function computeAllocatedPlannedMinutes(logs: MachineShiftRow[]): Enriche
           overtimeMinutes: rOt,
           allocatedPlannedMinutes: allocated,
           isSplitRun: true,
+          isMergedDt: Boolean(r.isMergedDt),
+          isManualStd: Boolean(r.isManualStd),
           totalBreakdownMinutes: bdMins,
           operatingMinutes: Math.max(0, allocated - bdMins),
           idealRunMinutes: Number((actual * ct).toFixed(2)),
@@ -552,6 +584,7 @@ export function buildProductOperationGroups(
         line: s.line || "Line 1",
         isTempMachine: machineOpRows.some((r) => r.isTempMachine),
         splitRunsCount: machineOpRows.filter((r) => r.isSplitRun).length,
+        hasMergedDt: machineOpRows.some((r) => Boolean(r.isMergedDt)),
         runsCount: machineOpRows.length,
         minSrNo,
         stdOutput: mMetrics.totalStd,
@@ -680,6 +713,7 @@ export function buildProductLineMachineMatrix(
       const operation = s.operation || "-";
       const isTemp = subRows.some((r) => r.isTempMachine);
       const splitCount = subRows.filter((r) => r.isSplitRun).length;
+      const hasMergedDt = subRows.some((r) => Boolean(r.isMergedDt));
       const runNos = Array.from(new Set(subRows.map((r) => r.runNo || 1))).sort((a, b) => a - b);
 
       // Latest contextual date & shift
@@ -693,6 +727,7 @@ export function buildProductLineMachineMatrix(
         operation,
         isTempMachine: isTemp,
         splitRunsCount: splitCount,
+        hasMergedDt,
         runNos,
         stdOutput: std,
         actualOutput: act,

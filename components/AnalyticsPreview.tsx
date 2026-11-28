@@ -1908,7 +1908,14 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                           {/* Runs */}
                                           <td className="px-3 py-2 text-center font-mono">
                                             {m.splitRunsCount > 0 ? (
-                                              <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold font-sans">
+                                              <span
+                                                className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold font-sans"
+                                                title={
+                                                  m.hasMergedDt
+                                                    ? "Shift downtime allocated across split runs"
+                                                    : "Split machine runs"
+                                                }
+                                              >
                                                 Split ({m.splitRunsCount})
                                               </span>
                                             ) : (
@@ -2052,7 +2059,14 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
                                       <td className="px-3 py-2 font-sans text-slate-600">{m.operation}</td>
                                       <td className="px-3 py-2 text-center">
                                         {m.splitRunsCount > 0 ? (
-                                          <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold">
+                                          <span
+                                            className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[10px] font-bold"
+                                            title={
+                                              m.hasMergedDt
+                                                ? "Shift downtime allocated across split runs"
+                                                : "Split machine runs"
+                                            }
+                                          >
                                             Split ({m.runNos.join(",")})
                                           </span>
                                         ) : (

@@ -6,6 +6,11 @@ import {
   ShiftMaster,
   ShiftLockInfo,
 } from "@/types";
+import {
+  allocateMergedSplitGroup,
+  extractCombinedSplitTotals,
+  isMergedSplitGroup,
+} from "@/lib/splitAllocation";
 
 /**
  * Sums the 4 downtime categories (NO/DISC, CHANGE, POWER, OPERATOR).
@@ -488,10 +493,17 @@ export function calculateMachineGroupTimeBalance(
     (sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0),
     0
   );
+  const mergedSumBase = isMergedSplitGroup(machineRows)
+    ? Math.max(
+        0,
+        machineRows.reduce((s, r) => s + (Number(r.totalWorkingMinutes) || 0), 0) - totalOt
+      )
+    : 0;
   const firstRowOt = Math.max(0, Number(machineRows[0]?.overtimeMinutes) || 0);
   const baseShiftMins =
     Number(shiftWorkingMinutes) ||
     Number(machineRows[0]?.shiftWorkingMinutes) ||
+    mergedSumBase ||
     (machineRows[0]?.totalWorkingMinutes
       ? Math.max(0, Number(machineRows[0].totalWorkingMinutes) - firstRowOt)
       : 0) ||
@@ -755,10 +767,17 @@ export function recalculateMachineGroupStdOutputs(
     (sum, r) => sum + Math.max(0, Number(r.overtimeMinutes) || 0),
     0
   );
+  const mergedSumBase = isMergedSplitGroup(machineRows)
+    ? Math.max(
+        0,
+        machineRows.reduce((s, r) => s + (Number(r.totalWorkingMinutes) || 0), 0) - totalOt
+      )
+    : 0;
   const firstRowOt = Math.max(0, Number(machineRows[0]?.overtimeMinutes) || 0);
   const baseShiftMins =
     Number(shiftWorkingMinutes) ||
     Number(machineRows[0]?.shiftWorkingMinutes) ||
+    mergedSumBase ||
     (machineRows[0]?.totalWorkingMinutes
       ? Math.max(0, Number(machineRows[0].totalWorkingMinutes) - firstRowOt)
       : 0) ||
@@ -771,6 +790,21 @@ export function recalculateMachineGroupStdOutputs(
     const ct = Number(single.cycleTime) || 0;
     const std = ct > 0 && shiftMins > 0 ? Math.floor(shiftMins / ct) : 0;
     return allRows.map((r) => (r.id === single.id ? { ...r, stdOutput: std } : r));
+  }
+
+  // Merged DT Split Runs: allocate workingMins, OT, stdOutputs, and all 7 BDs cleanly
+  if (isMergedSplitGroup(machineRows)) {
+    const combined = extractCombinedSplitTotals(machineRows);
+    const allocatedGroup = allocateMergedSplitGroup(machineRows, combined, baseShiftMins);
+    const byId = new Map<string, MachineShiftRow>();
+    allocatedGroup.forEach((ar) => byId.set(ar.id, ar));
+    let ptr = 0;
+    return allRows.map((r) => {
+      if (r.machineId !== machineId) return r;
+      const replacement = (r.id && byId.get(r.id)) || allocatedGroup[ptr];
+      ptr++;
+      return replacement || r;
+    });
   }
 
   // Multiple split runs:

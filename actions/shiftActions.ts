@@ -5,6 +5,7 @@ import { cookies } from "next/headers";
 import { createAdminClient } from "@/utils/supabase/server";
 import { getIsUnitHead } from "@/actions/authActions";
 import { evaluateShiftLock, isShiftRowEmpty, buildCanonicalItemKey } from "@/services/storageService";
+import { allocateMergedSplitGroup, extractCombinedSplitTotals } from "@/lib/splitAllocation";
 import { getFallbackFactoryTimeContext } from "@/utils/factoryTime";
 import {
   MachineShiftRow,
@@ -65,6 +66,8 @@ export interface DbShiftLogRow {
   bd_fix_prog?: number | null;
   bd_misc?: number | null;
   is_temp_machine?: boolean | null;
+  is_merged_dt?: boolean | null;
+  is_manual_std?: boolean | null;
   // Read-only PostgreSQL GENERATED ALWAYS columns (present on SELECT, excluded on UPSERT)
   total_bd_minutes?: number | null;
   bd_no_disc_pct?: number | null;
@@ -241,7 +244,7 @@ function resolveCleanShiftDisplayName(
 
 function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
   const totalWorking = Number(dbRow.total_working_minutes ?? 1305);
-  const overtimeMinutes = Math.round(Math.max(0, Number(dbRow.overtime_minutes ?? 0)));
+  const overtimeMinutes = Number(Math.max(0, Number(dbRow.overtime_minutes ?? 0)).toFixed(2));
   const noDisc = Number(Number(dbRow.bd_no_disc ?? 0).toFixed(2));
   const change = Number(Number(dbRow.bd_change ?? 0).toFixed(2));
   const power = Number(Number(dbRow.bd_power ?? 0).toFixed(2));
@@ -267,6 +270,8 @@ function mapDbRowToUiRow(dbRow: DbShiftLogRow): MachineShiftRow {
     srNo: Number(dbRow.sr_no ?? 0),
     runNo: Number(dbRow.run_no ?? 1),
     isTempMachine: Boolean(dbRow.is_temp_machine ?? dbRow.machine_id?.startsWith("temp_")),
+    isMergedDt: Boolean(dbRow.is_merged_dt),
+    isManualStd: Boolean(dbRow.is_manual_std),
     machineId: dbRow.machine_id ?? "",
     machineName: dbRow.machine_name ?? "",
     operatorName: dbRow.operator_name ?? "",
@@ -329,12 +334,14 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow, validItemIdSet?: Set<string>) {
   const finalOperation = isItemValid ? (uiRow.operation?.trim() ?? "") : "";
   const finalCycleTime = isItemValid ? Number(Math.max(0, Number(uiRow.cycleTime) || 0).toFixed(2)) : 0;
   const finalStdOutput = isItemValid ? Math.round(Number(uiRow.stdOutput) || 0) : 0;
-  const overtimeMinutes = Math.round(Math.max(0, Number(uiRow.overtimeMinutes) || 0));
+  const overtimeMinutes = Number(Math.max(0, Number(uiRow.overtimeMinutes) || 0).toFixed(2));
   const baseShiftWorking = Number(uiRow.shiftWorkingMinutes) || 0;
-  const effectiveTotalWorking =
-    baseShiftWorking > 0
-      ? Math.round(baseShiftWorking + overtimeMinutes)
-      : Math.round(Number(uiRow.totalWorkingMinutes) || 1305);
+  const isMergedDt = Boolean(uiRow.isMergedDt);
+  const effectiveTotalWorking = isMergedDt
+    ? Number(Math.max(0, Number(uiRow.totalWorkingMinutes) || 0).toFixed(2))
+    : baseShiftWorking > 0
+    ? Number((baseShiftWorking + overtimeMinutes).toFixed(2))
+    : Number(Math.max(0, Number(uiRow.totalWorkingMinutes) || 1305).toFixed(2));
 
   return {
     id: deterministicId,
@@ -344,6 +351,8 @@ function mapUiRowToDbRow(uiRow: MachineShiftRow, validItemIdSet?: Set<string>) {
     line: uiRow.line,
     sr_no: Math.round(Number(uiRow.srNo) || 0),
     is_temp_machine: Boolean(uiRow.isTempMachine || uiRow.machineId?.startsWith("temp_")),
+    is_merged_dt: isMergedDt,
+    is_manual_std: Boolean(uiRow.isManualStd),
     machine_id: uiRow.machineId,
     machine_name: uiRow.machineName,
     operator_name: uiRow.operatorName?.trim() ?? "",
@@ -596,6 +605,8 @@ function hydrateShiftSheetRows(
   sortedLineMachines.forEach((machine, index) => {
     const machineLogs = groupedSavedLogs.get(machine.id);
     if (machineLogs && machineLogs.length > 0) {
+      const isMergedGroup =
+        machineLogs.length >= 2 && machineLogs.every((l) => Boolean(l.is_merged_dt));
       // Emit ONLY the saved rows for that machine (sorted by run_no ASC, normalizing machineId: machine.id and machineName: machine.name)
       machineLogs.forEach((log, runIdx) => {
         const uiRow = mapDbRowToUiRow(log);
@@ -613,7 +624,9 @@ function hydrateShiftSheetRows(
           machineId: machine.id,
           machineName: machine.name,
           machineCode: machine.code || undefined,
-          totalWorkingMinutes: baseMins + otMins,
+          totalWorkingMinutes: isMergedGroup
+            ? Number(uiRow.totalWorkingMinutes) || baseMins
+            : baseMins + otMins,
           shiftWorkingMinutes: baseMins,
           overtimeMinutes: otMins,
         });
@@ -693,6 +706,9 @@ function hydrateShiftSheetRows(
       (a, b) => (Number(a.run_no) || 1) - (Number(b.run_no) || 1)
     );
 
+    const isMergedTempGroup =
+      deduplicated.length >= 2 && deduplicated.every((l) => Boolean(l.is_merged_dt));
+
     deduplicated.forEach((log, runIdx) => {
       const uiRow = mapDbRowToUiRow(log);
       const otMins = Math.max(0, Number(uiRow.overtimeMinutes) || 0);
@@ -706,7 +722,9 @@ function hydrateShiftSheetRows(
         srNo: nextSrNo,
         runNo: Number(log.run_no) || runIdx + 1,
         isTempMachine: true,
-        totalWorkingMinutes: baseMins + otMins,
+        totalWorkingMinutes: isMergedTempGroup
+          ? Number(uiRow.totalWorkingMinutes) || baseMins
+          : baseMins + otMins,
         shiftWorkingMinutes: baseMins,
         overtimeMinutes: otMins,
       });
@@ -1209,9 +1227,20 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
     return { success: true, count: 0, rows: [] };
   }
 
-  // 2. Fetch valid item IDs from public.items to sanitize item_id foreign references
-  const { data: dbItems } = await supabase.from("items").select("id");
+  // 2. Fetch valid item IDs from public.items and base shift working minutes from public.shifts
+  const [{ data: dbItems }, { data: dbShifts }] = await Promise.all([
+    supabase.from("items").select("id"),
+    supabase.from("shifts").select("shift_code, display_name, shift_working_minutes"),
+  ]);
   const validItemIdSet = new Set((dbItems || []).map((i) => i.id.trim()));
+  const shiftMinutesLookup = new Map<string, number>();
+  for (const s of dbShifts || []) {
+    const mins = Number(s.shift_working_minutes) || 0;
+    if (mins > 0) {
+      if (s.shift_code) shiftMinutesLookup.set(s.shift_code.trim().toLowerCase(), mins);
+      if (s.display_name) shiftMinutesLookup.set(s.display_name.trim().toLowerCase(), mins);
+    }
+  }
 
   // 3. Normalize runNo sequentially (1, 2, 3...) per machineId and generate deterministic id
   const machineRunCounters = new Map<string, number>();
@@ -1237,7 +1266,43 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
     };
   });
 
-  const dbPayloads = normalizedRows.map((r) => mapUiRowToDbRow(r, validItemIdSet));
+  // 3B. Reconcile any Merged-DT multi-run split groups via allocateMergedSplitGroup
+  const groupIndicesMap = new Map<string, number[]>();
+  normalizedRows.forEach((r, idx) => {
+    const isTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+    const gKey = `${r.date}__${r.shift}__${r.line}__${r.machineId}__${isTemp ? "temp" : "perm"}`;
+    const list = groupIndicesMap.get(gKey) || [];
+    list.push(idx);
+    groupIndicesMap.set(gKey, list);
+  });
+
+  const reconciledRows = [...normalizedRows];
+  for (const indices of groupIndicesMap.values()) {
+    const groupRows = indices.map((i) => reconciledRows[i]);
+    if (groupRows.length >= 2 && groupRows.some((r) => Boolean(r.isMergedDt))) {
+      const sample = groupRows[0];
+      const shiftLower = (sample.shift || "").trim().toLowerCase();
+      const shiftCodeLower = extractShiftCode(sample.shift || "").trim().toLowerCase();
+      const dbShiftMins =
+        shiftMinutesLookup.get(shiftLower) ||
+        shiftMinutesLookup.get(shiftCodeLower) ||
+        (shiftCodeLower.includes("c") ? 375 : 465);
+      const baseShiftMins = Number(sample.shiftWorkingMinutes) || dbShiftMins;
+      const combined = extractCombinedSplitTotals(groupRows);
+      const allocatedGroup = allocateMergedSplitGroup(groupRows, combined, baseShiftMins);
+      indices.forEach((rowIdx, pos) => {
+        reconciledRows[rowIdx] = allocatedGroup[pos];
+      });
+    } else if (groupRows.length === 1 && reconciledRows[indices[0]].isMergedDt) {
+      reconciledRows[indices[0]] = {
+        ...reconciledRows[indices[0]],
+        isMergedDt: false,
+        isManualStd: false,
+      };
+    }
+  }
+
+  const dbPayloads = reconciledRows.map((r) => mapUiRowToDbRow(r, validItemIdSet));
 
   // 4. Deduplicate dbPayloads in memory before touching Supabase
   type DbPayload = ReturnType<typeof mapUiRowToDbRow>;
@@ -1295,7 +1360,7 @@ export async function saveShiftSheetRows(rows: MachineShiftRow[]) {
   if (error) throw new Error(error.message);
 
   // Auto-sync valid Machine × Item × Operation cycle times in background (only for valid active rows)
-  await syncMachineItemCycleTimes(supabase, normalizedRows);
+  await syncMachineItemCycleTimes(supabase, reconciledRows);
 
   revalidatePath("/");
   return {

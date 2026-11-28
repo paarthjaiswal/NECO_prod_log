@@ -51,6 +51,12 @@ import {
   DOWNTIME_PALETTE,
   TOTAL_DOWNTIME_THEME,
 } from '@/services/downtimePalette';
+import {
+  allocateMergedSplitGroup,
+  extractCombinedSplitTotals,
+  isMergedSplitGroup,
+  round2,
+} from '@/lib/splitAllocation';
 
 const BD_META = DOWNTIME_PALETTE;
 
@@ -492,7 +498,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         if (rCode && rCode !== targetShiftCode) continue;
       }
 
-      const key = r.machineId || normalize(r.machineName);
+      const key = `${r.machineId || normalize(r.machineName)}::${Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"))}`;
       if (!grouped.has(key)) {
         grouped.set(key, new Map());
         orderedKeys.push(key);
@@ -509,17 +515,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       }
     }
 
-    let hasDuplicates = false;
-    let count = 0;
-    for (const key of orderedKeys) {
-      count += grouped.get(key)!.size;
-    }
-    if (count !== rows.length) {
-      hasDuplicates = true;
-    }
-
-    if (!hasDuplicates) return rows;
-
     const cleaned: MachineShiftRow[] = [];
     for (const key of orderedKeys) {
       const runMap = grouped.get(key)!;
@@ -528,7 +523,12 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       );
       cleaned.push(...sorted);
     }
-    return cleaned;
+
+    const isSameOrder =
+      cleaned.length === rows.length &&
+      cleaned.every((r, idx) => r === rows[idx]);
+
+    return isSameOrder ? rows : cleaned;
   }, [rows, currentShift]);
 
   // Synchronize with parent if duplicate rows were present
@@ -575,25 +575,30 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     [isShiftLocked, cleanRows, rows, onRowsChange, shiftWorkingMinutes, currentDate, currentShift, currentLine]
   );
 
-  // Split machine row into multiple runs
+  // Split machine row into multiple runs (defaults to Merged DT = true)
   const handleSplitMachineRow = useCallback(
     (rowIndex: number) => {
       if (isShiftLocked) return;
-      const baseRow = rows[rowIndex];
+      const baseRow = cleanRows[rowIndex] || rows[rowIndex];
       if (!baseRow) return;
 
-      const machineRuns = rows.filter((r) => r.machineId === baseRow.machineId);
+      const isTemp = Boolean(baseRow.isTempMachine || baseRow.machineId?.startsWith("temp_"));
+      const machineRuns = rows.filter(
+        (r) =>
+          r.machineId === baseRow.machineId &&
+          Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+      );
       const nextRunNo = machineRuns.length + 1;
+      const isInitialSplit = machineRuns.length <= 1;
+      const makeMerged = isInitialSplit ? true : isMergedSplitGroup(machineRuns);
+      const existingCombined = extractCombinedSplitTotals(machineRuns);
 
-      let lastMachineIndex = rowIndex;
-      for (let i = rows.length - 1; i >= 0; i--) {
-        if (rows[i].machineId === baseRow.machineId) {
-          lastMachineIndex = i;
-          break;
-        }
-      }
+      const baseShiftMins =
+        shiftWorkingMinutes ||
+        Number(baseRow.shiftWorkingMinutes) ||
+        Math.max(0, (Number(baseRow.totalWorkingMinutes) || 465) - (Number(baseRow.overtimeMinutes) || 0)) ||
+        465;
 
-      const rowShiftMins = shiftWorkingMinutes || baseRow.totalWorkingMinutes || 1305;
       const newSubRow: MachineShiftRow = {
         id: `${baseRow.date}_${baseRow.shift}_${baseRow.line}_${baseRow.machineId}_r${nextRunNo}`,
         date: baseRow.date,
@@ -602,7 +607,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         productionLine: baseRow.productionLine,
         srNo: baseRow.srNo,
         runNo: nextRunNo,
-        isTempMachine: Boolean(baseRow.isTempMachine || baseRow.machineId?.startsWith("temp_")),
+        isTempMachine: isTemp,
+        isMergedDt: makeMerged,
+        isManualStd: false,
         machineId: baseRow.machineId,
         machineCode: baseRow.machineCode,
         machineName: baseRow.machineName,
@@ -611,8 +618,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         itemName: "",
         operation: "",
         cycleTime: 0,
-        totalWorkingMinutes: rowShiftMins,
-        shiftWorkingMinutes: rowShiftMins,
+        totalWorkingMinutes: 0,
+        shiftWorkingMinutes: baseShiftMins,
+        overtimeMinutes: 0,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -639,47 +647,245 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         remarks: "",
       };
 
-      const updatedRows = [...rows];
-      updatedRows.splice(lastMachineIndex + 1, 0, newSubRow);
+      const nextGroupRaw = [
+        ...machineRuns.map((r) => ({
+          ...r,
+          isMergedDt: makeMerged,
+          isManualStd: isInitialSplit ? false : Boolean(r.isManualStd),
+        })),
+        newSubRow,
+      ];
 
-      const balancedRows = recalculateMachineGroupStdOutputs(
-        updatedRows,
-        baseRow.machineId,
-        rowShiftMins
+      const nextGroupFinal = makeMerged
+        ? allocateMergedSplitGroup(nextGroupRaw, existingCombined, baseShiftMins)
+        : nextGroupRaw;
+
+      let inserted = false;
+      const updatedRows: MachineShiftRow[] = [];
+      for (const r of rows) {
+        const rIsTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+        if (r.machineId === baseRow.machineId && rIsTemp === isTemp) {
+          if (!inserted) {
+            updatedRows.push(...nextGroupFinal);
+            inserted = true;
+          }
+        } else {
+          updatedRows.push(r);
+        }
+      }
+      if (!inserted) updatedRows.push(...nextGroupFinal);
+
+      if (makeMerged) {
+        setBdDrafts({});
+        onRowsChange(updatedRows);
+      } else {
+        const balancedRows = recalculateMachineGroupStdOutputs(
+          updatedRows,
+          baseRow.machineId,
+          baseShiftMins
+        );
+        onRowsChange(balancedRows);
+      }
+    },
+    [isShiftLocked, cleanRows, rows, shiftWorkingMinutes, onRowsChange]
+  );
+
+  // Remove a split sub-row (restoring full combined DT/OT onto sole remaining row when back to 1)
+  const handleRemoveSplitRow = useCallback(
+    (rowIndex: number) => {
+      if (isShiftLocked) return;
+      const targetRow = cleanRows[rowIndex] || rows[rowIndex];
+      if (!targetRow || (targetRow.runNo || 1) <= 1) return;
+
+      const isTemp = Boolean(targetRow.isTempMachine || targetRow.machineId?.startsWith("temp_"));
+      const machineRuns = rows.filter(
+        (r) =>
+          r.machineId === targetRow.machineId &&
+          Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
       );
-      onRowsChange(balancedRows);
+      const existingCombined = extractCombinedSplitTotals(machineRuns);
+      const wasMerged = isMergedSplitGroup(machineRuns);
+      const baseShiftMins =
+        shiftWorkingMinutes ||
+        Number(targetRow.shiftWorkingMinutes) ||
+        465;
+
+      const filteredGroup = machineRuns
+        .filter((r) =>
+          targetRow.id
+            ? r.id !== targetRow.id
+            : (r.runNo || 1) !== (targetRow.runNo || 1)
+        )
+        .map((r, idx) => ({
+          ...r,
+          runNo: idx + 1,
+          id:
+            idx === 0
+              ? `${r.date}_${r.shift}_${r.line}_${r.machineId}`
+              : `${r.date}_${r.shift}_${r.line}_${r.machineId}_r${idx + 1}`,
+        }));
+
+      let finalGroup: MachineShiftRow[];
+      if (filteredGroup.length === 1) {
+        const sole = filteredGroup[0];
+        const ct = Number(sole.cycleTime) || 0;
+        const effectiveMins = round2(baseShiftMins + existingCombined.overtimeMinutes);
+        finalGroup = [
+          {
+            ...sole,
+            isMergedDt: false,
+            isManualStd: false,
+            shiftWorkingMinutes: baseShiftMins,
+            totalWorkingMinutes: effectiveMins,
+            overtimeMinutes: existingCombined.overtimeMinutes,
+            stdOutput: ct > 0 ? Math.floor(effectiveMins / ct) : 0,
+            breakdown: {
+              noDisc: existingCombined.noDisc,
+              change: existingCombined.change,
+              power: existingCombined.power,
+              operator: existingCombined.operator,
+              machineBreakdown: existingCombined.machineBreakdown,
+              fixProgSettings: existingCombined.fixProgSettings,
+              miscellaneous: existingCombined.miscellaneous,
+            },
+          },
+        ];
+      } else if (wasMerged) {
+        finalGroup = allocateMergedSplitGroup(filteredGroup, existingCombined, baseShiftMins);
+      } else {
+        finalGroup = filteredGroup;
+      }
+
+      let replaced = false;
+      const rebuiltRows: MachineShiftRow[] = [];
+      for (const r of rows) {
+        const rIsTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+        if (r.machineId === targetRow.machineId && rIsTemp === isTemp) {
+          if (!replaced) {
+            rebuiltRows.push(...finalGroup);
+            replaced = true;
+          }
+        } else {
+          rebuiltRows.push(r);
+        }
+      }
+
+      setBdDrafts({});
+      if (filteredGroup.length >= 2 && !wasMerged) {
+        onRowsChange(recalculateMachineGroupStdOutputs(rebuiltRows, targetRow.machineId, baseShiftMins));
+      } else {
+        onRowsChange(rebuiltRows);
+      }
+    },
+    [isShiftLocked, cleanRows, rows, shiftWorkingMinutes, onRowsChange]
+  );
+
+  // Toggle between Merged DT and Separate DT for a split machine
+  const handleToggleMergedDt = useCallback(
+    (machineId: string, isTemp: boolean, makeMerged: boolean) => {
+      if (isShiftLocked) return;
+      const machineRuns = rows.filter(
+        (r) =>
+          r.machineId === machineId &&
+          Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+      );
+      if (machineRuns.length < 2) return;
+
+      const baseShiftMins =
+        shiftWorkingMinutes || Number(machineRuns[0]?.shiftWorkingMinutes) || 465;
+
+      let nextGroup: MachineShiftRow[];
+      if (!makeMerged) {
+        // Merged DT -> Separate DT: preserve current allocated per-row values
+        nextGroup = machineRuns.map((r) => ({
+          ...r,
+          isMergedDt: false,
+        }));
+      } else {
+        // Separate DT -> Merged DT: sum current OT & 7 BDs and re-allocate
+        const combined = extractCombinedSplitTotals(machineRuns);
+        const flagged = machineRuns.map((r) => ({ ...r, isMergedDt: true }));
+        nextGroup = allocateMergedSplitGroup(flagged, combined, baseShiftMins);
+      }
+
+      let replaced = false;
+      const updatedRows: MachineShiftRow[] = [];
+      for (const r of rows) {
+        const rIsTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+        if (r.machineId === machineId && rIsTemp === isTemp) {
+          if (!replaced) {
+            updatedRows.push(...nextGroup);
+            replaced = true;
+          }
+        } else {
+          updatedRows.push(r);
+        }
+      }
+
+      setBdDrafts({});
+      onRowsChange(updatedRows);
     },
     [isShiftLocked, rows, shiftWorkingMinutes, onRowsChange]
   );
 
-  // Remove a split sub-row
-  const handleRemoveSplitRow = useCallback(
-    (rowIndex: number) => {
+  // Manual Std override inside a split machine (and 1-click Auto reset)
+  const handleManualStdChange = useCallback(
+    (rowIndex: number, rawVal: string, resetToAuto = false) => {
       if (isShiftLocked) return;
-      const targetRow = rows[rowIndex];
-      if (!targetRow || (targetRow.runNo || 1) <= 1) return;
+      const targetRow = cleanRows[rowIndex] || rows[rowIndex];
+      if (!targetRow) return;
 
-      const rowShiftMins = shiftWorkingMinutes || targetRow.totalWorkingMinutes || 1305;
-      const filteredRows = rows.filter((_, idx) => idx !== rowIndex);
-
-      let runCounter = 1;
-      const renumberedRows = filteredRows.map((r) => {
-        if (r.machineId === targetRow.machineId) {
-          const updated = { ...r, runNo: runCounter };
-          runCounter++;
-          return updated;
-        }
-        return r;
-      });
-
-      const balancedRows = recalculateMachineGroupStdOutputs(
-        renumberedRows,
-        targetRow.machineId,
-        rowShiftMins
+      const isTemp = Boolean(targetRow.isTempMachine || targetRow.machineId?.startsWith("temp_"));
+      const machineRuns = rows.filter(
+        (r) =>
+          r.machineId === targetRow.machineId &&
+          Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
       );
-      onRowsChange(balancedRows);
+      const parsedStd = resetToAuto
+        ? 0
+        : rawVal === ""
+        ? 0
+        : Math.max(0, parseInt(rawVal, 10) || 0);
+
+      if (isMergedSplitGroup(machineRuns)) {
+        const baseShiftMins =
+          shiftWorkingMinutes || Number(targetRow.shiftWorkingMinutes) || 465;
+        const combined = extractCombinedSplitTotals(machineRuns);
+        const flaggedGroup = machineRuns.map((r) => {
+          const isMatch = targetRow.id
+            ? r.id === targetRow.id
+            : (r.runNo || 1) === (targetRow.runNo || 1);
+          if (!isMatch) return r;
+          return resetToAuto
+            ? { ...r, isManualStd: false }
+            : { ...r, stdOutput: parsedStd, isManualStd: true };
+        });
+        const allocatedGroup = allocateMergedSplitGroup(flaggedGroup, combined, baseShiftMins);
+
+        let replaced = false;
+        const nextRows: MachineShiftRow[] = [];
+        for (const r of rows) {
+          const rIsTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+          if (r.machineId === targetRow.machineId && rIsTemp === isTemp) {
+            if (!replaced) {
+              nextRows.push(...allocatedGroup);
+              replaced = true;
+            }
+          } else {
+            nextRows.push(r);
+          }
+        }
+        onRowsChange(nextRows);
+      } else {
+        updateRow(
+          rowIndex,
+          resetToAuto
+            ? { isManualStd: false }
+            : { stdOutput: parsedStd, isManualStd: true }
+        );
+      }
     },
-    [isShiftLocked, rows, shiftWorkingMinutes, onRowsChange]
+    [isShiftLocked, cleanRows, rows, shiftWorkingMinutes, onRowsChange, updateRow]
   );
 
   // Remove an entire temporary machine (all runs for that machineId)
@@ -1249,13 +1455,24 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       Math.max(0, (Number(row.totalWorkingMinutes) || 465) - (Number(row.overtimeMinutes) || 0)) ||
       465;
 
-    const machRuns = rows.filter((r) => r.machineId === row.machineId);
+    const isTemp = Boolean(row.isTempMachine || row.machineId?.startsWith("temp_"));
+    const machRuns = rows.filter(
+      (r) =>
+        r.machineId === row.machineId &&
+        Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+    );
     if (machRuns.length > 1) {
-      const suggestedStd = calculateSplitRowSuggestedStd(rows, row.id, newCt, baseMins);
-      const updated = rows.map((r, i) =>
-        i === rowIndex ? { ...r, cycleTime: newCt, stdOutput: suggestedStd } : r
-      );
-      onRowsChange(updated);
+      if (isMergedSplitGroup(machRuns)) {
+        const updated = rows.map((r, i) => (i === rowIndex ? { ...r, cycleTime: newCt } : r));
+        const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, baseMins);
+        onRowsChange(recomputed);
+      } else {
+        const suggestedStd = calculateSplitRowSuggestedStd(rows, row.id, newCt, baseMins);
+        const updated = rows.map((r, i) =>
+          i === rowIndex ? { ...r, cycleTime: newCt, stdOutput: suggestedStd } : r
+        );
+        onRowsChange(updated);
+      }
     } else {
       const updated = rows.map((r, i) => (i === rowIndex ? { ...r, cycleTime: newCt } : r));
       const recomputed = recalculateMachineGroupStdOutputs(updated, row.machineId, baseMins);
@@ -1268,6 +1485,44 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (isShiftLocked) return;
     const targetRow = cleanRows[rowIndex] || rows[rowIndex];
     if (!targetRow) return;
+
+    const newOt = round2(Math.max(0, Number(rawVal) || 0));
+    const isTemp = Boolean(targetRow.isTempMachine || targetRow.machineId?.startsWith("temp_"));
+    const machineRuns = rows.filter(
+      (r) =>
+        r.machineId === targetRow.machineId &&
+        Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+    );
+    const baseMins =
+      shiftWorkingMinutes ||
+      Number(targetRow.shiftWorkingMinutes) ||
+      Math.max(0, (Number(targetRow.totalWorkingMinutes) || 465) - (Number(targetRow.overtimeMinutes) || 0)) ||
+      465;
+
+    if (isMergedSplitGroup(machineRuns)) {
+      const combined = extractCombinedSplitTotals(machineRuns);
+      const allocatedGroup = allocateMergedSplitGroup(
+        machineRuns,
+        { ...combined, overtimeMinutes: newOt },
+        baseMins
+      );
+      let replaced = false;
+      const nextRows: MachineShiftRow[] = [];
+      for (const r of rows) {
+        const rIsTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+        if (r.machineId === targetRow.machineId && rIsTemp === isTemp) {
+          if (!replaced) {
+            nextRows.push(...allocatedGroup);
+            replaced = true;
+          }
+        } else {
+          nextRows.push(r);
+        }
+      }
+      onRowsChange(nextRows);
+      return;
+    }
+
     const matchIdx = rows.findIndex(
       (r) =>
         (targetRow.id && r.id === targetRow.id) ||
@@ -1276,13 +1531,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     const idx = matchIdx >= 0 ? matchIdx : rowIndex;
     const row = rows[idx];
     if (!row) return;
-
-    const newOt = Math.round(Math.max(0, Number(rawVal) || 0));
-    const baseMins =
-      shiftWorkingMinutes ||
-      Number(row.shiftWorkingMinutes) ||
-      Math.max(0, (Number(row.totalWorkingMinutes) || 465) - (Number(row.overtimeMinutes) || 0)) ||
-      465;
 
     const updated = rows.map((r, i) =>
       i === idx
@@ -1298,11 +1546,48 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     onRowsChange(recomputed);
   };
 
-  // Handle Breakdown Sub-column update
+  // Handle Breakdown Sub-column update (supports Merged-DT split allocation cleanly)
   const handleBreakdownChange = useCallback(
     (index: number, field: BreakdownKey, val: number) => {
       if (isShiftLocked) return;
-      const current = rows[index]?.breakdown || {
+      const targetRow = cleanRows[index] || rows[index];
+      if (!targetRow) return;
+      const safeVal = isNaN(val) ? 0 : round2(Math.max(0, val));
+
+      const isTemp = Boolean(targetRow.isTempMachine || targetRow.machineId?.startsWith("temp_"));
+      const machineRuns = rows.filter(
+        (r) =>
+          r.machineId === targetRow.machineId &&
+          Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+      );
+
+      if (isMergedSplitGroup(machineRuns)) {
+        const baseMins =
+          shiftWorkingMinutes || Number(targetRow.shiftWorkingMinutes) || 465;
+        const combined = extractCombinedSplitTotals(machineRuns);
+        const allocatedGroup = allocateMergedSplitGroup(
+          machineRuns,
+          { ...combined, [field]: safeVal },
+          baseMins
+        );
+        let replaced = false;
+        const nextRows: MachineShiftRow[] = [];
+        for (const r of rows) {
+          const rIsTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+          if (r.machineId === targetRow.machineId && rIsTemp === isTemp) {
+            if (!replaced) {
+              nextRows.push(...allocatedGroup);
+              replaced = true;
+            }
+          } else {
+            nextRows.push(r);
+          }
+        }
+        onRowsChange(nextRows);
+        return;
+      }
+
+      const current = targetRow.breakdown || {
         noDisc: 0,
         change: 0,
         power: 0,
@@ -1311,7 +1596,6 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         fixProgSettings: 0,
         miscellaneous: 0,
       };
-      const safeVal = isNaN(val) ? 0 : Number(Math.max(0, val).toFixed(2));
       updateRow(index, {
         breakdown: {
           ...current,
@@ -1319,18 +1603,27 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         },
       });
     },
-    [isShiftLocked, rows, updateRow]
+    [isShiftLocked, cleanRows, rows, shiftWorkingMinutes, onRowsChange, updateRow]
   );
 
   // Quick-adjust the currently focused BD cell (+5, +10, +15, +30, +60, -5, Clear)
   const handleQuickAdjustBd = (deltaOrExact: number, mode: 'add' | 'set' = 'add') => {
     if (isShiftLocked) return;
     const active = activeBdCell || { rowIndex: 0, field: 'noDisc' };
-    const targetRow = rows[active.rowIndex] || rows[0];
+    const targetRow = cleanRows[active.rowIndex] || rows[active.rowIndex] || rows[0];
     if (!targetRow) return;
 
+    const isTemp = Boolean(targetRow.isTempMachine || targetRow.machineId?.startsWith("temp_"));
+    const machineRuns = rows.filter(
+      (r) =>
+        r.machineId === targetRow.machineId &&
+        Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+    );
+    const currentVal = isMergedSplitGroup(machineRuns)
+      ? extractCombinedSplitTotals(machineRuns)[active.field]
+      : Number(targetRow.breakdown?.[active.field] ?? 0);
+
     setBdDrafts({});
-    const currentVal = Number(targetRow.breakdown?.[active.field] ?? 0);
     const nextVal =
       mode === 'set'
         ? Number(Math.max(0, deltaOrExact).toFixed(2))
@@ -1342,19 +1635,28 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
   // Auto-balance unaccounted minutes into the active BD column (or noDisc if none focused on that row)
   const handleFillUnaccountedBd = (rowIndex: number, preferredField?: BreakdownKey) => {
     if (isShiftLocked) return;
-    const row = rows[rowIndex];
+    const row = cleanRows[rowIndex] || rows[rowIndex];
     if (!row) return;
 
-    const rowShiftMins = shiftWorkingMinutes || row.totalWorkingMinutes;
-    const balance = calculateMachineGroupTimeBalance(rows, row.machineId, rowShiftMins);
+    const rowShiftMins = shiftWorkingMinutes || row.shiftWorkingMinutes || row.totalWorkingMinutes;
+    const balance = calculateMachineGroupTimeBalance(cleanRows, row.machineId, rowShiftMins);
     if (balance.unaccountedMinutes <= 0) return;
 
     const targetField: BreakdownKey =
       preferredField ??
       (activeBdCell?.rowIndex === rowIndex ? activeBdCell.field : 'noDisc');
 
+    const isTemp = Boolean(row.isTempMachine || row.machineId?.startsWith("temp_"));
+    const machineRuns = rows.filter(
+      (r) =>
+        r.machineId === row.machineId &&
+        Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+    );
+    const currentVal = isMergedSplitGroup(machineRuns)
+      ? extractCombinedSplitTotals(machineRuns)[targetField]
+      : Number(row.breakdown?.[targetField] ?? 0);
+
     setBdDrafts({});
-    const currentVal = Number(row.breakdown?.[targetField] ?? 0);
     const nextVal = Number((currentVal + balance.unaccountedMinutes).toFixed(2));
     handleBreakdownChange(rowIndex, targetField, nextVal);
     setActiveBdCell({ rowIndex, field: targetField });
@@ -1367,25 +1669,49 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     if (isNaN(minsToAdd) || minsToAdd <= 0) return;
 
     setBdDrafts({});
-    const updated = rows.map((row) => {
-      const currentBd = row.breakdown || {
-        noDisc: 0,
-        change: 0,
-        power: 0,
-        operator: 0,
-        machineBreakdown: 0,
-        fixProgSettings: 0,
-        miscellaneous: 0,
-      };
-      const prevVal = Number(currentBd[bulkBdField] || 0);
-      return {
-        ...row,
-        breakdown: {
-          ...currentBd,
-          [bulkBdField]: Number((prevVal + minsToAdd).toFixed(2)),
-        },
-      };
-    });
+    const seenMergedKeys = new Set<string>();
+    const updated: MachineShiftRow[] = [];
+
+    for (const row of rows) {
+      const isTemp = Boolean(row.isTempMachine || row.machineId?.startsWith("temp_"));
+      const gKey = `${row.machineId}::${isTemp}`;
+      const machineRuns = rows.filter(
+        (r) =>
+          r.machineId === row.machineId &&
+          Boolean(r.isTempMachine || r.machineId?.startsWith("temp_")) === isTemp
+      );
+
+      if (isMergedSplitGroup(machineRuns)) {
+        if (seenMergedKeys.has(gKey)) continue;
+        seenMergedKeys.add(gKey);
+        const baseMins = shiftWorkingMinutes || Number(row.shiftWorkingMinutes) || 465;
+        const combined = extractCombinedSplitTotals(machineRuns);
+        const allocated = allocateMergedSplitGroup(
+          machineRuns,
+          { ...combined, [bulkBdField]: round2(combined[bulkBdField] + minsToAdd) },
+          baseMins
+        );
+        updated.push(...allocated);
+      } else {
+        const currentBd = row.breakdown || {
+          noDisc: 0,
+          change: 0,
+          power: 0,
+          operator: 0,
+          machineBreakdown: 0,
+          fixProgSettings: 0,
+          miscellaneous: 0,
+        };
+        const prevVal = Number(currentBd[bulkBdField] || 0);
+        updated.push({
+          ...row,
+          breakdown: {
+            ...currentBd,
+            [bulkBdField]: Number((prevVal + minsToAdd).toFixed(2)),
+          },
+        });
+      }
+    }
     onRowsChange(updated);
     setBulkBdMinutes('');
   };
@@ -1472,6 +1798,29 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       }
     }
 
+    const isMergedCol =
+      nextCol === 'overtimeMinutes' ||
+      (BD_KEYS as readonly string[]).includes(nextCol);
+
+    if (isMergedCol) {
+      if (e.key === 'ArrowDown' || e.key === 'Enter') {
+        const currMeta = splitGroupMeta[rowIndex];
+        if (currMeta?.isMergedGroup) {
+          nextRow = currMeta.splitStartIndex + currMeta.splits.length;
+        }
+      } else if (e.key === 'ArrowUp') {
+        const targetMeta = splitGroupMeta[nextRow];
+        if (targetMeta?.isMergedGroup) {
+          nextRow = targetMeta.splitStartIndex;
+        }
+      } else {
+        const targetMeta = splitGroupMeta[nextRow];
+        if (targetMeta?.isMergedGroup) {
+          nextRow = targetMeta.splitStartIndex;
+        }
+      }
+    }
+
     const targetInput = document.querySelector<HTMLInputElement>(
       `input[data-grid-cell="${nextRow}-${nextCol}"]`
     );
@@ -1496,6 +1845,8 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         shiftWorkingMinutes: shiftWorkingMinutes,
         totalWorkingMinutes: shiftWorkingMinutes,
         overtimeMinutes: 0,
+        isMergedDt: false,
+        isManualStd: false,
         stdOutput: 0,
         actualOutput: 0,
         rework: 0,
@@ -1587,7 +1938,7 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
       }));
 
     const cleanRowsToSave = cleanRows.map((r) => {
-      const otMins = Math.round(Math.max(0, Number(r.overtimeMinutes) || 0));
+      const otMins = round2(Math.max(0, Number(r.overtimeMinutes) || 0));
       const baseMins =
         shiftWorkingMinutes ||
         Number(r.shiftWorkingMinutes) ||
@@ -1600,7 +1951,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
         line: currentLine || r.line,
         overtimeMinutes: otMins,
         shiftWorkingMinutes: baseMins,
-        totalWorkingMinutes: baseMins + otMins,
+        totalWorkingMinutes: r.isMergedDt
+          ? round2(Math.max(0, Number(r.totalWorkingMinutes) || 0))
+          : round2(baseMins + otMins),
       };
     });
 
@@ -1608,8 +1961,50 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
     onSaveShift(cleanRowsToSave, finishedTotalsToSave);
   };
 
+  // Split group metadata for contiguous merged DT rowSpan rendering
+  const splitGroupMeta = useMemo(() => {
+    const meta = new Array<{
+      splits: MachineShiftRow[];
+      splitIndex: number;
+      splitStartIndex: number;
+      isSplitMachine: boolean;
+      isMergedGroup: boolean;
+      combinedTotals: ReturnType<typeof extractCombinedSplitTotals>;
+    }>(cleanRows.length);
+
+    let i = 0;
+    while (i < cleanRows.length) {
+      const r = cleanRows[i];
+      const key = `${r.machineId || r.machineName}::${Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"))}`;
+      let j = i + 1;
+      while (j < cleanRows.length) {
+        const next = cleanRows[j];
+        const nextKey = `${next.machineId || next.machineName}::${Boolean(next.isTempMachine || next.machineId?.startsWith("temp_"))}`;
+        if (nextKey !== key) break;
+        j++;
+      }
+      const splits = cleanRows.slice(i, j);
+      const isSplitMachine = splits.length >= 2;
+      const isMergedGroup = isMergedSplitGroup(splits);
+      const combinedTotals = extractCombinedSplitTotals(splits);
+
+      for (let k = 0; k < splits.length; k++) {
+        meta[i + k] = {
+          splits,
+          splitIndex: k,
+          splitStartIndex: i,
+          isSplitMachine,
+          isMergedGroup,
+          combinedTotals,
+        };
+      }
+      i = j;
+    }
+    return meta;
+  }, [cleanRows]);
+
   // Calculations for summary footer row
-  const totalOtMinutes = cleanRows.reduce((acc, r) => acc + Math.max(0, Number(r.overtimeMinutes) || 0), 0);
+  const totalOtMinutes = round2(cleanRows.reduce((acc, r) => acc + Math.max(0, Number(r.overtimeMinutes) || 0), 0));
   const otMachineCount = new Set(
     cleanRows.filter((r) => (Number(r.overtimeMinutes) || 0) > 0).map((r) => r.machineId)
   ).size;
@@ -2288,9 +2683,27 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   row.totalWorkingMinutes;
                 const timeBalance = machineBalances.get(row.machineId) || calculateMachineGroupTimeBalance(cleanRows, row.machineId, rowShiftMins);
                 const rowWorkingMinutes = timeBalance.shiftMinutes || row.totalWorkingMinutes || shiftWorkingMinutes;
+                const rowMeta = splitGroupMeta[index] || {
+                  splits: [row],
+                  splitIndex: 0,
+                  splitStartIndex: index,
+                  isSplitMachine: false,
+                  isMergedGroup: false,
+                  combinedTotals: extractCombinedSplitTotals([row]),
+                };
+                const { splits, splitIndex, isSplitMachine, isMergedGroup, combinedTotals } = rowMeta;
                 const pct = (mins: number) => calculateDowntimePct(mins, rowWorkingMinutes);
                 const rowOtMins = Math.max(0, Number(row.overtimeMinutes) || 0);
-                const isSplitMachine = cleanRows.filter((r) => r.machineId === row.machineId).length > 1;
+                const displayOtMins = isMergedGroup ? combinedTotals.overtimeMinutes : rowOtMins;
+                const groupBdTotal = round2(
+                  combinedTotals.noDisc +
+                    combinedTotals.change +
+                    combinedTotals.power +
+                    combinedTotals.operator +
+                    combinedTotals.machineBreakdown +
+                    combinedTotals.fixProgSettings +
+                    combinedTotals.miscellaneous
+                );
                 const rowSummary = timeBalance.rowBreakdownSummary?.[row.id] ?? {
                   prodMins: timeBalance.rowProductionMinutes?.[row.id] ?? Number(((row.actualOutput || 0) * (row.cycleTime || 0)).toFixed(2)),
                   bdMins: timeBalance.rowBreakdownMinutes?.[row.id] ?? calculateTotalBreakdown(row.breakdown),
@@ -2305,15 +2718,17 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                   <tr
                     key={row.id || index}
                     className={`transition-colors ${
+                      splitIndex === 0 && index > 0 ? 'border-t-2 border-slate-300' : ''
+                    } ${
                       isRowInvalid
                         ? timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
                           ? 'bg-rose-50/70 hover:bg-rose-100/60 border-l-4 border-l-rose-600'
                           : 'bg-amber-50/50 hover:bg-amber-100/50 border-l-4 border-l-amber-500'
                         : isMachineActive && timeBalance.isBalanced
-                        ? rowOtMins > 0
+                        ? displayOtMins > 0
                           ? 'border-l-4 border-l-emerald-500 bg-amber-50/35 hover:bg-amber-50/60'
                           : 'border-l-4 border-l-emerald-500 hover:bg-emerald-50/20'
-                        : rowOtMins > 0
+                        : displayOtMins > 0
                         ? 'border-l-4 border-l-amber-400 bg-amber-50/35 hover:bg-amber-50/60'
                         : isUnderperforming
                         ? 'border-l-2 border-l-amber-400 hover:bg-slate-50/80'
@@ -2405,16 +2820,67 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                                   TEMP
                                 </span>
                               )}
-                              {rowOtMins > 0 && (
+                              {displayOtMins > 0 && (
                                 <span
                                   className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-amber-100 text-amber-900 border border-amber-300"
-                                  title={`+${rowOtMins}m Overtime added (${rowWorkingMinutes}m effective planned time)`}
+                                  title={`+${displayOtMins}m Overtime added (${rowWorkingMinutes}m effective planned time)`}
                                 >
-                                  +{rowOtMins}m OT
+                                  +{displayOtMins}m OT
                                 </span>
                               )}
                             </div>
-                            <div className="text-[10px] text-slate-400">{row.machineCode}</div>
+                            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                              <span className="text-[10px] text-slate-400">{row.machineCode}</span>
+                              {isSplitMachine && splitIndex === 0 && (
+                                <div
+                                  className="inline-flex items-center rounded border border-slate-300 bg-slate-100 p-0.5 text-[9px] font-bold"
+                                  title="Toggle between Merged Shift Downtime (shared across splits) and Separate per-split Downtime"
+                                >
+                                  <button
+                                    type="button"
+                                    disabled={isShiftLocked}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (!isMergedGroup) {
+                                        handleToggleMergedDt(
+                                          row.machineId,
+                                          Boolean(row.isTempMachine || row.machineId.startsWith("temp_")),
+                                          true
+                                        );
+                                      }
+                                    }}
+                                    className={`px-1.5 py-0.2 rounded transition-colors ${
+                                      isMergedGroup
+                                        ? 'bg-sky-600 text-white shadow-2xs'
+                                        : 'text-slate-600 hover:text-slate-900 cursor-pointer'
+                                    } disabled:cursor-not-allowed`}
+                                  >
+                                    Merged DT
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isShiftLocked}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (isMergedGroup) {
+                                        handleToggleMergedDt(
+                                          row.machineId,
+                                          Boolean(row.isTempMachine || row.machineId.startsWith("temp_")),
+                                          false
+                                        );
+                                      }
+                                    }}
+                                    className={`px-1.5 py-0.2 rounded transition-colors ${
+                                      !isMergedGroup
+                                        ? 'bg-slate-800 text-white shadow-2xs'
+                                        : 'text-slate-600 hover:text-slate-900 cursor-pointer'
+                                    } disabled:cursor-not-allowed`}
+                                  >
+                                    Separate DT
+                                  </button>
+                                </div>
+                              )}
+                            </div>
                           </div>
                           <div className="flex items-center gap-1">
                             {!isShiftLocked && (
@@ -2793,39 +3259,51 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       />
                     </td>
 
-                    {/* 5C. MACHINE OVERTIME (MINS) */}
-                    <td
-                      className={`px-1.5 py-1 border-r border-slate-200 text-center ${
-                        rowOtMins > 0 ? 'bg-amber-50/70' : ''
-                      }`}
-                    >
-                      <input
-                        type="number"
-                        step="1"
-                        min="0"
-                        disabled={isShiftLocked}
-                        readOnly={isShiftLocked}
-                        data-grid-cell={`${index}-overtimeMinutes`}
-                        value={rowOtMins > 0 ? rowOtMins : ''}
-                        placeholder="0"
-                        onFocus={(e) => e.target.select()}
-                        onClick={(e) => (e.target as HTMLInputElement).select()}
-                        onKeyDown={(e) => handleGridKeyDown(e, index, 'overtimeMinutes')}
-                        onChange={(e) => handleOvertimeChange(index, e.target.value)}
-                        title={
-                          isShiftLocked
-                            ? 'Shift is locked (Read-Only)'
-                            : `Machine overtime in minutes (Effective Planned = ${rowWorkingMinutes}m)`
-                        }
-                        className={`w-14 mx-auto text-center font-mono text-xs px-1 py-1 rounded border focus:outline-none ${
-                          isShiftLocked
-                            ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed'
-                            : rowOtMins > 0
-                            ? 'bg-amber-100 text-amber-950 font-bold border-amber-400 focus:border-amber-600'
-                            : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 focus:border-amber-500'
+                    {/* 5C. MACHINE OVERTIME (MINS) — Merged across splits when isMergedGroup */}
+                    {(!isMergedGroup || splitIndex === 0) && (
+                      <td
+                        rowSpan={isMergedGroup ? splits.length : undefined}
+                        className={`px-1.5 py-1 border-r border-slate-200 text-center ${
+                          isMergedGroup
+                            ? 'bg-sky-50/40 border-l border-slate-200 align-middle'
+                            : displayOtMins > 0
+                            ? 'bg-amber-50/70'
+                            : ''
                         }`}
-                      />
-                    </td>
+                      >
+                        <input
+                          type="number"
+                          step={isMergedGroup ? '0.01' : '1'}
+                          min="0"
+                          disabled={isShiftLocked}
+                          readOnly={isShiftLocked}
+                          data-grid-cell={`${index}-overtimeMinutes`}
+                          value={displayOtMins > 0 ? displayOtMins : ''}
+                          placeholder="0"
+                          onFocus={(e) => e.target.select()}
+                          onClick={(e) => (e.target as HTMLInputElement).select()}
+                          onKeyDown={(e) => handleGridKeyDown(e, index, 'overtimeMinutes')}
+                          onChange={(e) => handleOvertimeChange(index, e.target.value)}
+                          title={
+                            isShiftLocked
+                              ? 'Shift is locked (Read-Only)'
+                              : `Machine overtime in minutes (Effective Planned = ${rowWorkingMinutes}m)`
+                          }
+                          className={`w-14 mx-auto text-center font-mono text-xs px-1 py-1 rounded border focus:outline-none ${
+                            isShiftLocked
+                              ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed'
+                              : displayOtMins > 0
+                              ? 'bg-amber-100 text-amber-950 font-bold border-amber-400 focus:border-amber-600'
+                              : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 focus:border-amber-500'
+                          }`}
+                        />
+                        {isMergedGroup && (
+                          <div className="text-[9px] font-semibold text-sky-700 mt-0.5">
+                            Shift OT
+                          </div>
+                        )}
+                      </td>
+                    )}
 
                     {/* 6. STD O/PUT */}
                     <td className="px-1 py-1 border-r border-slate-200 text-center">
@@ -2840,6 +3318,10 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                         onClick={(e) => (e.target as HTMLInputElement).select()}
                         onChange={(e) => {
                           if (!isAdmin && !isSplitMachine) return;
+                          if (isSplitMachine) {
+                            handleManualStdChange(index, e.target.value, false);
+                            return;
+                          }
                           const raw = e.target.value;
                           const parsed = raw === '' ? 0 : parseInt(raw, 10);
                           updateRow(index, { stdOutput: isNaN(parsed) ? 0 : Math.max(0, parsed) });
@@ -2848,7 +3330,9 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           isShiftLocked
                             ? "Shift is locked (Read-Only)"
                             : isSplitMachine
-                            ? "Split Run Std Output Target (editable)"
+                            ? row.isManualStd
+                              ? "Manual Std Output Target (click × below to revert to Auto)"
+                              : "Auto-allocated Split Run Std Output (type to set manual override)"
                             : !isAdmin
                             ? "Auto-calculated from Shift Minutes ÷ Cycle Time (Unit Head only)"
                             : undefined
@@ -2857,15 +3341,39 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                           isShiftLocked
                             ? "bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed"
                             : isSplitMachine
-                            ? "bg-white text-slate-900 border-slate-300 hover:border-slate-400 focus:border-blue-600 focus:bg-white font-bold"
+                            ? row.isManualStd
+                              ? "bg-amber-50 text-amber-950 border-amber-400 hover:border-amber-500 focus:border-amber-600 font-bold"
+                              : "bg-white text-slate-900 border-slate-300 hover:border-slate-400 focus:border-blue-600 focus:bg-white font-bold"
                             : !isAdmin
                             ? "bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed"
                             : "text-slate-700 bg-transparent border-transparent hover:border-slate-300 focus:border-slate-800 focus:bg-white"
                         } focus:outline-none`}
                       />
-                      {isSplitMachine && row.stdOutput > 0 && row.cycleTime > 0 && (
-                        <div className="text-[10px] text-slate-400 font-mono text-center">
-                          ({Number((row.stdOutput * row.cycleTime).toFixed(1))}m)
+                      {isSplitMachine && (
+                        <div className="flex items-center justify-center gap-1 mt-0.5 text-[10px] font-mono">
+                          {row.stdOutput > 0 && row.cycleTime > 0 && (
+                            <span className="text-slate-400">
+                              ({Number((row.stdOutput * row.cycleTime).toFixed(1))}m)
+                            </span>
+                          )}
+                          {isMergedGroup && row.isManualStd && (
+                            <span className="inline-flex items-center gap-0.5 px-1 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-sans font-bold">
+                              <span>Manual</span>
+                              {!isShiftLocked && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleManualStdChange(index, "", true);
+                                  }}
+                                  className="text-amber-700 hover:text-rose-700 font-extrabold cursor-pointer ml-0.5"
+                                  title="Clear manual Std override and revert to Auto calculation"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </span>
+                          )}
                         </div>
                       )}
                     </td>
@@ -2941,191 +3449,223 @@ export const DailyShiftSheet: React.FC<DailyShiftSheetProps> = ({
                       />
                     </td>
 
-                    {/* 9. BREAKDOWN SUB-COLUMNS (NO/DISC, CHANGE, POWER, OPERATOR, BREAK DOWN, FIX/PROG, MISC) */}
-                    {BD_KEYS.map((bdKey) => {
-                      const val = Number(row.breakdown?.[bdKey] ?? 0);
-                      const cellKey = `${index}_${bdKey}`;
-                      const isFocused =
-                        activeBdCell?.rowIndex === index && activeBdCell?.field === bdKey;
+                    {/* 9. BREAKDOWN SUB-COLUMNS (NO/DISC, CHANGE, POWER, OPERATOR, BREAK DOWN, FIX/PROG, MISC) — Merged across splits when isMergedGroup */}
+                    {(!isMergedGroup || splitIndex === 0) &&
+                      BD_KEYS.map((bdKey) => {
+                        const val = isMergedGroup
+                          ? Number(combinedTotals[bdKey] ?? 0)
+                          : Number(row.breakdown?.[bdKey] ?? 0);
+                        const cellKey = `${index}_${bdKey}`;
+                        const isFocused =
+                          activeBdCell?.rowIndex === index && activeBdCell?.field === bdKey;
 
-                      return (
-                        <td
-                          key={bdKey}
-                          className={`px-1 py-1 border-r border-slate-200 text-center transition-colors ${
-                            isFocused
-                              ? 'bg-blue-50/60'
-                              : val > 0
-                              ? BD_META[bdKey].cellBackdropClass
-                              : ''
-                          }`}
-                        >
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            disabled={isShiftLocked}
-                            readOnly={isShiftLocked}
-                            data-grid-cell={`${index}-${bdKey}`}
-                            value={
-                              bdDrafts[cellKey] !== undefined
-                                ? bdDrafts[cellKey]
+                        return (
+                          <td
+                            key={bdKey}
+                            rowSpan={isMergedGroup ? splits.length : undefined}
+                            className={`px-1 py-1 border-r border-slate-200 text-center transition-colors ${
+                              isMergedGroup ? 'bg-sky-50/40 border-l border-slate-200 align-middle' : ''
+                            } ${
+                              isFocused
+                                ? 'bg-blue-50/60'
                                 : val > 0
-                                ? String(val)
+                                ? BD_META[bdKey].cellBackdropClass
                                 : ''
-                            }
-                            placeholder="0"
-                            onFocus={(e) => {
-                              e.target.select();
-                              setActiveBdCell({ rowIndex: index, field: bdKey });
-                              setBdDrafts((prev) => ({
-                                ...prev,
-                                [cellKey]: val > 0 ? String(val) : '',
-                              }));
-                            }}
-                            onBlur={() => {
-                              setBdDrafts((prev) => {
-                                if (prev[cellKey] === undefined) return prev;
-                                const next = { ...prev };
-                                delete next[cellKey];
-                                return next;
-                              });
-                            }}
-                            onClick={(e) => (e.target as HTMLInputElement).select()}
-                            onKeyDown={(e) => handleGridKeyDown(e, index, bdKey)}
-                            onChange={(e) => {
-                              const raw = e.target.value;
-                              setBdDrafts((prev) => ({
-                                ...prev,
-                                [cellKey]: raw,
-                              }));
-                              const parsed = parseFloat(raw);
-                              handleBreakdownChange(
-                                index,
-                                bdKey,
-                                raw === '' || isNaN(parsed) ? 0 : Number(Math.max(0, parsed).toFixed(2))
-                              );
-                            }}
-                            className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border transition-colors focus:outline-none ${
-                              isShiftLocked
-                                ? val > 0
-                                  ? `${BD_META[bdKey].activeCellClass} cursor-not-allowed`
-                                  : 'cursor-not-allowed opacity-75 border-transparent bg-transparent text-slate-400'
-                                : isFocused
-                                ? 'border-blue-600 ring-2 ring-blue-200 bg-white font-bold text-slate-900'
-                                : val > 0
-                                ? BD_META[bdKey].activeCellClass
-                                : 'text-slate-400 border-transparent hover:border-slate-300 bg-transparent'
                             }`}
-                          />
-                          {val > 0 && (
-                            <div className="text-[10px] leading-none text-slate-700 font-semibold mt-0.5">
-                              ({pct(val)}%)
-                            </div>
-                          )}
-                        </td>
-                      );
-                    })}
-
-                    {/* TOTAL BD & SHIFT TIME BALANCE (Click badge to auto-fill remaining balance) */}
-                    <td className={`px-2 py-1 border-r border-slate-200 text-center font-mono text-xs ${
-                      !isMachineActive
-                        ? 'bg-slate-50/60'
-                        : isRowInvalid
-                        ? timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
-                          ? 'bg-rose-50/80'
-                          : 'bg-amber-50/80'
-                        : 'bg-emerald-50/30'
-                    }`}>
-                      {!isMachineActive ? (
-                        <span className="text-slate-400 font-normal">0</span>
-                      ) : (
-                        <div className="leading-tight space-y-0.5">
-                          {isSplitMachine ? (
-                            <>
-                              <div className="font-bold text-slate-900 text-[11px] whitespace-nowrap">
-                                Prod: {rowSummary.prodMins}m + BD: {rowSummary.bdMins}m = {rowSummary.rowTotalMins}m
-                              </div>
-                              <div className="text-[10px] text-slate-500 font-normal">
-                                Mach Total: {timeBalance.productionMinutes}m Prod + {timeBalance.loggedBreakdownMinutes}m BD = {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="font-bold text-slate-900 flex items-center justify-center gap-1">
-                                <span
-                                  className={
-                                    runBdMins > 0
-                                      ? `px-1.5 py-0.2 rounded border ${TOTAL_DOWNTIME_THEME.badgeClass}`
-                                      : ''
-                                  }
-                                >
-                                  {runBdMins}m BD
-                                </span>
-                                <span className="text-slate-400 text-[10px]">|</span>
-                                <span className="text-slate-600 font-normal text-[10px]">{runProdMins}m prod</span>
-                              </div>
-                              <div className="text-[10px] text-slate-500 font-normal">
-                                Mach Total: {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
-                              </div>
-                            </>
-                          )}
-                          {timeBalance.missingCycleTime ? (
-                            <span
-                              className="inline-block px-1.5 py-0.5 rounded bg-rose-200 text-rose-950 font-extrabold text-[10px] border border-rose-400 shadow-2xs"
-                              title={timeBalance.errorMessage}
-                            >
-                              ⚠️ Set Cycle Time
-                            </span>
-                          ) : timeBalance.isProductionExceeded ? (
-                            <span
-                              className="inline-block px-1.5 py-0.5 rounded bg-rose-200 text-rose-950 font-extrabold text-[10px] border border-rose-400 shadow-2xs"
-                              title={timeBalance.errorMessage}
-                            >
-                              ⚠️ Prod Time &gt; Shift ({timeBalance.productionMinutes}m &gt; {timeBalance.shiftMinutes}m)
-                            </span>
-                          ) : timeBalance.isOver ? (
-                            <span
-                              className="inline-block px-1.5 py-0.5 rounded bg-rose-100 text-rose-900 font-extrabold text-[10px] border border-rose-300 shadow-2xs"
-                              title={timeBalance.errorMessage}
-                            >
-                              ⚠️ Exceeds Shift (+{Math.abs(timeBalance.unaccountedMinutes)}m)
-                            </span>
-                          ) : timeBalance.unaccountedMinutes > 0 ? (
-                            <button
-                              type="button"
+                          >
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
                               disabled={isShiftLocked}
-                              onClick={() => !isShiftLocked && handleFillUnaccountedBd(index)}
-                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold text-[10px] transition-colors border shadow-2xs ${
-                                isShiftLocked
-                                  ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed'
-                                  : 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-300 cursor-pointer'
-                              }`}
-                              title={
-                                isShiftLocked
-                                  ? 'Shift is locked (Read-Only)'
-                                  : `Machine Group: Productive (${timeBalance.productionMinutes}m) + Breakdown (${timeBalance.loggedBreakdownMinutes}m) = ${timeBalance.totalAccountedMinutes}m. Click to auto-fill +${timeBalance.unaccountedMinutes}m into ${
-                                      activeBdCell?.rowIndex === index
-                                        ? BD_META[activeBdCell.field].shortLabel
-                                        : 'NO/DISC'
-                                    } of this run so total time equals ${timeBalance.shiftMinutes}m`
+                              readOnly={isShiftLocked}
+                              data-grid-cell={`${index}-${bdKey}`}
+                              value={
+                                bdDrafts[cellKey] !== undefined
+                                  ? bdDrafts[cellKey]
+                                  : val > 0
+                                  ? String(val)
+                                  : ''
                               }
-                            >
-                              <span>{isShiftLocked ? '🔒' : '⚠️'} Missing {timeBalance.unaccountedMinutes}m BD</span>
-                              {!isShiftLocked && <span className="underline font-extrabold">(+Fill)</span>}
-                            </button>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px] border border-emerald-300">
-                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                              <span>
-                                {timeBalance.isFullTargetBalanced && (timeBalance.cycleRemainderMinutes ?? 0) > 0
-                                  ? `Balanced ✓ (100% Target · ${timeBalance.cycleRemainderMinutes}m rem.)`
-                                  : `${timeBalance.shiftMinutes}m Balanced`}
+                              placeholder="0"
+                              onFocus={(e) => {
+                                e.target.select();
+                                setActiveBdCell({ rowIndex: index, field: bdKey });
+                                setBdDrafts((prev) => ({
+                                  ...prev,
+                                  [cellKey]: val > 0 ? String(val) : '',
+                                }));
+                              }}
+                              onBlur={() => {
+                                setBdDrafts((prev) => {
+                                  if (prev[cellKey] === undefined) return prev;
+                                  const next = { ...prev };
+                                  delete next[cellKey];
+                                  return next;
+                                });
+                              }}
+                              onClick={(e) => (e.target as HTMLInputElement).select()}
+                              onKeyDown={(e) => handleGridKeyDown(e, index, bdKey)}
+                              onChange={(e) => {
+                                const raw = e.target.value;
+                                setBdDrafts((prev) => ({
+                                  ...prev,
+                                  [cellKey]: raw,
+                                }));
+                                const parsed = parseFloat(raw);
+                                handleBreakdownChange(
+                                  index,
+                                  bdKey,
+                                  raw === '' || isNaN(parsed) ? 0 : Number(Math.max(0, parsed).toFixed(2))
+                                );
+                              }}
+                              className={`w-13 mx-auto text-center font-mono text-xs px-1 py-1 rounded border transition-colors focus:outline-none ${
+                                isShiftLocked
+                                  ? val > 0
+                                    ? `${BD_META[bdKey].activeCellClass} cursor-not-allowed`
+                                    : 'cursor-not-allowed opacity-75 border-transparent bg-transparent text-slate-400'
+                                  : isFocused
+                                  ? 'border-blue-600 ring-2 ring-blue-200 bg-white font-bold text-slate-900'
+                                  : val > 0
+                                  ? BD_META[bdKey].activeCellClass
+                                  : 'text-slate-400 border-transparent hover:border-slate-300 bg-transparent'
+                              }`}
+                            />
+                            {val > 0 && (
+                              <div className="text-[10px] leading-none text-slate-700 font-semibold mt-0.5">
+                                ({pct(val)}%)
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+
+                    {/* TOTAL BD & SHIFT TIME BALANCE — Merged across splits when isMergedGroup */}
+                    {(!isMergedGroup || splitIndex === 0) && (
+                      <td
+                        rowSpan={isMergedGroup ? splits.length : undefined}
+                        className={`px-2 py-1 border-r border-slate-200 text-center font-mono text-xs ${
+                          isMergedGroup ? 'border-l border-slate-200 align-middle' : ''
+                        } ${
+                          !isMachineActive
+                            ? isMergedGroup
+                              ? 'bg-sky-50/40'
+                              : 'bg-slate-50/60'
+                            : isRowInvalid
+                            ? timeBalance.missingCycleTime || timeBalance.isProductionExceeded || timeBalance.isOver
+                              ? 'bg-rose-50/80'
+                              : 'bg-amber-50/80'
+                            : 'bg-emerald-50/30'
+                        }`}
+                      >
+                        {!isMachineActive ? (
+                          <span className="text-slate-400 font-normal">0</span>
+                        ) : (
+                          <div className="leading-tight space-y-0.5">
+                            {isMergedGroup ? (
+                              <>
+                                <div className="font-bold text-slate-900 flex items-center justify-center gap-1 flex-wrap">
+                                  <span
+                                    className={
+                                      groupBdTotal > 0
+                                        ? `px-1.5 py-0.2 rounded border ${TOTAL_DOWNTIME_THEME.badgeClass}`
+                                        : ''
+                                    }
+                                  >
+                                    {groupBdTotal}m BD ({pct(groupBdTotal)}%)
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-500 font-normal">
+                                  Mach Total: {timeBalance.productionMinutes}m Prod + {timeBalance.loggedBreakdownMinutes}m BD = {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+                                </div>
+                              </>
+                            ) : isSplitMachine ? (
+                              <>
+                                <div className="font-bold text-slate-900 text-[11px] whitespace-nowrap">
+                                  Prod: {rowSummary.prodMins}m + BD: {rowSummary.bdMins}m = {rowSummary.rowTotalMins}m
+                                </div>
+                                <div className="text-[10px] text-slate-500 font-normal">
+                                  Mach Total: {timeBalance.productionMinutes}m Prod + {timeBalance.loggedBreakdownMinutes}m BD = {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="font-bold text-slate-900 flex items-center justify-center gap-1">
+                                  <span
+                                    className={
+                                      runBdMins > 0
+                                        ? `px-1.5 py-0.2 rounded border ${TOTAL_DOWNTIME_THEME.badgeClass}`
+                                        : ''
+                                    }
+                                  >
+                                    {runBdMins}m BD
+                                  </span>
+                                  <span className="text-slate-400 text-[10px]">|</span>
+                                  <span className="text-slate-600 font-normal text-[10px]">{runProdMins}m prod</span>
+                                </div>
+                                <div className="text-[10px] text-slate-500 font-normal">
+                                  Mach Total: {timeBalance.totalAccountedMinutes}m / {timeBalance.shiftMinutes}m
+                                </div>
+                              </>
+                            )}
+                            {timeBalance.missingCycleTime ? (
+                              <span
+                                className="inline-block px-1.5 py-0.5 rounded bg-rose-200 text-rose-950 font-extrabold text-[10px] border border-rose-400 shadow-2xs"
+                                title={timeBalance.errorMessage}
+                              >
+                                ⚠️ Set Cycle Time
                               </span>
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </td>
+                            ) : timeBalance.isProductionExceeded ? (
+                              <span
+                                className="inline-block px-1.5 py-0.5 rounded bg-rose-200 text-rose-950 font-extrabold text-[10px] border border-rose-400 shadow-2xs"
+                                title={timeBalance.errorMessage}
+                              >
+                                ⚠️ Prod Time &gt; Shift ({timeBalance.productionMinutes}m &gt; {timeBalance.shiftMinutes}m)
+                              </span>
+                            ) : timeBalance.isOver ? (
+                              <span
+                                className="inline-block px-1.5 py-0.5 rounded bg-rose-100 text-rose-900 font-extrabold text-[10px] border border-rose-300 shadow-2xs"
+                                title={timeBalance.errorMessage}
+                              >
+                                ⚠️ Exceeds Shift (+{Math.abs(timeBalance.unaccountedMinutes)}m)
+                              </span>
+                            ) : timeBalance.unaccountedMinutes > 0 ? (
+                              <button
+                                type="button"
+                                disabled={isShiftLocked}
+                                onClick={() => !isShiftLocked && handleFillUnaccountedBd(index)}
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-bold text-[10px] transition-colors border shadow-2xs ${
+                                  isShiftLocked
+                                    ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed'
+                                    : 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-300 cursor-pointer'
+                                }`}
+                                title={
+                                  isShiftLocked
+                                    ? 'Shift is locked (Read-Only)'
+                                    : `Machine Group: Productive (${timeBalance.productionMinutes}m) + Breakdown (${timeBalance.loggedBreakdownMinutes}m) = ${timeBalance.totalAccountedMinutes}m. Click to auto-fill +${timeBalance.unaccountedMinutes}m into ${
+                                        activeBdCell?.rowIndex === index
+                                          ? BD_META[activeBdCell.field].shortLabel
+                                          : 'NO/DISC'
+                                      } of this run so total time equals ${timeBalance.shiftMinutes}m`
+                                }
+                              >
+                                <span>{isShiftLocked ? '🔒' : '⚠️'} Missing {timeBalance.unaccountedMinutes}m BD</span>
+                                {!isShiftLocked && <span className="underline font-extrabold">(+Fill)</span>}
+                              </button>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px] border border-emerald-300">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                <span>
+                                  {timeBalance.isFullTargetBalanced && (timeBalance.cycleRemainderMinutes ?? 0) > 0
+                                    ? `Balanced ✓ (100% Target · ${timeBalance.cycleRemainderMinutes}m rem.)`
+                                    : `${timeBalance.shiftMinutes}m Balanced`}
+                                </span>
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    )}
 
                     {/* 10. REMARKS */}
                     <td className="px-2 py-1 border-r border-slate-200">

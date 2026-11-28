@@ -14,6 +14,11 @@ import {
   DOWNTIME_PALETTE,
   TOTAL_DOWNTIME_THEME,
 } from "@/services/downtimePalette";
+import {
+  extractCombinedSplitTotals,
+  isMergedSplitGroup,
+  round2,
+} from "@/lib/splitAllocation";
 
 export interface ShiftSheetReadOnlyContentProps {
   rows: EnrichedAnalyticsRow[];
@@ -53,31 +58,64 @@ function getDefaultWorkingMinutes(shift: string): number {
 
 function sortSheetRows(list: EnrichedAnalyticsRow[]): EnrichedAnalyticsRow[] {
   return [...list].sort((a, b) => {
+    const dCmp = (a.date || "").localeCompare(b.date || "");
+    if (dCmp !== 0) return dCmp;
+    const sCmp = compareShiftsCanonically(a.shift || "", b.shift || "");
+    if (sCmp !== 0) return sCmp;
+    const lCmp = (a.line || "").localeCompare(b.line || "");
+    if (lCmp !== 0) return lCmp;
     const srDiff = (Number(a.srNo) || 0) - (Number(b.srNo) || 0);
     if (srDiff !== 0) return srDiff;
     const nameCmp = (a.machineName || "").localeCompare(b.machineName || "");
     if (nameCmp !== 0) return nameCmp;
+    const idCmp = (a.machineId || "").localeCompare(b.machineId || "");
+    if (idCmp !== 0) return idCmp;
     return (Number(a.runNo) || 1) - (Number(b.runNo) || 1);
   });
 }
 
 function computeUniqueShiftMinutes(rows: EnrichedAnalyticsRow[], fallback?: number): number {
   if (rows.length === 0) return fallback || 0;
-  const seenShiftKeys = new Map<string, number>();
+  // First aggregate base shift minutes per (date, shift, line, machine) so merged splits sum cleanly
+  const machineBases = new Map<string, { shiftKey: string; baseMins: number }>();
   for (const r of rows) {
-    const k = `${r.date || ""}__${(r.shift || "").toLowerCase()}`;
+    const shiftKey = `${r.date || ""}__${(r.shift || "").toLowerCase()}`;
+    const isTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+    const machKey = `${shiftKey}__${(r.line || "").toLowerCase()}__${r.machineId || r.machineName}__${isTemp}`;
     const rOt = Math.max(0, Number(r.overtimeMinutes) || 0);
-    const mins =
-      Number(r.shiftWorkingMinutes) ||
-      Math.max(0, (Number(r.totalWorkingMinutes) || 0) - rOt) ||
-      getDefaultWorkingMinutes(r.shift || "");
-    if (!seenShiftKeys.has(k) || mins > (seenShiftKeys.get(k) || 0)) {
-      seenShiftKeys.set(k, mins);
+    if (r.isMergedDt) {
+      const explicitBase = Number(r.shiftWorkingMinutes) || 0;
+      if (explicitBase > 0) {
+        machineBases.set(machKey, { shiftKey, baseMins: explicitBase });
+      } else {
+        const sliceBase = Math.max(0, (Number(r.totalWorkingMinutes) || 0) - rOt);
+        const prev = machineBases.get(machKey);
+        machineBases.set(machKey, {
+          shiftKey,
+          baseMins: (prev?.baseMins || 0) + sliceBase,
+        });
+      }
+    } else {
+      const mins =
+        Number(r.shiftWorkingMinutes) ||
+        Math.max(0, (Number(r.totalWorkingMinutes) || 0) - rOt) ||
+        getDefaultWorkingMinutes(r.shift || "");
+      const prev = machineBases.get(machKey);
+      if (!prev || mins > prev.baseMins) {
+        machineBases.set(machKey, { shiftKey, baseMins: mins });
+      }
+    }
+  }
+
+  const seenShiftKeys = new Map<string, number>();
+  for (const { shiftKey, baseMins } of machineBases.values()) {
+    if (!seenShiftKeys.has(shiftKey) || baseMins > (seenShiftKeys.get(shiftKey) || 0)) {
+      seenShiftKeys.set(shiftKey, baseMins);
     }
   }
   let total = 0;
   for (const m of seenShiftKeys.values()) total += m;
-  return total;
+  return Number(total.toFixed(2));
 }
 
 export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps> = ({
@@ -167,7 +205,88 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
     });
   }, [itemProdRows, groupByShift]);
 
-  const renderMachineRow = (row: EnrichedAnalyticsRow, idx: number) => {
+  interface MergedGroupRenderContext {
+    rowSpan: number;
+    isFirst: boolean;
+    combined: ReturnType<typeof extractCombinedSplitTotals>;
+    groupTotalBd: number;
+    groupBdPct: string;
+    groupAccountedMins: number;
+    groupPlannedMins: number;
+    groupOeePct: number;
+  }
+
+  const renderSectionRows = (rowsList: EnrichedAnalyticsRow[]) => {
+    const elements: React.ReactNode[] = [];
+    let i = 0;
+    while (i < rowsList.length) {
+      const r = rowsList[i];
+      const isTemp = Boolean(r.isTempMachine || r.machineId?.startsWith("temp_"));
+      const gKey = `${r.date || ""}__${(r.shift || "").toLowerCase()}__${(r.line || "").toLowerCase()}__${r.machineId || r.machineName || ""}__${isTemp}`;
+      let j = i + 1;
+      while (j < rowsList.length) {
+        const next = rowsList[j];
+        const nextIsTemp = Boolean(next.isTempMachine || next.machineId?.startsWith("temp_"));
+        const nextKey = `${next.date || ""}__${(next.shift || "").toLowerCase()}__${(next.line || "").toLowerCase()}__${next.machineId || next.machineName || ""}__${nextIsTemp}`;
+        if (nextKey !== gKey) break;
+        j++;
+      }
+      const group = rowsList.slice(i, j);
+      const isMergedGroup = isMergedSplitGroup(group);
+
+      if (isMergedGroup) {
+        const combined = extractCombinedSplitTotals(group);
+        const groupTotalBd = round2(
+          combined.noDisc +
+            combined.change +
+            combined.power +
+            combined.operator +
+            combined.machineBreakdown +
+            combined.fixProgSettings +
+            combined.miscellaneous
+        );
+        const groupWorkingMins = group.reduce(
+          (sum, gr) => sum + (Number(gr.allocatedPlannedMinutes || gr.totalWorkingMinutes) || 0),
+          0
+        );
+        const groupBdPct =
+          groupWorkingMins > 0 ? ((groupTotalBd / groupWorkingMins) * 100).toFixed(1) : "0.0";
+        const groupMetrics = calculateOeeMetrics(group);
+        const groupAccountedMins = Math.round(
+          group.reduce((sum, gr) => sum + (Number(gr.idealRunMinutes) || 0), 0) + groupTotalBd
+        );
+        const groupPlannedMins = Math.round(groupWorkingMins);
+
+        group.forEach((gr, splitIdx) => {
+          elements.push(
+            renderMachineRow(gr, i + splitIdx, {
+              rowSpan: group.length,
+              isFirst: splitIdx === 0,
+              combined,
+              groupTotalBd,
+              groupBdPct,
+              groupAccountedMins,
+              groupPlannedMins,
+              groupOeePct: groupMetrics.oeePct,
+            })
+          );
+        });
+      } else {
+        group.forEach((gr, offset) => {
+          elements.push(renderMachineRow(gr, i + offset));
+        });
+      }
+
+      i = j;
+    }
+    return elements;
+  };
+
+  const renderMachineRow = (
+    row: EnrichedAnalyticsRow,
+    idx: number,
+    mergedCtx?: MergedGroupRenderContext
+  ) => {
     const bd = row.breakdown || {
       noDisc: 0,
       change: 0,
@@ -186,11 +305,14 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
     const accountedMins = Math.round((row.idealRunMinutes || 0) + totalBd);
     const plannedMins = Math.round(row.allocatedPlannedMinutes || 0);
     const rowOt = Math.max(0, Number(row.overtimeMinutes) || 0);
+    const displayOt = mergedCtx ? mergedCtx.combined.overtimeMinutes : rowOt;
 
     return (
       <tr
         key={row.id || `${row.shift}_${row.line}_${row.machineId}_${row.runNo || 1}_${idx}`}
-        className={`hover:bg-slate-50 transition-colors ${rowOt > 0 ? "bg-amber-50/35" : ""}`}
+        className={`hover:bg-slate-50 transition-colors ${
+          mergedCtx?.isFirst && idx > 0 ? "border-t-2 border-slate-300" : ""
+        } ${displayOt > 0 ? "bg-amber-50/35" : ""}`}
       >
         <td className="px-2 py-1.5 border-r border-slate-200 text-center font-mono text-slate-500">
           {row.srNo || idx + 1}
@@ -231,9 +353,17 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
                 R{row.runNo || 1}
               </span>
             )}
-            {rowOt > 0 && (
+            {mergedCtx?.isFirst && (
+              <span
+                className="px-1 rounded bg-sky-100 text-sky-800 border border-sky-200 text-[9px] font-bold"
+                title="Shift downtime merged across split runs"
+              >
+                Merged DT
+              </span>
+            )}
+            {displayOt > 0 && (!mergedCtx || mergedCtx.isFirst) && (
               <span className="px-1 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[9px] font-mono font-bold">
-                +{rowOt}m OT
+                +{displayOt}m OT
               </span>
             )}
           </div>
@@ -250,13 +380,18 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
         <td className="px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums text-slate-600">
           {Number(row.cycleTime) > 0 ? row.cycleTime : "—"}
         </td>
-        <td
-          className={`px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums ${
-            rowOt > 0 ? "bg-amber-100/70 text-amber-900 font-bold" : "text-slate-400"
-          }`}
-        >
-          {rowOt > 0 ? `+${rowOt}m` : "0"}
-        </td>
+        {(!mergedCtx || mergedCtx.isFirst) && (
+          <td
+            rowSpan={mergedCtx ? mergedCtx.rowSpan : undefined}
+            className={`px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums ${
+              mergedCtx ? "bg-sky-50/40 border-l border-slate-200 align-middle" : ""
+            } ${
+              displayOt > 0 ? "bg-amber-100/70 text-amber-900 font-bold" : "text-slate-400"
+            }`}
+          >
+            {displayOt > 0 ? `+${displayOt}m` : "0"}
+          </td>
+        )}
         <td className="px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums text-slate-700">
           {(Number(row.stdOutput) || 0).toLocaleString()}
         </td>
@@ -272,43 +407,71 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
             <span className="text-slate-400">0</span>
           )}
         </td>
-        {BD_KEYS.map((bdKey) => {
-          const num = Number(bd?.[bdKey]) || 0;
-          return (
-            <td
-              key={bdKey}
-              className={`px-1.5 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums ${
-                num > 0 ? DOWNTIME_PALETTE[bdKey].readonlyCellClass : "text-slate-300"
-              }`}
-            >
-              {num > 0 ? num : "0"}
-            </td>
-          );
-        })}
-        <td
-          className={`px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums font-bold ${
-            totalBd > 0 ? TOTAL_DOWNTIME_THEME.cellClass : "text-slate-400"
-          }`}
-        >
-          {totalBd}m
-        </td>
-        <td className="px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums text-slate-600">
-          {bdPct}%
-        </td>
-        <td className="px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums whitespace-nowrap">
-          <div className="flex items-center justify-end gap-1.5">
-            <span className="text-[10px] text-slate-500">
-              {accountedMins}/{plannedMins}m
-            </span>
-            <span
-              className={`px-1.5 py-0.2 rounded text-[10px] font-extrabold border ${getOeeBadgeClass(
-                rowMetrics.oeePct
-              )}`}
-            >
-              {rowMetrics.oeePct}%
-            </span>
-          </div>
-        </td>
+        {(!mergedCtx || mergedCtx.isFirst) &&
+          BD_KEYS.map((bdKey) => {
+            const num = mergedCtx
+              ? Number(mergedCtx.combined[bdKey]) || 0
+              : Number(bd?.[bdKey]) || 0;
+            return (
+              <td
+                key={bdKey}
+                rowSpan={mergedCtx ? mergedCtx.rowSpan : undefined}
+                className={`px-1.5 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums ${
+                  mergedCtx ? "bg-sky-50/40 border-l border-slate-200 align-middle" : ""
+                } ${
+                  num > 0 ? DOWNTIME_PALETTE[bdKey].readonlyCellClass : "text-slate-300"
+                }`}
+              >
+                {num > 0 ? num : "0"}
+              </td>
+            );
+          })}
+        {(!mergedCtx || mergedCtx.isFirst) && (
+          <td
+            rowSpan={mergedCtx ? mergedCtx.rowSpan : undefined}
+            className={`px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums font-bold ${
+              mergedCtx ? "bg-sky-50/40 border-l border-slate-200 align-middle" : ""
+            } ${
+              (mergedCtx ? mergedCtx.groupTotalBd : totalBd) > 0
+                ? TOTAL_DOWNTIME_THEME.cellClass
+                : "text-slate-400"
+            }`}
+          >
+            {mergedCtx ? mergedCtx.groupTotalBd : totalBd}m
+          </td>
+        )}
+        {(!mergedCtx || mergedCtx.isFirst) && (
+          <td
+            rowSpan={mergedCtx ? mergedCtx.rowSpan : undefined}
+            className={`px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums text-slate-600 ${
+              mergedCtx ? "bg-sky-50/40 border-l border-slate-200 align-middle" : ""
+            }`}
+          >
+            {mergedCtx ? mergedCtx.groupBdPct : bdPct}%
+          </td>
+        )}
+        {(!mergedCtx || mergedCtx.isFirst) && (
+          <td
+            rowSpan={mergedCtx ? mergedCtx.rowSpan : undefined}
+            className={`px-2 py-1.5 border-r border-slate-200 text-right font-mono tabular-nums whitespace-nowrap ${
+              mergedCtx ? "bg-sky-50/40 border-l border-slate-200 align-middle" : ""
+            }`}
+          >
+            <div className="flex items-center justify-end gap-1.5">
+              <span className="text-[10px] text-slate-500">
+                {mergedCtx ? mergedCtx.groupAccountedMins : accountedMins}/
+                {mergedCtx ? mergedCtx.groupPlannedMins : plannedMins}m
+              </span>
+              <span
+                className={`px-1.5 py-0.2 rounded text-[10px] font-extrabold border ${getOeeBadgeClass(
+                  mergedCtx ? mergedCtx.groupOeePct : rowMetrics.oeePct
+                )}`}
+              >
+                {mergedCtx ? mergedCtx.groupOeePct : rowMetrics.oeePct}%
+              </span>
+            </div>
+          </td>
+        )}
         <td
           className="px-2 py-1.5 text-slate-600 max-w-48 truncate"
           title={row.remarks || ""}
@@ -592,7 +755,7 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
                         </div>
                       </td>
                     </tr>
-                    {sec.rows.map((row, idx) => renderMachineRow(row, idx))}
+                    {renderSectionRows(sec.rows)}
                     {renderTotalsRow(
                       `${sec.shift} Subtotal (${sec.rows.length} rows)`,
                       sec.metrics,
@@ -603,7 +766,7 @@ export const ShiftSheetReadOnlyContent: React.FC<ShiftSheetReadOnlyContentProps>
                   </React.Fragment>
                 ))
               ) : (
-                sortedRows.map((row, idx) => renderMachineRow(row, idx))
+                renderSectionRows(sortedRows)
               )}
             </tbody>
             {sortedRows.length > 0 && (

@@ -23,6 +23,10 @@ import {
   getDowntimeCategoryByHeader,
   TOTAL_DOWNTIME_THEME,
 } from "@/services/downtimePalette";
+import {
+  extractCombinedSplitTotals,
+  isMergedSplitGroup,
+} from "@/lib/splitAllocation";
 
 // ============================================================================
 // STYLING PALETTE & CONSTANTS (Lightweight Executive Design)
@@ -4253,12 +4257,18 @@ export function exportDailySheetViewExcel(params: ExportDailySheetViewParams): v
   // Sheet 1: Daily Shift Sheet
   // --------------------------------------------------------------------------
   const sortedRows = [...rows].sort((a, b) => {
+    const dCmp = (a.date || "").localeCompare(b.date || "");
+    if (dCmp !== 0) return dCmp;
     const sCmp = compareShiftsExport(a.shift || "", b.shift || "");
     if (sCmp !== 0) return sCmp;
+    const lCmp = (a.line || "").localeCompare(b.line || "");
+    if (lCmp !== 0) return lCmp;
     const srDiff = (Number(a.srNo) || 0) - (Number(b.srNo) || 0);
     if (srDiff !== 0) return srDiff;
     const mCmp = (a.machineName || "").localeCompare(b.machineName || "");
     if (mCmp !== 0) return mCmp;
+    const idCmp = (a.machineId || "").localeCompare(b.machineId || "");
+    if (idCmp !== 0) return idCmp;
     return (Number(a.runNo) || 1) - (Number(b.runNo) || 1);
   });
 
@@ -4294,49 +4304,139 @@ export function exportDailySheetViewExcel(params: ExportDailySheetViewParams): v
     "Remarks",
   ];
 
-  const sheetRows: (string | number)[][] = sortedRows.map((r, idx) => {
-    const bd = r.breakdown || {
-      noDisc: 0,
-      change: 0,
-      power: 0,
-      operator: 0,
-      machineBreakdown: 0,
-      fixProgSettings: 0,
-      miscellaneous: 0,
-    };
-    const totalBd = round2(Number(r.totalBreakdownMinutes) || calculateTotalBreakdown(bd));
-    const bdPct =
-      r.allocatedPlannedMinutes > 0
-        ? round2((totalBd / r.allocatedPlannedMinutes) * 100)
-        : 0;
-    const rowMetrics = calculateOeeMetrics([r]);
+  const shiftColOffset = isAllShifts ? 1 : 0;
+  const mergedColIndices = [
+    7 + shiftColOffset,  // OT (m)
+    11 + shiftColOffset, // NO/DISC
+    12 + shiftColOffset, // CHANGE
+    13 + shiftColOffset, // POWER
+    14 + shiftColOffset, // OPERATOR
+    15 + shiftColOffset, // BREAK DOWN
+    16 + shiftColOffset, // FIX/PROG
+    17 + shiftColOffset, // MISC.
+    18 + shiftColOffset, // Total BD (m)
+    19 + shiftColOffset, // BD %
+  ];
+  const sheetDataMerges: Array<{ startRowIndex: number; endRowIndex: number; colIndex: number }> = [];
+  const sheetRows: (string | number)[][] = [];
 
-    return [
-      ...(isAllShifts ? [r.shift || "—"] : []),
-      Number(r.srNo) || idx + 1,
-      r.isTempMachine ? `${r.machineName} [TEMP]` : r.machineName || "—",
-      r.line || "—",
-      (r.operatorName || "").trim() || "—",
-      r.itemName || r.itemId || "—",
-      r.operation || "—",
-      Number(r.cycleTime) || 0,
-      Math.max(0, Number(r.overtimeMinutes) || 0),
-      Number(r.stdOutput) || 0,
-      Number(r.actualOutput) || 0,
-      Number(r.rework) || 0,
-      round2(bd.noDisc || 0),
-      round2(bd.change || 0),
-      round2(bd.power || 0),
-      round2(bd.operator || 0),
-      round2(bd.machineBreakdown || 0),
-      round2(bd.fixProgSettings || 0),
-      round2(bd.miscellaneous || 0),
-      totalBd,
-      `${bdPct}%`,
-      `${rowMetrics.oeePct}%`,
-      (r.remarks || "").trim() || "—",
-    ];
-  });
+  let i = 0;
+  while (i < sortedRows.length) {
+    const r0 = sortedRows[i];
+    const isTemp = Boolean(r0.isTempMachine || r0.machineId?.startsWith("temp_"));
+    const gKey = `${r0.date || ""}__${(r0.shift || "").toLowerCase()}__${(r0.line || "").toLowerCase()}__${r0.machineId || r0.machineName || ""}__${isTemp}`;
+    let j = i + 1;
+    while (j < sortedRows.length) {
+      const next = sortedRows[j];
+      const nextIsTemp = Boolean(next.isTempMachine || next.machineId?.startsWith("temp_"));
+      const nextKey = `${next.date || ""}__${(next.shift || "").toLowerCase()}__${(next.line || "").toLowerCase()}__${next.machineId || next.machineName || ""}__${nextIsTemp}`;
+      if (nextKey !== gKey) break;
+      j++;
+    }
+
+    const group = sortedRows.slice(i, j);
+    const isMergedGroup = isMergedSplitGroup(group);
+
+    if (isMergedGroup) {
+      const combined = extractCombinedSplitTotals(group);
+      const groupTotalBd = round2(
+        combined.noDisc +
+          combined.change +
+          combined.power +
+          combined.operator +
+          combined.machineBreakdown +
+          combined.fixProgSettings +
+          combined.miscellaneous
+      );
+      const groupWorkingMins = group.reduce(
+        (sum, gr) => sum + (Number(gr.allocatedPlannedMinutes || gr.totalWorkingMinutes) || 0),
+        0
+      );
+      const groupBdPct =
+        groupWorkingMins > 0 ? round2((groupTotalBd / groupWorkingMins) * 100) : 0;
+
+      const startRowIndex = i;
+      const endRowIndex = j - 1;
+      for (const colIndex of mergedColIndices) {
+        sheetDataMerges.push({ startRowIndex, endRowIndex, colIndex });
+      }
+
+      group.forEach((r, splitIdx) => {
+        const rowMetrics = calculateOeeMetrics([r]);
+        const isFirst = splitIdx === 0;
+        sheetRows.push([
+          ...(isAllShifts ? [r.shift || "—"] : []),
+          Number(r.srNo) || i + splitIdx + 1,
+          `${r.isTempMachine ? `${r.machineName} [TEMP]` : r.machineName || "—"} (R${r.runNo || splitIdx + 1})`,
+          r.line || "—",
+          (r.operatorName || "").trim() || "—",
+          r.itemName || r.itemId || "—",
+          r.operation || "—",
+          Number(r.cycleTime) || 0,
+          isFirst ? combined.overtimeMinutes : "",
+          Number(r.stdOutput) || 0,
+          Number(r.actualOutput) || 0,
+          Number(r.rework) || 0,
+          isFirst ? combined.noDisc : "",
+          isFirst ? combined.change : "",
+          isFirst ? combined.power : "",
+          isFirst ? combined.operator : "",
+          isFirst ? combined.machineBreakdown : "",
+          isFirst ? combined.fixProgSettings : "",
+          isFirst ? combined.miscellaneous : "",
+          isFirst ? groupTotalBd : "",
+          isFirst ? `${groupBdPct}%` : "",
+          `${rowMetrics.oeePct}%`,
+          (r.remarks || "").trim() || "—",
+        ]);
+      });
+    } else {
+      group.forEach((r, offset) => {
+        const bd = r.breakdown || {
+          noDisc: 0,
+          change: 0,
+          power: 0,
+          operator: 0,
+          machineBreakdown: 0,
+          fixProgSettings: 0,
+          miscellaneous: 0,
+        };
+        const totalBd = round2(Number(r.totalBreakdownMinutes) || calculateTotalBreakdown(bd));
+        const bdPct =
+          r.allocatedPlannedMinutes > 0
+            ? round2((totalBd / r.allocatedPlannedMinutes) * 100)
+            : 0;
+        const rowMetrics = calculateOeeMetrics([r]);
+
+        sheetRows.push([
+          ...(isAllShifts ? [r.shift || "—"] : []),
+          Number(r.srNo) || i + offset + 1,
+          r.isTempMachine ? `${r.machineName} [TEMP]` : r.machineName || "—",
+          r.line || "—",
+          (r.operatorName || "").trim() || "—",
+          r.itemName || r.itemId || "—",
+          r.operation || "—",
+          Number(r.cycleTime) || 0,
+          Math.max(0, Number(r.overtimeMinutes) || 0),
+          Number(r.stdOutput) || 0,
+          Number(r.actualOutput) || 0,
+          Number(r.rework) || 0,
+          round2(bd.noDisc || 0),
+          round2(bd.change || 0),
+          round2(bd.power || 0),
+          round2(bd.operator || 0),
+          round2(bd.machineBreakdown || 0),
+          round2(bd.fixProgSettings || 0),
+          round2(bd.miscellaneous || 0),
+          totalBd,
+          `${bdPct}%`,
+          `${rowMetrics.oeePct}%`,
+          (r.remarks || "").trim() || "—",
+        ]);
+      });
+    }
+    i = j;
+  }
 
   const sheetTotals: (string | number)[] =
     sortedRows.length === 0
@@ -4376,6 +4476,7 @@ export function exportDailySheetViewExcel(params: ExportDailySheetViewParams): v
     headers: sheetHeaders,
     rows: sheetRows,
     totalsRow: sheetTotals.length > 0 ? sheetTotals : undefined,
+    dataMerges: sheetDataMerges.length > 0 ? sheetDataMerges : undefined,
   });
   XLSX.utils.book_append_sheet(wb, ws1, sanitizeSheetName("Daily Shift Sheet", usedNames));
 
