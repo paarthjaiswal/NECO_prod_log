@@ -1185,162 +1185,164 @@ export const AnalyticsPreview: React.FC<AnalyticsPreviewProps> = ({
       {/* TOP UNIFIED FILTER BAR (Compact & Responsive)                         */}
       {/* ==================================================================== */}
       <div className="bg-white rounded-lg border border-slate-200 p-3 shadow-2xs space-y-2.5">
-        {/* ROW 1: Date Controls */}
+        {/* ROW 1: Date Controls (Left) + Export Actions (Right) */}
         <div className="flex flex-wrap items-center justify-between gap-2.5">
-          {/* Quick Preset Pills */}
-          <div className="flex flex-wrap items-center gap-1">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mr-1 flex items-center gap-1">
-              <Calendar className="w-3.5 h-3.5 text-slate-400" />
-              <span>Range:</span>
-            </span>
-            {(
-              [
-                { key: "today", label: "Today" },
-                { key: "yesterday", label: "Yesterday" },
-                { key: "thisWeek", label: "This Week" },
-                { key: "lastWeek", label: "Last Week" },
-                { key: "thisMonth", label: "This Month" },
-              ] as const
-            ).map((p) => {
-              const isSelected = activePreset === p.key;
-              return (
-                <button
-                  key={p.key}
-                  type="button"
-                  onClick={() => handleSelectPreset(p.key)}
-                  className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
-                    isSelected
-                      ? "bg-slate-900 text-white shadow-2xs"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  {p.label}
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={handleSelectSingleDateMode}
-              className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
-                activePreset === "single"
-                  ? "bg-blue-700 text-white shadow-2xs"
-                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-              }`}
-              title="Inspect a single specific calendar day"
-            >
-              Single Date
-            </button>
-            <button
-              type="button"
-              onClick={handleSelectCustomRangeMode}
-              className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
-                activePreset === "custom"
-                  ? "bg-slate-900 text-white shadow-2xs"
-                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-              }`}
-              title="Select custom From and To dates"
-            >
-              Custom Range
-            </button>
-          </div>
-
-          {/* Date Pickers + Apply */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {activePreset === "single" ? (
-              <div className="flex items-center bg-slate-50 border border-blue-200 rounded overflow-hidden">
-                <button
-                  type="button"
-                  title="Previous day"
-                  onClick={() => handleSingleDateValueChange(shiftIsoDate(fromDate, -1))}
-                  className="px-2 py-1 text-slate-600 hover:text-slate-900 hover:bg-slate-200/80 border-r border-slate-200 transition-colors cursor-pointer"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
-                <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-slate-700">
-                  <input
-                    type="date"
-                    value={fromDate}
-                    onChange={(e) => {
-                      if (e.target.value) {
-                        handleSingleDateValueChange(e.target.value);
-                      }
-                    }}
-                    className="bg-transparent text-xs font-mono font-semibold text-slate-900 focus:outline-none cursor-pointer"
-                  />
-                  {getShortWeekday(fromDate) && (
-                    <span className="px-1.5 py-0.2 rounded bg-blue-100 text-blue-800 text-[10px] font-bold">
-                      {getShortWeekday(fromDate)}
-                    </span>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  title="Next day"
-                  onClick={() => handleSingleDateValueChange(shiftIsoDate(fromDate, 1))}
-                  className="px-2 py-1 text-slate-600 hover:text-slate-900 hover:bg-slate-200/80 border-l border-slate-200 transition-colors cursor-pointer"
-                >
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
-                  <span className="text-[11px] font-semibold text-slate-500">From:</span>
-                  <input
-                    type="date"
-                    value={fromDate}
-                    onChange={(e) => {
-                      setFromDate(e.target.value);
-                      setActivePreset("custom");
-                    }}
-                    className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
-                  />
-                </div>
-                <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
-                  <span className="text-[11px] font-semibold text-slate-500">To:</span>
-                  <input
-                    type="date"
-                    value={toDate}
-                    onChange={(e) => {
-                      setToDate(e.target.value);
-                      setActivePreset("custom");
-                    }}
-                    className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={handleApplyCustomDates}
-                  className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
-                >
-                  Apply
-                </button>
-              </>
-            )}
-
-            {/* Export buttons */}
-            <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200 ml-1">
+          {/* Left: Quick Preset Pills + Date / Custom Range Pickers Together */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mr-1 flex items-center gap-1">
+                <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                <span>Range:</span>
+              </span>
+              {(
+                [
+                  { key: "today", label: "Today" },
+                  { key: "yesterday", label: "Yesterday" },
+                  { key: "thisWeek", label: "This Week" },
+                  { key: "lastWeek", label: "Last Week" },
+                  { key: "thisMonth", label: "This Month" },
+                ] as const
+              ).map((p) => {
+                const isSelected = activePreset === p.key;
+                return (
+                  <button
+                    key={p.key}
+                    type="button"
+                    onClick={() => handleSelectPreset(p.key)}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
+                      isSelected
+                        ? "bg-slate-900 text-white shadow-2xs"
+                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
               <button
                 type="button"
-                disabled={filteredRows.length === 0}
-                onClick={handleExportFilteredWorkbook}
-                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-xs font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer transition-colors"
-                title="Export complete filter-aware multi-sheet Excel workbook"
+                onClick={handleSelectSingleDateMode}
+                className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
+                  activePreset === "single"
+                    ? "bg-blue-700 text-white shadow-2xs"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+                title="Inspect a single specific calendar day"
               >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-                <span>Export Filtered Excel</span>
+                Single Date
               </button>
               <button
                 type="button"
-                disabled={filteredRows.length === 0}
-                onClick={handleExportCSV}
-                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors"
-                title="Export raw shift logs as CSV"
+                onClick={handleSelectCustomRangeMode}
+                className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors cursor-pointer ${
+                  activePreset === "custom"
+                    ? "bg-slate-900 text-white shadow-2xs"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+                title="Select custom From and To dates"
               >
-                <Download className="w-3.5 h-3.5" />
-                <span>CSV</span>
+                Custom Range
               </button>
             </div>
+
+            {/* Date Pickers + Apply (Right next to Range pills on the left) */}
+            <div className="flex items-center gap-1.5 flex-wrap sm:pl-2 sm:border-l sm:border-slate-200">
+              {activePreset === "single" ? (
+                <div className="flex items-center bg-slate-50 border border-blue-200 rounded overflow-hidden">
+                  <button
+                    type="button"
+                    title="Previous day"
+                    onClick={() => handleSingleDateValueChange(shiftIsoDate(fromDate, -1))}
+                    className="px-2 py-1 text-slate-600 hover:text-slate-900 hover:bg-slate-200/80 border-r border-slate-200 transition-colors cursor-pointer"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                  </button>
+                  <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-slate-700">
+                    <input
+                      type="date"
+                      value={fromDate}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          handleSingleDateValueChange(e.target.value);
+                        }
+                      }}
+                      className="bg-transparent text-xs font-mono font-semibold text-slate-900 focus:outline-none cursor-pointer"
+                    />
+                    {getShortWeekday(fromDate) && (
+                      <span className="px-1.5 py-0.2 rounded bg-blue-100 text-blue-800 text-[10px] font-bold">
+                        {getShortWeekday(fromDate)}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    title="Next day"
+                    onClick={() => handleSingleDateValueChange(shiftIsoDate(fromDate, 1))}
+                    className="px-2 py-1 text-slate-600 hover:text-slate-900 hover:bg-slate-200/80 border-l border-slate-200 transition-colors cursor-pointer"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+                    <span className="text-[11px] font-semibold text-slate-500">From:</span>
+                    <input
+                      type="date"
+                      value={fromDate}
+                      onChange={(e) => {
+                        setFromDate(e.target.value);
+                        setActivePreset("custom");
+                      }}
+                      className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+                    <span className="text-[11px] font-semibold text-slate-500">To:</span>
+                    <input
+                      type="date"
+                      value={toDate}
+                      onChange={(e) => {
+                        setToDate(e.target.value);
+                        setActivePreset("custom");
+                      }}
+                      className="bg-transparent text-xs font-mono font-medium text-slate-800 focus:outline-none cursor-pointer"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleApplyCustomDates}
+                    className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+                  >
+                    Apply
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Right: Export buttons */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              disabled={filteredRows.length === 0}
+              onClick={handleExportFilteredWorkbook}
+              className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-xs font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer transition-colors"
+              title="Export complete filter-aware multi-sheet Excel workbook"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>Export Filtered Excel</span>
+            </button>
+            <button
+              type="button"
+              disabled={filteredRows.length === 0}
+              onClick={handleExportCSV}
+              className="px-2 py-1 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 rounded text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+              title="Export raw shift logs as CSV"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>CSV</span>
+            </button>
           </div>
         </div>
 
